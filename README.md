@@ -6,7 +6,7 @@ Download the Windows portable app from [Releases](https://github.com/flujo-app/s
 
 
 # How it works:
-it just works.
+it just works. This diagram proves it.
 
 <img width="1800" height="1260" alt="image" src="https://github.com/user-attachments/assets/51dc3f86-20e7-42e6-ad4c-76a2cb0c28fa" />
 
