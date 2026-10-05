@@ -14,7 +14,7 @@
     "start": "electron .",
     "cli": "node bin/seagulled.mjs",
     "dev": "node bin/seagulled.mjs serve",
-    "test": "node --test tests/*.test.mjs upstream/swarm-teams/test/fleet.test.mjs upstream/swarm-teams/test/recovery.test.mjs upstream/swarm-teams/test/diagnostics-guard.test.mjs upstream/swarm-teams/test/specialists.test.mjs",
+    "test": "node --test tests/*.test.mjs upstream/swarm-teams/test/fleet.test.mjs upstream/swarm-teams/test/recovery.test.mjs upstream/swarm-teams/test/diagnostics-guard.test.mjs upstream/swarm-teams/test/specialists.test.mjs upstream/swarm-teams/test/flujo-client-cancellation.test.mjs",
     "package": "electron-builder --dir",
     "dist": "electron-builder --win portable --publish never",
     "check": "node scripts/check-release.mjs",

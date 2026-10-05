@@ -100,5 +100,12 @@
     "pullRequest": "https://github.com/flujo-app/iambrokeplshlp/pull/61",
     "scope": "deferred initial Worker staffing, lead-only flows, installed tool inventories and explicit Fly environment/cloud record directory",
     "merged": false
+  },
+  "clientCancellationSuccessor": {
+    "privateEngineCommit": "38042b976de9a927e0c5cba090581e3796067b8f",
+    "upstreamCommit": "e80c68256bc7009300fc5e213834dc19748b6639",
+    "pullRequest": "https://github.com/flujo-app/iambrokeplshlp/pull/62",
+    "scope": "optional client cancellation and deadlines, unknown original submissions, absolute HTTP timeout and installed MCP inventory lookup",
+    "merged": false
   }
 }
