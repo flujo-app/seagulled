@@ -32,7 +32,7 @@ def main():
     source = Path(__file__).resolve().parent
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         result = subprocess.run([sys.executable, '-B', '-m', 'modal', 'deploy', str(source / 'app.py')],
-                                cwd=source, stdout=stdout, stderr=stderr, timeout=30 * 60,
+                                cwd=source, stdout=stdout, stderr=stderr,
                                 env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}, check=False)
         if result.returncode:
             raise RuntimeError('The isolated Modal deployment did not complete.')

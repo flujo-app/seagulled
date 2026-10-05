@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { PrivateH100Manager } from '../src/providers/private-h100.mjs';
 import { ProviderManager } from '../src/providers/index.mjs';
 
-function fixture(dataDir, { failProvision = false, holdRun = false, onCredentialSet } = {}) {
+function fixture(dataDir, { failProvision = false, holdProvision = false,
+  holdRun = false, missingApp = false, onCredentialSet } = {}) {
   const calls = [];
   const secrets = new Map();
   let appName, token;
@@ -20,18 +21,22 @@ function fixture(dataDir, { failProvision = false, holdRun = false, onCredential
       delete: async id => { secrets.delete(id); },
     },
     commandRunner: async (command, args, options) => {
-      calls.push({ command, args, env: options.env });
+      calls.push({ command, args, env: options.env, killTree: options.killTree });
       appName = options.env.SEAGULLED_PRIVATE_APP_NAME;
       assert.match(appName, /^seagulled-qwen-[a-f0-9]{12}$/);
       assert.equal(options.env.O_INFER_APP_NAME, undefined);
       if (args.some(arg => arg.endsWith('provision.py'))) {
         token = JSON.parse(options.input).token;
+        if (holdProvision) return new Promise((_resolve, reject) => {
+          options.signal.addEventListener('abort', () => reject(new Error('fixture remote command stopped')),
+            { once: true });
+        });
         if (failProvision) throw new Error('fixture: remote outcome unknown');
         return { code: 0, stdout: JSON.stringify({ endpoint: `https://owner--${appName}-inference.modal.run` }) };
       }
       if (args.includes('profile') && args.includes('list')) return { code: 0,
         stdout: JSON.stringify([{ name: 'seagulled', workspace, active: true }]) };
-      if (args.includes('stop')) return { code: 0, stdout: '' };
+      if (args.includes('stop')) return { code: missingApp ? 1 : 0, stdout: '' };
       if (args.includes('app') && args.includes('list')) return { code: 0,
         stdout: JSON.stringify([{ description: appName, state: 'Stopped' }]) };
       if (args.includes('secret') && args.includes('list')) return { code: 0, stdout: '[]' };
@@ -94,6 +99,7 @@ test('isolated H100 enable, run, and retirement use only owned resources', async
     assert.equal(secrets.size, 0);
     assert.ok(calls.some(call => call.args.includes('stop')));
     assert.ok(calls.some(call => call.args.includes('delete')));
+    assert.equal(calls.find(call => call.args.some(arg => arg.endsWith('provision.py'))).killTree, true);
     assert.ok(calls.every(call => call.command === 'bundled-python.exe'));
   } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });
@@ -117,6 +123,49 @@ test('uncertain deployment keeps its attempt and cannot be replayed', async () =
     await assert.rejects(recovered.manager.enable({ budgetUsd: 50, accountConnected: true,
       helperUsable: true, workerAllowed: true }), error => error.outcome === 'not_applied');
     assert.equal(recovered.calls.length, 0);
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('partial startup with no stoppable app retains cleanup and spend uncertainty', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'seagulled-private-test-'));
+  try {
+    const { manager, calls } = fixture(dataDir, { failProvision: true, missingApp: true });
+    await assert.rejects(manager.enable({ budgetUsd: 50, accountConnected: true,
+      helperUsable: true, workerAllowed: true, admissionId: 'admission-partial' }),
+    error => error.code === 'UNKNOWN' && error.reservation.id === 'admission-partial');
+    const before = calls.length;
+    await assert.rejects(manager.disable({ accountConnected: true, helperUsable: true }),
+      error => error.code === 'UNKNOWN');
+    const cleanupCalls = calls.slice(before);
+    assert.equal(cleanupCalls.some(call => call.args.includes('stop')), true);
+    assert.equal(cleanupCalls.some(call => call.args.includes('delete')), false);
+    const state = manager.safeState({ accountConnected: true, helperUsable: true });
+    assert.equal(state.status, 'unknown');
+    assert.equal(state.cleanupVerified, false);
+    const record = JSON.parse(readFileSync(join(dataDir, 'private-h100', 'attempt.json'), 'utf8'));
+    assert.equal(record.reservation.id, 'admission-partial');
+    assert.equal(record.cleanupVerified, undefined);
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('Stop after remote provisioning entry retains an unknown admission hold', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'seagulled-private-test-'));
+  try {
+    const { manager, calls } = fixture(dataDir, { holdProvision: true });
+    const controller = new AbortController();
+    const enable = manager.enable({ budgetUsd: 50, accountConnected: true, helperUsable: true,
+      workerAllowed: true, admissionId: 'admission-stopped', signal: controller.signal });
+    const deadline = Date.now() + 3000;
+    while (!calls.some(call => call.args.some(arg => arg.endsWith('provision.py'))) && Date.now() < deadline)
+      await new Promise(resolve => setTimeout(resolve, 1));
+    assert.ok(calls.some(call => call.args.some(arg => arg.endsWith('provision.py'))));
+    controller.abort();
+    await assert.rejects(enable, error => error.code === 'UNKNOWN'
+      && error.reservation.id === 'admission-stopped');
+    const record = JSON.parse(readFileSync(join(dataDir, 'private-h100', 'attempt.json'), 'utf8'));
+    assert.equal(record.phase, 'unknown');
+    assert.equal(record.reservation.id, 'admission-stopped');
+    assert.equal(calls.find(call => call.args.some(arg => arg.endsWith('provision.py'))).killTree, true);
   } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });
 

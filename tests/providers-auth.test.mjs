@@ -225,11 +225,17 @@ test('Fly account lease rechecks a private personal config with the bundled help
       ptyCheck: async () => false,
       commandRunner: async (command, args, options) => {
         calls.push({ command, args, env: options.env });
+        if (args.join(' ') === 'orgs list --json') return { code: 0,
+          stdout: '{"production":"Existing team","personal":"Personal"}' };
+        if (args.join(' ') === 'orgs show production --json') return { code: 0,
+          stdout: '{"Slug":"production","Type":"SHARED","Apps":{"Nodes":[{"Name":"important"}]}}' };
+        if (args.join(' ') === 'orgs show personal --json') return { code: 0,
+          stdout: '{"Slug":"personal","Type":"PERSONAL","Apps":{"Nodes":[]}}' };
         return { code: 0, stdout: args.join(' ') === 'auth whoami --json'
           ? '{"email":"human@example.com"}' : 'fixture-version' };
       } });
     const lease = await manager.flyAccountLease();
-    assert.deepEqual(lease, { flyctlPath, flyConfigDir, scope: 'private' });
+    assert.deepEqual(lease, { available: true, flyctlPath, flyConfigDir, scope: 'private', orgSlug: 'personal' });
     assert.ok(calls.every(call => call.command === flyctlPath && call.env.FLY_API_TOKEN === undefined
       && call.env.BROWSER === undefined));
     assert.ok(calls.filter(call => call.args.join(' ') === 'auth whoami --json')
@@ -258,11 +264,16 @@ test('Fly account lease supports verified shared default config without copying 
       ptyCheck: async () => false,
       commandRunner: async (command, args, options) => {
         calls.push({ command, args, env: options.env });
+        if (args.join(' ') === 'orgs list --json') return { code: 0, stdout: '{"personal":"Personal"}' };
+        if (args.join(' ') === 'orgs show personal --json') return { code: 0,
+          stdout: '{"Slug":"personal","Type":"PERSONAL","Apps":{"Nodes":[]}}' };
         return { code: 0, stdout: args.join(' ') === 'auth whoami --json'
           ? '{"email":"human@example.com"}' : 'fixture-version' };
       } });
-    assert.deepEqual(await manager.flyAccountLease(), { flyctlPath, flyConfigDir, scope: 'shared' });
-    assert.deepEqual(await manager.flyFleetLease(), { flyctlPath, flyConfigDir, scope: 'shared' });
+    assert.deepEqual(await manager.flyAccountLease(), { available: true, flyctlPath, flyConfigDir,
+      scope: 'shared', orgSlug: 'personal' });
+    assert.deepEqual(await manager.flyFleetLease(), { available: true, flyctlPath, flyConfigDir,
+      scope: 'shared', orgSlug: 'personal' });
     assert.ok(calls.every(call => call.env.FLY_CONFIG_DIR === flyConfigDir
       && call.env.FLY_API_TOKEN === undefined));
     assert.deepEqual(manager.authEnvironment('fly'), {});
@@ -286,15 +297,63 @@ test('Fly account lease rejects service identity, missing account config, and un
       commandRunner: async (_command, args) => ({ code: 0,
         stdout: args.join(' ') === 'auth whoami --json'
           ? '{"email":"worker@tokens.fly.io"}' : 'fixture-version' }) });
-    assert.equal(await manager.flyAccountLease(), null);
+    assert.equal((await manager.flyAccountLease()).available, false);
     const personal = new ProviderManager({ dataDir: join(root, 'other-providers'), helperRoot,
       env: { [process.platform === 'win32' ? 'USERPROFILE' : 'HOME']: home }, ptyCheck: async () => false,
       commandRunner: async (_command, args) => ({ code: 0,
         stdout: args.join(' ') === 'auth whoami --json'
           ? '{"email":"human@example.com"}' : 'fixture-version' }) });
-    assert.equal(await personal.flyAccountLease(), null);
+    assert.equal((await personal.flyAccountLease()).available, false);
     const unbundled = new ProviderManager({ dataDir: join(root, 'providers'), commands: { fly: flyctlPath },
       commandRunner: async () => ({ code: 0, stdout: '{"email":"human@example.com"}' }) });
-    assert.equal(await unbundled.flyAccountLease(), null);
+    assert.equal((await unbundled.flyAccountLease()).available, false);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Fly organization lease refuses ambiguous, shared-only, occupied, and malformed metadata', async () => {
+  const cases = [
+    { name: 'shared-only', list: { production: 'Private production' },
+      show: { production: { Slug: 'production', Type: 'SHARED', Apps: { Nodes: [] } } } },
+    { name: 'two-personal', list: { personal: 'One', 'other-personal': 'Two' },
+      show: { personal: { Slug: 'personal', Type: 'PERSONAL', Apps: { Nodes: [] } },
+        'other-personal': { Slug: 'other-personal', Type: 'PERSONAL', Apps: { Nodes: [] } } } },
+    { name: 'occupied-personal', list: { personal: 'Private production' },
+      show: { personal: { Slug: 'personal', Type: 'PERSONAL', Apps: { Nodes: [{ Name: 'production-app' }] } } } },
+    { name: 'unknown-type', list: { personal: 'Private' },
+      show: { personal: { Slug: 'personal', Type: 'UNKNOWN', Apps: { Nodes: [] } } } },
+    { name: 'missing-app-evidence', list: { personal: 'Private' },
+      show: { personal: { Slug: 'personal', Type: 'PERSONAL' } } },
+  ];
+  for (const scenario of cases) {
+    const root = mkdtempSync(join(tmpdir(), 'seagulled-fly-org-'));
+    const helperRoot = join(root, 'helpers');
+    const flyctlPath = join(helperRoot, 'fly', process.platform === 'win32' ? 'flyctl.exe' : 'flyctl');
+    const flyConfigDir = join(root, 'providers', 'auth', 'fly');
+    mkdirSync(join(flyctlPath, '..'), { recursive: true });
+    mkdirSync(flyConfigDir, { recursive: true });
+    writeFileSync(flyctlPath, 'fixture');
+    writeFileSync(join(flyConfigDir, 'config.yml'), 'fixture');
+    const calls = [];
+    try {
+      const manager = new ProviderManager({ dataDir: join(root, 'providers'), helperRoot,
+        env: { [process.platform === 'win32' ? 'USERPROFILE' : 'HOME']: join(root, 'home'),
+          FLY_API_TOKEN: 'inherited-service-secret' }, ptyCheck: async () => false,
+        commandRunner: async (_command, args, options) => {
+          calls.push({ args, env: options.env });
+          const command = args.join(' ');
+          if (command === '--version') return { code: 0, stdout: 'fixture-version' };
+          if (command === 'auth whoami --json') return { code: 0, stdout: '{"email":"human@example.com"}' };
+          if (command === 'orgs list --json') return { code: 0, stdout: JSON.stringify(scenario.list) };
+          if (args[0] === 'orgs' && args[1] === 'show') return { code: 0,
+            stdout: JSON.stringify(scenario.show[args[2]]) };
+          throw new Error('Unexpected Fly command');
+        } });
+      const result = await manager.flyFleetLease();
+      assert.equal(result.available, false, scenario.name);
+      assert.match(result.detail, /personal Fly organization/i);
+      assert.equal(JSON.stringify(result).includes('production') || JSON.stringify(result).includes(root), false);
+      assert.ok(calls.every(call => call.env.FLY_API_TOKEN === undefined
+        && !call.args.includes('create') && !call.args.includes('deploy')));
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }
 });

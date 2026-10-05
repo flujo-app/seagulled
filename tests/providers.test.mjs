@@ -40,6 +40,9 @@ test('subscription CLI returns token usage with non-billed subscription kind', a
   assert.equal(claude.text, 'Claude answer');
   assert.ok(calls.some(([, args]) => args.includes('--max-budget-usd')));
   assert.ok(calls.some(([, args]) => args.includes('--sandbox') && args.includes('read-only')));
+  const nativeCalls = calls.filter(([, args]) => args[0] === 'exec' || args[0] === '-p');
+  assert.equal(nativeCalls.length, 2);
+  assert.ok(nativeCalls.every(([, , options]) => options.killTree === true));
 });
 
 test('API calls are bounded and do not invent billed spend', async () => {

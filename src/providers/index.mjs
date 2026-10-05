@@ -279,21 +279,54 @@ export class ProviderManager {
 
   /** Backend-only verified personal Fly identity and bundled command; no token or public path. */
   async flyAccountLease({ signal } = {}) {
+    const unavailable = (detail) => ({ available: false, detail });
+    if (signal?.aborted) throw cancelled('not_applied');
     const helper = this.authHelpers.fly;
-    if (!helper.bundled || !helper.usable || !isAbsolute(helper.command)) return null;
-    try { if (!statSync(helper.command).isFile()) return null; }
-    catch { return null; }
+    if (!helper.bundled || !helper.usable || !isAbsolute(helper.command))
+      return unavailable('The packaged Fly helper is unavailable.');
+    try { if (!statSync(helper.command).isFile()) return unavailable('The packaged Fly helper is unavailable.'); }
+    catch { return unavailable('The packaged Fly helper is unavailable.'); }
     let status;
     try { status = await this.#accountStatus('fly', signal); }
-    catch (error) { if (error?.name === 'AbortError') throw error; return null; }
-    if (!status.connected) return null;
+    catch (error) { if (error?.name === 'AbortError') throw error;
+      return unavailable('Fly account sign-in could not be verified.'); }
+    if (!status.connected) return unavailable('Sign in to a personal Fly account before starting isolated Workers.');
     const scope = this.authScope.get('fly');
     const flyConfigDir = scope === 'private' ? this.#privateAuthPath('fly')
       : scope === 'shared' ? this.#sharedFlyConfigDir() : null;
-    if (!flyConfigDir) return null;
-    try { if (!statSync(join(flyConfigDir, 'config.yml')).isFile()) return null; }
-    catch { return null; }
-    return { flyctlPath: helper.command, flyConfigDir, scope };
+    if (!flyConfigDir) return unavailable('Fly account sign-in could not be verified.');
+    try { if (!statSync(join(flyConfigDir, 'config.yml')).isFile())
+      return unavailable('Fly account sign-in could not be verified.'); }
+    catch { return unavailable('Fly account sign-in could not be verified.'); }
+    const env = this.#authEnv({ id: 'fly', scope, status: true });
+    const organizationUnavailable = () => unavailable('No single unused personal Fly organization could be verified for isolated Workers.');
+    const read = async (args) => {
+      if (signal?.aborted) throw cancelled('not_applied');
+      const result = await this.commandRunner(helper.command, args,
+        { signal, timeoutMs: 10_000, maxBytes: 64_000, env });
+      return result?.code === 0 ? json(result.stdout) : null;
+    };
+    try {
+      // This bundled Flyctl version lists slug-to-name JSON; type is available only from show.
+      const listed = await read(['orgs', 'list', '--json']);
+      if (!listed || Array.isArray(listed) || typeof listed !== 'object') return organizationUnavailable();
+      const entries = Object.entries(listed);
+      if (entries.length < 1 || entries.length > 12 || entries.some(([slug, name]) =>
+        !/^[a-z0-9][a-z0-9-]{0,62}$/.test(slug) || typeof name !== 'string')) return organizationUnavailable();
+      const personal = [];
+      for (const [slug] of entries) {
+        const details = await read(['orgs', 'show', slug, '--json']);
+        if (!details || Array.isArray(details) || details.Slug !== slug
+          || !['PERSONAL', 'SHARED'].includes(details.Type)) return organizationUnavailable();
+        if (details.Type === 'PERSONAL') personal.push(details);
+      }
+      if (personal.length !== 1 || !Array.isArray(personal[0].Apps?.Nodes)
+        || personal[0].Apps.Nodes.length !== 0) return organizationUnavailable();
+      return { available: true, flyctlPath: helper.command, flyConfigDir, scope, orgSlug: personal[0].Slug };
+    } catch (error) {
+      if (error?.name === 'AbortError') throw error;
+      return organizationUnavailable();
+    }
   }
 
   async flyFleetLease(options) { return this.flyAccountLease(options); }
@@ -478,7 +511,8 @@ export class ProviderManager {
           if (/KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL|AUTH/i.test(key) && key !== 'CODEX_HOME') delete env[key];
           if (/^CODEX_(?:PERMISSION_PROFILE|TASK_WORKSPACE_VERIFYING_IDENTITY|THREAD_ID|SESSION_ID|CI|INTERNAL_ORIGINATOR_OVERRIDE)$/i.test(key)) delete env[key];
         }
-        const result = await this.commandRunner(this.commands.codex, args, { cwd, input: prompt, signal, timeoutMs: 120_000, maxBytes: 256_000, env });
+        const result = await this.commandRunner(this.commands.codex, args, { cwd, input: prompt, signal,
+          timeoutMs: 120_000, maxBytes: 256_000, env, killTree: true });
         if (result.code !== 0) throw new Error('Codex could not complete the request. Check native sign-in and model access.');
         const events = result.stdout.split(/\r?\n/).map(json).filter(Boolean);
         let text = safeText(events.filter((event) => event.type === 'item.completed' && event.item?.type === 'agent_message').map((event) => event.item.text).join('\n'));
@@ -496,7 +530,8 @@ export class ProviderManager {
       const args = ['-p', '-', '--output-format', 'json', '--no-session-persistence', '--restricted', '--permission-mode', 'plan', '--max-turns', '1'];
       if (Number.isFinite(maxUsd)) args.push('--max-budget-usd', String(Math.min(maxUsd, 100)));
       if (connection.model) args.push('--model', connection.model);
-      const result = await this.commandRunner(this.commands.claude, args, { cwd, input: prompt, signal, timeoutMs: 120_000, maxBytes: 256_000, env: this.env });
+      const result = await this.commandRunner(this.commands.claude, args, { cwd, input: prompt, signal,
+        timeoutMs: 120_000, maxBytes: 256_000, env: this.env, killTree: true });
       const body = json(result.stdout);
       if (result.code !== 0 || body?.is_error) {
         if (/disabled.*subscription access|subscription access.*disabled/i.test(String(body?.result ?? ''))) this.detected.set('claude', { ...this.detected.get('claude'), blocked: true });

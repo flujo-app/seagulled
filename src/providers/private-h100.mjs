@@ -185,7 +185,7 @@ export class PrivateH100Manager {
       remoteStarted = true;
       const result = await this.commandRunner(this.modalCommand, ['-B', join(source, 'provision.py')], {
         signal, timeoutMs: MAX_REQUEST_MS + 2 * 60_000, input: JSON.stringify({ token }),
-        maxBytes: 64_000, env: this.#environment(appName),
+        maxBytes: 64_000, env: this.#environment(appName), killTree: true,
       });
       const endpoint = result?.code === 0 && ownedEndpoint(json(result.stdout)?.endpoint, appName);
       if (!endpoint) throw safeError();
