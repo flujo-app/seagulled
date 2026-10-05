@@ -173,15 +173,32 @@ export class ProviderManager {
     }
   }
 
-  async #authIdentity(id, scope, signal) {
+  async #flyIdentity(scope, signal) {
     try {
-      const result = await this.commandRunner(this.commands[id], id === 'fly' ? ['auth', 'whoami', '--json'] : [...this.modalCommandArgs, 'token', 'info'],
+      const result = await this.commandRunner(this.commands.fly, ['auth', 'whoami', '--json'],
+        { signal, timeoutMs: 7000, maxBytes: 16_000, env: this.#authEnv({ id: 'fly', scope, status: true }) });
+      if (result?.code !== 0) return null;
+      const email = json(result.stdout)?.email;
+      return typeof email === 'string' && email.trim() && !/@tokens\.fly\.io$/i.test(email.trim())
+        ? email.trim().toLowerCase() : null;
+    } catch (error) {
+      if (error?.name === 'AbortError') throw error;
+      return null;
+    }
+  }
+
+  #flyAccountRef(email, scope, flyConfigDir, orgSlug) {
+    return `fly-account-sha256:${createHash('sha256').update(JSON.stringify([
+      email, scope, resolve(flyConfigDir), orgSlug,
+    ])).digest('hex')}`;
+  }
+
+  async #authIdentity(id, scope, signal) {
+    if (id === 'fly') return Boolean(await this.#flyIdentity(scope, signal));
+    try {
+      const result = await this.commandRunner(this.commands[id], [...this.modalCommandArgs, 'token', 'info'],
         { signal, timeoutMs: 7000, maxBytes: 16_000, env: this.#authEnv({ id, scope, status: true }) });
       if (result?.code !== 0) return false;
-      if (id === 'fly') {
-        const email = json(result.stdout)?.email;
-        return typeof email === 'string' && email.length > 0 && !/@tokens\.fly\.io$/i.test(email);
-      }
       return !/Service User:/i.test(result.stdout ?? '') && /(?:^|\s)User:/i.test(result.stdout ?? '');
     } catch (error) {
       if (error?.name === 'AbortError') throw error;
@@ -299,6 +316,8 @@ export class ProviderManager {
       return unavailable('Fly account sign-in could not be verified.'); }
     catch { return unavailable('Fly account sign-in could not be verified.'); }
     const env = this.#authEnv({ id: 'fly', scope, status: true });
+    const accountEmail = await this.#flyIdentity(scope, signal);
+    if (!accountEmail) return unavailable('Fly account sign-in could not be verified.');
     const organizationUnavailable = () => unavailable('No single unused personal Fly organization could be verified for isolated Workers.');
     const read = async (args) => {
       if (signal?.aborted) throw cancelled('not_applied');
@@ -322,10 +341,68 @@ export class ProviderManager {
       }
       if (personal.length !== 1 || !Array.isArray(personal[0].Apps?.Nodes)
         || personal[0].Apps.Nodes.length !== 0) return organizationUnavailable();
-      return { available: true, flyctlPath: helper.command, flyConfigDir, scope, orgSlug: personal[0].Slug };
+      if (await this.#flyIdentity(scope, signal) !== accountEmail) {
+        return unavailable('Fly account changed while verifying its organization.');
+      }
+      const accountRef = this.#flyAccountRef(accountEmail, scope, flyConfigDir, personal[0].Slug);
+      return { available: true, flyctlPath: helper.command, flyConfigDir, scope,
+        orgSlug: personal[0].Slug, accountRef };
     } catch (error) {
       if (error?.name === 'AbortError') throw error;
       return organizationUnavailable();
+    }
+  }
+
+  /** Backend-only continuation fence. Existing goal apps may now occupy this org. */
+  async assertFlyAccountLeaseCurrent(lease, { signal } = {}) {
+    if (signal?.aborted) throw cancelled('not_applied');
+    const changed = () => unavailable('The selected Fly account or personal organization changed.');
+    const helper = this.authHelpers.fly;
+    if (!lease || lease.available !== true || !helper.bundled || !helper.usable
+      || !isAbsolute(helper.command) || lease.flyctlPath !== helper.command
+      || !['private', 'shared'].includes(lease.scope)
+      || !/^[a-z0-9][a-z0-9-]{0,62}$/.test(lease.orgSlug ?? '')
+      || !/^fly-account-sha256:[a-f0-9]{64}$/.test(lease.accountRef ?? '')) throw changed();
+    try { if (!statSync(helper.command).isFile()) throw changed(); }
+    catch { throw changed(); }
+    const status = await this.#accountStatus('fly', signal);
+    if (!status.connected || this.authScope.get('fly') !== lease.scope) throw changed();
+    const flyConfigDir = lease.scope === 'private' ? this.#privateAuthPath('fly') : this.#sharedFlyConfigDir();
+    if (lease.flyConfigDir !== flyConfigDir) throw changed();
+    try { if (!statSync(join(flyConfigDir, 'config.yml')).isFile()) throw changed(); }
+    catch { throw changed(); }
+    const email = await this.#flyIdentity(lease.scope, signal);
+    if (!email || this.#flyAccountRef(email, lease.scope, flyConfigDir, lease.orgSlug) !== lease.accountRef) {
+      throw changed();
+    }
+    const env = this.#authEnv({ id: 'fly', scope: lease.scope, status: true });
+    const read = async (args) => {
+      if (signal?.aborted) throw cancelled('not_applied');
+      const result = await this.commandRunner(helper.command, args,
+        { signal, timeoutMs: 10_000, maxBytes: 64_000, env });
+      return result?.code === 0 ? json(result.stdout) : null;
+    };
+    try {
+      const listed = await read(['orgs', 'list', '--json']);
+      if (!listed || Array.isArray(listed) || typeof listed !== 'object') throw changed();
+      const entries = Object.entries(listed);
+      if (entries.length < 1 || entries.length > 12 || entries.some(([slug, name]) =>
+        !/^[a-z0-9][a-z0-9-]{0,62}$/.test(slug) || typeof name !== 'string')) throw changed();
+      const personal = [];
+      for (const [slug] of entries) {
+        const details = await read(['orgs', 'show', slug, '--json']);
+        if (!details || Array.isArray(details) || details.Slug !== slug
+          || !['PERSONAL', 'SHARED'].includes(details.Type)) throw changed();
+        if (details.Type === 'PERSONAL') personal.push(details);
+      }
+      if (personal.length !== 1 || personal[0].Slug !== lease.orgSlug
+        || !Array.isArray(personal[0].Apps?.Nodes)) throw changed();
+      if (await this.#flyIdentity(lease.scope, signal) !== email) throw changed();
+      if (signal?.aborted) throw cancelled('not_applied');
+      return true;
+    } catch (error) {
+      if (error?.name === 'AbortError') throw error;
+      throw changed();
     }
   }
 

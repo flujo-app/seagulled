@@ -218,6 +218,11 @@ test('Fly account lease rechecks a private personal config with the bundled help
   writeFileSync(flyctlPath, 'fixture');
   writeFileSync(join(flyConfigDir, 'config.yml'), 'fixture-private-config');
   const calls = [];
+  let email = 'human@example.com';
+  let changeDuringOrgList = false;
+  let personalType = 'PERSONAL';
+  let personalSlug = 'personal';
+  let personalApps = [];
   try {
     const manager = new ProviderManager({ dataDir, helperRoot,
       env: { [process.platform === 'win32' ? 'USERPROFILE' : 'HOME']: home,
@@ -225,23 +230,61 @@ test('Fly account lease rechecks a private personal config with the bundled help
       ptyCheck: async () => false,
       commandRunner: async (command, args, options) => {
         calls.push({ command, args, env: options.env });
-        if (args.join(' ') === 'orgs list --json') return { code: 0,
-          stdout: '{"production":"Existing team","personal":"Personal"}' };
+        if (args.join(' ') === 'orgs list --json') {
+          if (changeDuringOrgList) email = 'changed@example.com';
+          return { code: 0, stdout: '{"production":"Existing team","personal":"Personal"}' };
+        }
         if (args.join(' ') === 'orgs show production --json') return { code: 0,
           stdout: '{"Slug":"production","Type":"SHARED","Apps":{"Nodes":[{"Name":"important"}]}}' };
         if (args.join(' ') === 'orgs show personal --json') return { code: 0,
-          stdout: '{"Slug":"personal","Type":"PERSONAL","Apps":{"Nodes":[]}}' };
+          stdout: JSON.stringify({ Slug: personalSlug, Type: personalType, Apps: { Nodes: personalApps } }) };
         return { code: 0, stdout: args.join(' ') === 'auth whoami --json'
-          ? '{"email":"human@example.com"}' : 'fixture-version' };
+          ? JSON.stringify({ email }) : 'fixture-version' };
       } });
     const lease = await manager.flyAccountLease();
-    assert.deepEqual(lease, { available: true, flyctlPath, flyConfigDir, scope: 'private', orgSlug: 'personal' });
+    assert.match(lease.accountRef, /^fly-account-sha256:[a-f0-9]{64}$/);
+    assert.deepEqual(lease, { available: true, flyctlPath, flyConfigDir, scope: 'private',
+      orgSlug: 'personal', accountRef: lease.accountRef });
+    assert.equal((await manager.flyFleetLease()).accountRef, lease.accountRef);
+    email = 'another-person@example.com';
+    assert.notEqual((await manager.flyAccountLease()).accountRef, lease.accountRef);
+    email = 'human@example.com';
+    changeDuringOrgList = true;
+    assert.equal((await manager.flyAccountLease()).available, false);
+    changeDuringOrgList = false;
+    email = 'human@example.com';
+    personalApps = [{ Name: 'goal-owned-worker' }];
+    assert.equal((await manager.flyAccountLease()).available, false);
+    assert.equal(await manager.assertFlyAccountLeaseCurrent(lease), true);
+    assert.ok(calls.every(call => !['create', 'deploy', 'destroy', 'delete']
+      .some(verb => call.args.includes(verb))));
+    email = 'different@example.com';
+    await assert.rejects(manager.assertFlyAccountLeaseCurrent(lease), /account or personal organization changed/);
+    email = 'human@example.com';
+    personalType = 'SHARED';
+    await assert.rejects(manager.assertFlyAccountLeaseCurrent(lease), /account or personal organization changed/);
+    personalType = 'PERSONAL';
+    personalSlug = 'other-personal';
+    await assert.rejects(manager.assertFlyAccountLeaseCurrent(lease), /account or personal organization changed/);
+    personalSlug = 'personal';
+    const sharedConfigDir = join(home, '.fly');
+    mkdirSync(sharedConfigDir, { recursive: true });
+    writeFileSync(join(sharedConfigDir, 'config.yml'), 'fixture-shared-config');
+    rmSync(join(flyConfigDir, 'config.yml'));
+    await assert.rejects(manager.assertFlyAccountLeaseCurrent(lease), /account or personal organization changed/);
+    writeFileSync(join(flyConfigDir, 'config.yml'), 'fixture-private-config');
+    const stop = new AbortController();
+    stop.abort();
+    await assert.rejects(manager.assertFlyAccountLeaseCurrent(lease, { signal: stop.signal }),
+      { name: 'AbortError' });
+    await assert.rejects(manager.assertFlyAccountLeaseCurrent({ ...lease, accountRef: 'forged' }),
+      /account or personal organization changed/);
     assert.ok(calls.every(call => call.command === flyctlPath && call.env.FLY_API_TOKEN === undefined
       && call.env.BROWSER === undefined));
     assert.ok(calls.filter(call => call.args.join(' ') === 'auth whoami --json')
-      .every(call => call.env.FLY_CONFIG_DIR === flyConfigDir));
+      .every(call => [flyConfigDir, sharedConfigDir].includes(call.env.FLY_CONFIG_DIR)));
     const publicState = JSON.stringify(await manager.authState());
-    assert.equal(publicState.includes(flyConfigDir) || publicState.includes(flyctlPath)
+    assert.equal(publicState.includes(lease.accountRef) || publicState.includes(flyConfigDir) || publicState.includes(flyctlPath)
       || publicState.includes('service-token'), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -270,10 +313,11 @@ test('Fly account lease supports verified shared default config without copying 
         return { code: 0, stdout: args.join(' ') === 'auth whoami --json'
           ? '{"email":"human@example.com"}' : 'fixture-version' };
       } });
-    assert.deepEqual(await manager.flyAccountLease(), { available: true, flyctlPath, flyConfigDir,
-      scope: 'shared', orgSlug: 'personal' });
-    assert.deepEqual(await manager.flyFleetLease(), { available: true, flyctlPath, flyConfigDir,
-      scope: 'shared', orgSlug: 'personal' });
+    const lease = await manager.flyAccountLease();
+    assert.match(lease.accountRef, /^fly-account-sha256:[a-f0-9]{64}$/);
+    assert.deepEqual(lease, { available: true, flyctlPath, flyConfigDir,
+      scope: 'shared', orgSlug: 'personal', accountRef: lease.accountRef });
+    assert.deepEqual(await manager.flyFleetLease(), lease);
     assert.ok(calls.every(call => call.env.FLY_CONFIG_DIR === flyConfigDir
       && call.env.FLY_API_TOKEN === undefined));
     assert.deepEqual(manager.authEnvironment('fly'), {});
