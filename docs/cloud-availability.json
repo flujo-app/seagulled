@@ -33,6 +33,35 @@
       "ownedWorkspaceCleanupConfirmed": true,
       "ownedLocalProcessStopped": true,
       "modelAdmissionHeld": true
+    },
+    {
+      "path": "keyless-codex-model-installation",
+      "modelInstallationStatus": 400,
+      "reason": "unsupported-creativity-field",
+      "modelCallSubmitted": false,
+      "flyProvisioningAttempted": false,
+      "sourceCorrection": "Codex model installation omits creativity",
+      "ownedLocalWorkspaceDeletionConfirmed": false
+    },
+    {
+      "path": "bounded-keyless-codex-subscription-clone",
+      "localBootCallSubmitted": true,
+      "localBootOutput": "READY",
+      "workerProvisioned": true,
+      "workerCount": 1,
+      "teamRunSubmitted": true,
+      "teamRunState": "failed",
+      "reason": "conversation-error-provider-cause-not-retained",
+      "modelAnswerProduced": false,
+      "remoteArtifactCaptureComplete": false,
+      "ownedWorkerCleanupConfirmed": true,
+      "ownedBootWorkspaceCleanupConfirmed": false,
+      "ownedLocalProcessStopped": true,
+      "localResidual": "empty-directory-shells-after-reappearing-API-deletion",
+      "filesystemCleanup": "blocked-by-automatic-review",
+      "observedHostLoginCacheUnchanged": true,
+      "exclusiveSubscriptionStreamEstablished": false,
+      "replayed": false
     }
   ],
   "billing": {

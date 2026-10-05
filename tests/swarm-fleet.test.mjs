@@ -1,12 +1,28 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fleetStatus, runFleetLeaf } from '../src/swarm/fleet.mjs';
+import { EventEmitter } from 'node:events';
+import { conversationFailure, fleetStatus, runFleetLeaf } from '../src/swarm/fleet.mjs';
+import { createOwnedRelay } from '../src/swarm/relay.mjs';
 import { buildSpecs } from '../upstream/swarm-teams/template/flows.mjs';
+import { Controller } from '../upstream/swarm-teams/fleet/controller.mjs';
+import { FlujoClient } from '../upstream/swarm-teams/lib/flujo-client.mjs';
+
+test('workspace cleanup requires stable exact-name absence beyond an HTTP 200 deletion response', async () => {
+  const client = new FlujoClient({ origin: 'http://127.0.0.1:1', workspace: 'owned-boot' });
+  client.servers = async () => [];
+  client.api = async () => ({ status: 200, body: { deleted: true } });
+  let reads = 0;
+  client.workspaces = async () => ++reads === 1 ? [] : ['owned-boot'];
+  await assert.rejects(client.deleteWorkspace('owned-boot', { verificationDelayMs: 0 }), /Could not confirm deletion/);
+  reads = 0;client.workspaces = async () => { reads++;return []; };
+  assert.deepEqual(await client.deleteWorkspace('owned-boot', { verificationDelayMs: 0 }), { deleted: true });
+  assert.equal(reads,2);
+});
 
 test('Seagulled can install a bounded Fly team without changing upstream defaults', () => {
   const [agent, team] = buildSpecs({ model: 'fictional', availableServers: [], limits: { agentTurns: 6, leadTurns: 12, concurrency: 1 } });
@@ -74,4 +90,238 @@ test('disabled model preflight makes no boot workspace or Fly intent', async () 
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
   }
+});
+
+test('keyless Codex boot refusal stops before Fly provisioning and deletes its own workspace', async () => {
+  const requests = [];
+  let model;
+  const server = http.createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : undefined;
+    requests.push(`${request.method} ${new URL(request.url, 'http://local').pathname}`);
+    const send = (status, value) => { response.writeHead(status, { 'content-type': 'application/json' }); response.end(JSON.stringify(value)); };
+    const pathname = new URL(request.url, 'http://local').pathname;
+    if (pathname === '/api/workspaces' && request.method === 'GET') return send(200, { workspaces: [] });
+    if (pathname === '/api/workspaces' && request.method === 'POST') return send(201, { name: body.name });
+    if (pathname === '/api/workspaces' && request.method === 'DELETE') return send(200, {});
+    if (pathname === '/api/init') return send(200, {});
+    if (pathname === '/api/model' && request.method === 'GET') return send(200, []);
+    if (pathname === '/api/model' && request.method === 'POST') { model = body; return send(201, body); }
+    if (pathname === '/api/flow' && request.method === 'GET') return send(200, []);
+    if (pathname === '/api/flow/compile') return send(201, { flow: { id: 'boot-flow', name: 'swarm_boot' } });
+    if (pathname === '/api/mcp/servers') return send(200, []);
+    if (pathname === '/v1/chat/completions') return send(401, { error: 'fixture refusal' });
+    return send(404, {});
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-codex-preflight-'));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const profile = path.join(root, 'profile.json');
+  writeFileSync(profile, JSON.stringify({ supervisor: { origin }, provisioner: { kind: 'fly', flujoCloudPath: root },
+    model: { name: 'gpt-6-luna', provider: 'codex', adapter: 'codex-cli', apiKey: '' } }));
+  const previous = process.env.SEAGULLED_FLEET_PROFILE;
+  process.env.SEAGULLED_FLEET_PROFILE = profile;
+  try {
+    const status = await fleetStatus({ dataDir: root });
+    assert.equal(status.available, true);
+    assert.equal(status.provider, 'codex-subscription-candidate');
+    await assert.rejects(() => runFleetLeaf({ goal: { id: 'native-goal', text: 'fixture' }, task: 'fixture',
+      dataDir: root, maxUsd: 1 }), (error) => error.outcome === 'failed' && /No Fly worker/.test(error.message));
+    assert.equal(model.provider, 'codex');
+    assert.equal(model.adapter, 'codex-cli');
+    assert.equal(model.ApiKey, '');
+    assert.equal('temperature' in model, false, 'Codex model rows do not accept creativity');
+    assert.ok(requests.includes('DELETE /api/workspaces'));
+    assert.equal(requests.filter((entry) => entry === 'POST /v1/chat/completions').length, 1);
+    assert.equal(requests.some((entry) => entry === 'GET /v1/models'), false);
+  } finally {
+    if (previous === undefined) delete process.env.SEAGULLED_FLEET_PROFILE;
+    else process.env.SEAGULLED_FLEET_PROFILE = previous;
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('owned relay journals before Fly mutation, forwards through its own proxy, and confirms retirement', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-relay-'));
+  const journalPath = path.join(root, 'relay.json');
+  const calls = [];
+  const flyRunner = { run: async (args) => {
+    calls.push(args.slice(0, 2).join(' '));
+    if (args[0] === 'apps' && args[1] === 'create') {
+      assert.equal(JSON.parse(readFileSync(journalPath, 'utf8')).state, 'creating-app');
+    }
+    return args[0] === 'auth' ? 'fixture-token' : '{}';
+  } };
+  let agentStopped = false;
+  let proxyStopped = false;
+  const fakeProxy = new EventEmitter();
+  fakeProxy.stdin = { end: () => undefined };
+  fakeProxy.kill = () => { proxyStopped = true; };
+  const relay = await createOwnedRelay({ journalPath, org: 'personal', flyRunner,
+    portAllocator: async () => 48121,
+    spawnImpl: (_binary, args) => { assert.ok(args.includes('--watch-stdin')); return fakeProxy; },
+    agentFactory: ({ controllerOrigin, lanes }) => {
+      assert.equal(controllerOrigin, 'http://127.0.0.1:48122');
+      assert.equal(lanes, 2);
+      return { stop: () => { agentStopped = true; } };
+    },
+    fetchImpl: async (url, options) => {
+      const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
+      if (url.endsWith('/machines') && options.method === 'POST') {
+        const machine = JSON.parse(options.body);
+        assert.equal(machine.config.services.length, 0);
+        assert.equal(machine.config.metadata.seagulled, 'owned-relay');
+        assert.equal(machine.config.metadata.seagulled_owner, journal.owner);
+        return new Response(JSON.stringify({ id: 'fixturemachine' }), { status: 201 });
+      }
+      if (url.endsWith('/machines') && options.method === 'GET') {
+        return new Response(JSON.stringify([{ id: 'fixturemachine' }]), { status: 200 });
+      }
+      if (url.endsWith('/machines/fixturemachine/metadata')) {
+        return new Response(JSON.stringify({ seagulled_owner: journal.owner }), { status: 200 });
+      }
+      if (url.endsWith('/health')) return new Response('{}', { status: 200 });
+      if (url.includes('/apps/seagulled-relay-') && options.method === 'GET') {
+        if (calls.includes('apps destroy')) return new Response('{}', { status: 404 });
+        return new Response(JSON.stringify({ id: 'fixture-app-id', name: journal.app,
+          organization: { slug: journal.org } }), { status: 200 });
+      }
+      throw new Error(`Unexpected relay fixture URL: ${url}`);
+    },
+  });
+  assert.match(relay.remoteUrl, /^http:\/\/seagulled-relay-[a-f0-9]+\.internal:4300$/);
+  await relay.start('http://127.0.0.1:48122');
+  assert.equal(await relay.retire(), true);
+  assert.equal(agentStopped, true);
+  assert.equal(proxyStopped, true);
+  assert.deepEqual(calls, ['auth token', 'apps create', 'apps destroy']);
+  assert.equal(JSON.parse(readFileSync(journalPath, 'utf8')).state, 'retired');
+});
+
+test('owned relay Machine rejection destroys only its newly created app', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-relay-failure-'));
+  const journalPath = path.join(root, 'relay.json');
+  const calls = [];
+  await assert.rejects(() => createOwnedRelay({ journalPath, org: 'personal',
+    flyRunner: { run: async (args) => { calls.push(args.slice(0, 2).join(' ')); return args[0] === 'auth' ? 'fixture-token' : '{}'; } },
+    portAllocator: async () => 48123,
+    fetchImpl: async (url, options) => {
+      const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
+      if (url.endsWith('/machines') && options.method === 'POST') return new Response('{}', { status: 500 });
+      if (url.endsWith('/machines') && options.method === 'GET') return new Response('[]', { status: 200 });
+      if (url.includes('/apps/seagulled-relay-') && options.method === 'GET') {
+        if (calls.includes('apps destroy')) return new Response('{}', { status: 404 });
+        return new Response(JSON.stringify({ id: 'fixture-app-id', name: journal.app,
+          organization: { slug: journal.org } }), { status: 200 });
+      }
+      throw new Error(`Unexpected relay fixture URL: ${url}`);
+    },
+  }), /Machine creation returned HTTP 500/);
+  assert.deepEqual(calls, ['auth token', 'apps create', 'apps destroy']);
+  assert.equal(JSON.parse(readFileSync(journalPath, 'utf8')).cleanupConfirmed, true);
+});
+
+test('ambiguous relay app creation retains its intent and never destroys an unconfirmed app', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-relay-unknown-'));
+  const journalPath = path.join(root, 'relay.json');
+  const calls = [];
+  await assert.rejects(() => createOwnedRelay({ journalPath, org: 'personal',
+    flyRunner: { run: async (args) => {
+      calls.push(args.slice(0, 2).join(' '));
+      if (args[0] === 'apps') throw new Error('fixture connection lost');
+      return 'fixture-token';
+    } }, portAllocator: async () => 48123,
+  }), (error) => error.code === 'UNKNOWN');
+  assert.deepEqual(calls, ['auth token', 'apps create']);
+  assert.equal(JSON.parse(readFileSync(journalPath, 'utf8')).state, 'creation-unknown');
+});
+
+test('relay retirement refuses a replaced app or a Machine without its unique owner marker', async () => {
+  for (const changed of ['app-id', 'machine-owner']) {
+    const root = mkdtempSync(path.join(tmpdir(), 'seagulled-relay-foreign-'));
+    const journalPath = path.join(root, 'relay.json');
+    const calls = [];
+    let retired = false;
+    const relay = await createOwnedRelay({ journalPath, org: 'personal', portAllocator: async () => 48124,
+      flyRunner: { run: async (args) => {
+        calls.push(args.slice(0, 2).join(' '));
+        return args[0] === 'auth' ? 'fixture-token' : '{}';
+      } },
+      fetchImpl: async (url, options) => {
+        const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
+        if (url.endsWith('/machines') && options.method === 'POST') return new Response('{"id":"fixturemachine"}', { status: 201 });
+        if (url.endsWith('/machines') && options.method === 'GET') return new Response('[{"id":"fixturemachine"}]', { status: 200 });
+        if (url.endsWith('/machines/fixturemachine/metadata')) return new Response(JSON.stringify({
+          seagulled_owner: retired && changed === 'machine-owner' ? 'foreign-owner' : journal.owner,
+        }), { status: 200 });
+        if (url.includes('/apps/seagulled-relay-') && options.method === 'GET') return new Response(JSON.stringify({
+          id: retired && changed === 'app-id' ? 'foreign-app-id' : 'fixture-app-id',
+          name: journal.app, organization: { slug: journal.org },
+        }), { status: 200 });
+        throw new Error(`Unexpected relay fixture URL: ${url}`);
+      },
+    });
+    retired = true;
+    assert.equal(await relay.retire(), false);
+    assert.equal(calls.includes('apps destroy'), false, `${changed} must not be destroyed`);
+    assert.equal(JSON.parse(readFileSync(journalPath, 'utf8')).state, 'cleanup-unknown');
+  }
+});
+
+test('owned worker files are collected before subtree retirement', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-before-retire-'));
+  const order = [];
+  const controller = new Controller({ registryPath: path.join(root, 'registry.json'),
+    operatorToken: 'fixture-operator-token-at-least-32-characters', publicUrl: 'http://127.0.0.1:1',
+    provisioner: { retire: async (target) => { order.push(`delete:${target.app}`); } },
+    beforeRetire: async ({ target }) => { order.push(`collect:${target.app}`); } });
+  try {
+    const goal = controller.registry.createGoal({ id: 'owned-tree', text: 'fixture', limits: { maxWorkers: 3, maxDepth: 2, maxChildren: 2 } });
+    const supervisor = controller.registry.reserve({ goalId: goal.id, role: 'supervisor', name: 'Todd' }).worker;
+    controller.registry.enroll(supervisor.id, { kind: 'external', origin: 'http://127.0.0.1:1', workspace: 'fixture' });
+    const parent = controller.registry.reserve({ goalId: goal.id, parentId: supervisor.id, role: 'team', name: 'parent' }).worker;
+    controller.registry.enroll(parent.id, { kind: 'fly', app: 'parent-app' });
+    const child = controller.registry.reserve({ goalId: goal.id, parentId: parent.id, role: 'team', name: 'child' }).worker;
+    controller.registry.enroll(child.id, { kind: 'fly', app: 'child-app' });
+    const result = await controller.retire('operator', { workerId: parent.id });
+    assert.deepEqual(result.retired, [child.id, parent.id]);
+    assert.deepEqual(order, ['collect:child-app', 'delete:child-app', 'collect:parent-app', 'delete:parent-app']);
+  } finally { await controller.close(); }
+});
+
+test('failed capture holds the exact owned sandbox without deleting it', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-capture-hold-'));
+  let deleted = false;
+  const controller = new Controller({ registryPath: path.join(root, 'registry.json'),
+    operatorToken: 'fixture-operator-token-at-least-32-characters', publicUrl: 'http://127.0.0.1:1',
+    provisioner: { retire: async () => { deleted = true; } },
+    beforeRetire: async () => { throw new Error('fixture capture failed'); } });
+  try {
+    const goal = controller.registry.createGoal({ id: 'capture-hold', text: 'fixture' });
+    const supervisor = controller.registry.reserve({ goalId: goal.id, role: 'supervisor', name: 'Todd' }).worker;
+    controller.registry.enroll(supervisor.id, { kind: 'external', origin: 'http://127.0.0.1:1', workspace: 'fixture' });
+    const worker = controller.registry.reserve({ goalId: goal.id, parentId: supervisor.id, role: 'team', name: 'developer' }).worker;
+    controller.registry.enroll(worker.id, { kind: 'fly', app: 'owned-app' });
+    const receipt = await controller.retire('operator', { workerId: worker.id });
+    assert.deepEqual(receipt.cleanupUnconfirmed, [worker.id]);
+    assert.equal(deleted, false);
+    assert.equal(controller.registry.worker(worker.id).target.app, 'owned-app');
+    assert.equal(controller.registry.worker(worker.id).cleanup.confirmed, false);
+    assert.throws(() => controller.registry.reserve({ goalId: goal.id, parentId: supervisor.id, name: 'other' }), /Unknown runs or unconfirmed cleanup/);
+    await controller.retire('operator', { workerId: worker.id });
+    assert.equal(deleted, false, 'repeated retirement preserves the held original sandbox');
+  } finally { await controller.close(); }
+});
+
+test('failed Fly conversation preserves only bounded nonsecret diagnosis fields', () => {
+  const result = conversationFailure({ status: 200, body: { status: 'error', lastError: {
+    message: 'Bearer fictional-sensitive-token in provider response', code: 'api_error',
+    httpStatus: 401, errorClass: 'authentication', providerType: 'CodexError',
+    details: { authorization: 'fictional-sensitive-token' },
+  } } });
+  assert.deepEqual(result, { readStatus: 200, conversationStatus: 'error', providerHttpStatus: 401,
+    code: 'api_error', errorClass: 'authentication', providerType: 'CodexError' });
+  assert.equal(JSON.stringify(result).includes('fictional-sensitive-token'), false);
 });

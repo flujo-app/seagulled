@@ -76,9 +76,11 @@ export function createRelay({ secret }) {
 
 /** Controller side: pull Worker requests from the relay and answer them from the local controller. */
 export function startRelayAgent({ relayOrigin, secret, controllerOrigin, log = () => undefined, lanes = 4 }) {
-  let stopped = false;
+  const abort = new AbortController();
+  const pending = new Set();
   const call = async (url, options) => {
-    const response = await fetch(url, { ...options, signal: AbortSignal.timeout(130_000) });
+    const response = await fetch(url, { ...options,
+      signal: AbortSignal.any([abort.signal, AbortSignal.timeout(130_000)]) });
     return { status: response.status, text: await response.text() };
   };
   const serve = async (item) => {
@@ -91,22 +93,40 @@ export function startRelayAgent({ relayOrigin, secret, controllerOrigin, log = (
     } catch (error) {
       answer = { id: item.id, status: 502, body: JSON.stringify({ error: 'CONTROLLER_UNREACHABLE' }) };
     }
-    await call(`${relayOrigin}/__relay/respond`, { method: 'POST', body: JSON.stringify(answer),
-      headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json' } }).catch((error) => log(`relay respond failed: ${error.message}`));
+    if (!abort.signal.aborted) await call(`${relayOrigin}/__relay/respond`, { method: 'POST', body: JSON.stringify(answer),
+      headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json' } })
+      .catch((error) => { if (!abort.signal.aborted) log(`relay respond failed: ${error.message}`); });
   };
   const lane = async () => {
-    while (!stopped) {
+    while (!abort.signal.aborted) {
       try {
         const polled = await call(`${relayOrigin}/__relay/poll`, { method: 'POST', headers: { Authorization: `Bearer ${secret}` } });
         if (polled.status !== 200) throw new Error(`poll HTTP ${polled.status}`);
-        for (const item of JSON.parse(polled.text)) serve(item);
+        for (const item of JSON.parse(polled.text)) {
+          if (abort.signal.aborted) break;
+          const job = serve(item);
+          pending.add(job);
+          job.finally(() => pending.delete(job));
+        }
       } catch (error) {
-        if (!stopped) { log(`relay poll failed: ${error.message}`); await new Promise((resolve) => setTimeout(resolve, 3000)); }
+        if (!abort.signal.aborted) {
+          log(`relay poll failed: ${error.message}`);
+          await new Promise((resolve) => {
+            const onAbort = () => { clearTimeout(timer); abort.signal.removeEventListener('abort', onAbort); resolve(); };
+            const timer = setTimeout(() => { abort.signal.removeEventListener('abort', onAbort); resolve(); }, 3000);
+            abort.signal.addEventListener('abort', onAbort, { once: true });
+            if (abort.signal.aborted) onAbort();
+          });
+        }
       }
     }
   };
-  for (let index = 0; index < lanes; index++) lane();
-  return { stop: () => { stopped = true; } };
+  const jobs = Array.from({ length: lanes }, () => lane());
+  return { stop: async () => {
+    abort.abort();
+    await Promise.allSettled(jobs);
+    await Promise.allSettled([...pending]);
+  } };
 }
 
 if (process.argv[1]?.endsWith('relay.mjs')) {

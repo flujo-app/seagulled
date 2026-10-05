@@ -28,7 +28,8 @@ export async function installTemplate(client, { model, fleet, browser = true, bo
     await client.upsertModel({
       id: MODEL_ID, name: model.name, displayName: 'swarm-model', description: 'Model for the swarm-team template.',
       ApiKey: model.apiKey, baseUrl: model.baseUrl, provider: model.provider ?? 'ollama', adapter: model.adapter ?? 'openai',
-      contextWindow: model.contextWindow, supportsTools: true, temperature: '0.2',
+      contextWindow: model.contextWindow, supportsTools: true,
+      ...((model.adapter === 'codex-cli' || model.provider === 'codex') ? {} : { temperature: '0.2' }),
     });
   }
   if (bootOnly) {

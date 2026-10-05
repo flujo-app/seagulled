@@ -33,6 +33,6 @@ Desktop and CLI share private state in `~/.seagulled` (override with `SEAGULLED_
 
 ## Reuse
 
-The recovered FLUJO/Fly worker-tree engine is included under `upstream/swarm-teams`. It provides bounded reservation, durable run identities and recovery holds. Factory, O and Brain inform supervision, accounting and presentation. See [source notices](THIRD_PARTY_NOTICES.md), [provenance](docs/provenance.json) and [RC acceptance](docs/RC-ACCEPTANCE.md) for precise implementation and validation scope.
+The recovered FLUJO/Fly worker-tree engine is included under `upstream/swarm-teams`. It provides bounded reservation, durable run identities and recovery holds. The Factory receipt helper is included under `upstream/factory`; Factory, O and Brain also inform supervision, accounting and presentation. Native Codex work is live verified. A complete company across Fly workers and successful subscription hot-cloning remain unqualified. See [source notices](THIRD_PARTY_NOTICES.md), [provenance](docs/provenance.json) and [RC acceptance](docs/RC-ACCEPTANCE.md) for precise implementation and validation scope.
 
 This is an independent, unofficial parody interface, with a fictional Todd persona. No affiliation or endorsement is implied.

@@ -1,6 +1,6 @@
 {
   "name": "seagulled",
-  "version": "0.1.0-rc.1",
+  "version": "0.1.0-rc.2",
   "description": "Talk to Todd. He puts a company of agents on your goal, then comes back to judge the work.",
   "type": "module",
   "main": "electron/main.mjs",
@@ -36,6 +36,7 @@
       "src/**/*",
       "bin/**/*",
       "upstream/swarm-teams/{fleet,lib,template}/**/*",
+      "upstream/factory/receipts.mjs",
       "package.json",
       "LICENSE",
       "THIRD_PARTY_NOTICES.md",

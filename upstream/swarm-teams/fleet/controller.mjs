@@ -41,7 +41,8 @@ export class Controller {
    * @param publicUrl     URL under which Workers reach this controller
    * @param provisioner   { provision(worker, fleet) -> target, retire(target), connect?(target) }
    */
-  constructor({ registryPath, operatorToken, publicUrl, remoteUrl, provisioner, runTimeoutMs, log = () => undefined }) {
+  constructor({ registryPath, operatorToken, publicUrl, remoteUrl, provisioner, runTimeoutMs, beforeRetire,
+    log = () => undefined }) {
     if (!operatorToken || operatorToken.length < 32) throw new Error('operatorToken must be at least 32 characters.');
     this.releaseOwner = claimController(registryPath);
     try { this.registry = new Registry(registryPath); }
@@ -55,6 +56,7 @@ export class Controller {
     this.provisioner = provisioner;
     this.log = log;
     this.runTimeoutMs = runTimeoutMs;
+    this.beforeRetire = beforeRetire;
     this.provisioning = new Map(); // workerId -> Promise<target>
     this.settled = new Map();      // runId -> Promise (in-flight runs)
   }
@@ -187,6 +189,31 @@ export class Controller {
       if (current.target && !['external', 'flyproxy'].includes(current.target.kind)) {
         // The Worker loses its place and its bearer either way; a sandbox that could not be
         // deleted is recorded, never silently forgotten.
+        const activeRuns = Object.values(this.registry.state.runs)
+          .filter((run) => run.workerId === worker.id && run.state === 'running');
+        if (activeRuns.length) {
+          let connection;
+          try {
+            connection = await this.connect(current.target);
+            for (const run of activeRuns) {
+              try { await connection.client.cancel(run.conversationId); }
+              catch { this.log(`cancel request for ${run.id} was unconfirmed`); }
+            }
+          } catch { this.log(`cancel connection for ${worker.id} was unconfirmed`); }
+          finally { await connection?.close().catch(() => undefined); }
+        }
+        if (this.beforeRetire) {
+          try { await this.beforeRetire({ worker: current, target: current.target }); }
+          catch (error) {
+            // A completed Worker may hold the only copy of its deliverables. Preserve
+            // that exact app and block admission until its output is reconciled.
+            this.registry.retire(worker.id, `Before-retire output capture failed: ${error.message}`);
+            cleanupUnconfirmed.push(worker.id);
+            retired.push(worker.id);
+            this.log(`before-retire collection of ${worker.id} failed: ${error.message}`);
+            continue;
+          }
+        }
         try { await this.provisioner.retire(current.target); }
         catch (error) { cleanupError = error.message; this.log(`cleanup of ${worker.id} unconfirmed: ${error.message}`); }
       }

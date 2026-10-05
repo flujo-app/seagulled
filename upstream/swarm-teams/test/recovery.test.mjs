@@ -9,6 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { Registry } from '../fleet/registry.mjs';
 import { Controller } from '../fleet/controller.mjs';
+import { startRelayAgent } from '../fleet/relay.mjs';
 import { provisionWithCleanup } from '../fleet/attempt.mjs';
 import { FlujoClient } from '../lib/flujo-client.mjs';
 
@@ -145,6 +146,46 @@ test('retiring a running external supervisor does not claim its retained host wa
   assert.deepEqual(result.cleanupUnconfirmed, [root.id]);
   assert.equal(run.state, 'unknown');
   await controller.close();
+});
+
+test('retiring an active owned Worker requests cancellation before capture and confirmed deletion', async () => {
+  const order = [];
+  const controller = new Controller({ registryPath: temporary(), operatorToken: 'o'.repeat(40),
+    publicUrl: 'http://127.0.0.1:1',
+    provisioner: { retire: async () => { order.push('delete'); } },
+    beforeRetire: async () => { order.push('collect'); } });
+  try {
+    const goal = controller.registry.createGoal({ text: 'fixture' });
+    const root = controller.registry.reserve({ goalId: goal.id }).worker;
+    const child = controller.registry.reserve({ goalId: goal.id, parentId: root.id }).worker;
+    controller.registry.enroll(child.id, { kind: 'fly', app: 'owned-fixture' });
+    const run = controller.registry.startRun({ workerId: child.id, task: 'fixture' });
+    controller.connect = async () => ({ client: { cancel: async (id) => {
+      assert.equal(id, run.conversationId);
+      order.push('cancel');
+      throw new Error('fixture cancel response lost');
+    } }, close: async () => { order.push('close'); } });
+    const result = await controller.retire('operator', { workerId: child.id });
+    assert.deepEqual(result.cleanupUnconfirmed, undefined);
+    assert.deepEqual(order, ['cancel', 'close', 'collect', 'delete']);
+    assert.equal(controller.registry.run(run.id).state, 'cancelled');
+  } finally { await controller.close(); }
+});
+
+test('stopping the relay agent aborts its outstanding long poll promptly', async () => {
+  let started;
+  const polled = new Promise((resolve) => { started = resolve; });
+  const server = http.createServer((request) => { request.resume(); started(); });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const agent = startRelayAgent({ relayOrigin: `http://127.0.0.1:${server.address().port}`,
+      controllerOrigin: 'http://127.0.0.1:1', secret: 'fixture-secret-at-least-32-characters', lanes: 1 });
+    await polled;
+    await Promise.race([agent.stop(), new Promise((_, reject) => setTimeout(() => reject(new Error('relay stop stalled')), 1000))]);
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 test('a busy provisioning attempt is never replaced when cleanup throws or is not terminal', async () => {

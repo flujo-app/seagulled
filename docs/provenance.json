@@ -62,6 +62,21 @@
   "productExtensions": [
     "external goal identities",
     "durable usage receipts",
-    "bounded run timeout"
-  ]
+    "bounded run timeout",
+    "before-retirement output capture and recovery holds",
+    "Codex model installation without unsupported creativity"
+  ],
+  "factoryExtraction": {
+    "sourceCommit": "510b733f8af0305bb2969592fe25cc73549306a4",
+    "originalPath": "src/receipts.mjs",
+    "path": "upstream/factory/receipts.mjs",
+    "sha256": "d1e4ff13538cc2ebbd1f0b11759887ec606253e7310fc2da83406d9d4c4f687c",
+    "scope": "pure operational receipt validator; no runtime state"
+  },
+  "lifecycleSuccessor": {
+    "privateEngineCommit": "4b0363e",
+    "pullRequest": "https://github.com/flujo-app/iambrokeplshlp/pull/57",
+    "scope": "bounded consumer hooks, artifact-capture holds, cancellation and cleanup verification",
+    "merged": false
+  }
 }

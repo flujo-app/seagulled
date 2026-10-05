@@ -73,17 +73,23 @@ export class FlujoClient {
   }
 
   /** Stop the workspace's MCP servers first: on Windows their open files block the delete. */
-  async deleteWorkspace(name) {
+  async deleteWorkspace(name, { verificationDelayMs = 2000 } = {}) {
     for (const server of await this.servers().catch(() => [])) {
       await this.api('PUT', `/api/mcp/servers/${encodeURIComponent(server.name)}`, { name: server.name, disabled: true }, { workspace: name });
     }
     let last;
     for (let attempt = 0; attempt < 4; attempt++) {
       last = await this.api('DELETE', '/api/workspaces', { name }, { workspace: null });
-      if (last.status === 200) return last.body;
+      if (last.status === 200) {
+        // A successful deletion response can race an active background writer.
+        // Only repeated exact-name absence is a cleanup receipt.
+        const absent = !(await this.workspaces()).includes(name);
+        await sleep(verificationDelayMs);
+        if (absent && !(await this.workspaces()).includes(name)) return last.body;
+      }
       await sleep(1500);
     }
-    throw new Error(`Could not delete workspace ${name} (HTTP ${last.status}).`);
+    throw new Error(`Could not confirm deletion of workspace ${name} (HTTP ${last.status}).`);
   }
 
   async upsertModel(model) {
@@ -128,8 +134,8 @@ export class FlujoClient {
     return this.expect('POST', `/v1/chat/conversations/${encodeURIComponent(id)}/inject`, { content, id: randomUUID() });
   }
 
-  async cancel(id) {
-    return this.api('POST', `/v1/chat/conversations/${encodeURIComponent(id)}/cancel`, {});
+  async cancel(id, timeoutMs = 5000) {
+    return this.api('POST', `/v1/chat/conversations/${encodeURIComponent(id)}/cancel`, {}, { timeoutMs });
   }
 
   /**

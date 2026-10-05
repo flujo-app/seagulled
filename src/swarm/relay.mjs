@@ -1,0 +1,156 @@
+// One relay for one Seagulled goal. Its Fly app, Machine and bearer are never shared.
+import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { startRelayAgent } from '../../upstream/swarm-teams/fleet/relay.mjs';
+
+const RELAY_SOURCE = fileURLToPath(new URL('../../upstream/swarm-teams/fleet/relay.mjs', import.meta.url));
+const API = 'https://api.machines.dev/v1';
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+export async function createOwnedRelay({ journalPath, flujoCloudPath, org, region = 'iad', fetchImpl = fetch,
+  spawnImpl = spawn, flyRunner, portAllocator, agentFactory = startRelayAgent } = {}) {
+  if (!journalPath || existsSync(journalPath)) throw new Error('Relay intent already exists; reconcile the original resource before creating another.');
+  if (!/^[a-z0-9-]{1,64}$/.test(org ?? '') || !/^[a-z]{3}$/.test(region)) throw new Error('A valid Fly organization and region are required.');
+  let fly = flyRunner;
+  let allocate = portAllocator;
+  if (!fly || !allocate) {
+    const { createFlyRunner, unusedLoopbackPort } = await import(pathToFileURL(path.join(flujoCloudPath, 'lib', 'process.mjs')).href);
+    fly ??= createFlyRunner();
+    allocate ??= unusedLoopbackPort;
+  }
+  const app = `seagulled-relay-${randomBytes(6).toString('hex')}`;
+  const secret = randomBytes(32).toString('base64url');
+  const owner = randomBytes(16).toString('hex');
+  let state = { version: 1, kind: 'seagulled-owned-relay', app, org, region, secret,
+    owner, appCreated: false, appId: null, machineId: null, state: 'planned', createdAt: new Date().toISOString() };
+  writeFileSync(journalPath, JSON.stringify(state), { flag: 'wx', mode: 0o600 });
+  const record = (patch) => {
+    state = { ...state, ...patch, updatedAt: new Date().toISOString() };
+    const temporary = `${journalPath}.${process.pid}.tmp`;
+    writeFileSync(temporary, JSON.stringify(state), { mode: 0o600 });
+    renameSync(temporary, journalPath);
+  };
+  let token;
+  let proxy;
+  let agent;
+  const request = async (method, suffix, body) => fetchImpl(`${API}${suffix}`, { method,
+    headers: { Authorization: `Bearer ${token}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+    ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(30_000) });
+  const stopTransport = async () => {
+    await agent?.stop();
+    if (proxy) { proxy.stdin.end(); proxy.kill(); proxy = undefined; }
+  };
+  const ownedApp = async () => {
+    const response = await request('GET', `/apps/${app}`);
+    if (response.status === 404) return false;
+    if (response.status !== 200 || !state.appId) throw new Error('Relay app identity is unconfirmed.');
+    const details = await response.json();
+    if (details.id !== state.appId || details.name !== app || details.organization?.slug !== org) {
+      throw new Error('Relay app identity changed; preserve the journal without deleting this app.');
+    }
+    return true;
+  };
+  const ownedMachines = async () => {
+    const response = await request('GET', `/apps/${app}/machines`);
+    if (response.status !== 200) throw new Error('Relay Machine inventory is unconfirmed.');
+    const machines = await response.json();
+    if (!Array.isArray(machines) || machines.length > 1
+      || (state.machineId && (machines.length !== 1 || machines[0]?.id !== state.machineId))) {
+      throw new Error('Relay Machine inventory changed; preserve the app.');
+    }
+    for (const machine of machines) {
+      const metadata = await request('GET', `/apps/${app}/machines/${machine.id}/metadata`);
+      if (metadata.status !== 200 || (await metadata.json()).seagulled_owner !== owner) {
+        throw new Error('Relay Machine ownership marker is unconfirmed.');
+      }
+    }
+  };
+  const retire = async () => {
+    await stopTransport();
+    if (!state.appCreated) return false;
+    record({ state: 'retiring' });
+    try {
+      if (!(await ownedApp())) {
+        record({ state: 'retired', cleanupConfirmed: true });
+        return true;
+      }
+      await ownedMachines();
+    } catch (error) {
+      record({ state: 'cleanup-unknown', cleanupConfirmed: false, error: String(error.message).slice(0, 200) });
+      return false;
+    }
+    await fly.run(['apps', 'destroy', app, '--yes']).catch(() => undefined);
+    const readback = await request('GET', `/apps/${app}`).catch(() => null);
+    const confirmed = readback?.status === 404;
+    record({ state: confirmed ? 'retired' : 'cleanup-unknown', cleanupConfirmed: confirmed });
+    return confirmed;
+  };
+  try {
+    token = (await fly.run(['auth', 'token'])).trim();
+    if (!token) throw new Error('Fly authentication is unavailable.');
+    record({ state: 'creating-app' });
+    await fly.run(['apps', 'create', app, '--org', org, '--json', '--yes']);
+    record({ appCreated: true, state: 'verifying-app' });
+    // Capture the new app's stable ID before any Machine mutation.
+    const details = await request('GET', `/apps/${app}`);
+    if (details.status !== 200) throw new Error('New relay app readback is unavailable.');
+    const value = await details.json();
+    if (typeof value.id !== 'string' || !value.id || value.name !== app || value.organization?.slug !== org) {
+      throw new Error('New relay app identity could not be confirmed.');
+    }
+    record({ appId: value.id, state: 'creating-machine' });
+    const source = readFileSync(RELAY_SOURCE);
+    const response = await request('POST', `/apps/${app}/machines`, { name: 'relay', region, config: {
+      image: 'registry-1.docker.io/library/node:22-alpine', init: { cmd: ['node', '/relay/relay.mjs'] },
+      files: [{ guest_path: '/relay/relay.mjs', raw_value: source.toString('base64') }],
+      env: { RELAY_SECRET: secret, RELAY_PORT: '4300' }, services: [], restart: { policy: 'always' },
+      guest: { cpu_kind: 'shared', cpus: 1, memory_mb: 256 }, metadata: { seagulled: 'owned-relay', seagulled_owner: owner },
+    } });
+    if (!response.ok) throw new Error(`Owned relay Machine creation returned HTTP ${response.status}.`);
+    const machine = await response.json();
+    if (typeof machine.id !== 'string' || !/^[a-zA-Z0-9]+$/.test(machine.id)) throw new Error('Fly returned an invalid relay Machine identity.');
+    record({ machineId: machine.id, state: 'ready' });
+    return {
+      app, machineId: machine.id, remoteUrl: `http://${app}.internal:4300`,
+      async start(controllerOrigin) {
+        if (proxy) throw new Error('Relay transport is already running.');
+        const port = await allocate();
+        const binary = process.env.FLYCTL_PATH || 'flyctl';
+        proxy = spawnImpl(binary, ['proxy', `${port}:4300`, `${machine.id}.vm.${app}.internal`,
+          '--app', app, '--org', org, '--bind-addr', '127.0.0.1', '--watch-stdin', '--quiet'],
+        { windowsHide: true, shell: false, stdio: ['pipe', 'ignore', 'ignore'] });
+        let exited = false;
+        proxy.on('error', () => { exited = true; });
+        proxy.on('exit', () => { exited = true; });
+        for (let attempt = 0; attempt < 40; attempt++) {
+          if (exited) throw new Error('Owned relay proxy exited before readiness.');
+          const healthy = await fetchImpl(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1000) })
+            .then((res) => res.status === 200, () => false);
+          if (healthy) {
+            agent = agentFactory({ relayOrigin: `http://127.0.0.1:${port}`, secret, controllerOrigin, lanes: 2 });
+            return;
+          }
+          await sleep(250);
+        }
+        throw new Error('Owned relay proxy did not become ready.');
+      },
+      close: stopTransport,
+      retire,
+    };
+  } catch (error) {
+    await stopTransport();
+    if (state.appCreated) {
+      const confirmed = await retire().catch(() => false);
+      if (!confirmed) throw Object.assign(new Error(`${error.message} Owned relay cleanup is unconfirmed; preserve its intent.`),
+        { code: 'UNKNOWN', unknown: true });
+    } else if (state.state === 'creating-app') {
+      record({ state: 'creation-unknown', error: String(error.message).slice(0, 200) });
+      throw Object.assign(new Error('Owned relay app creation outcome is unknown; reconcile its exact intent before retrying.'),
+        { code: 'UNKNOWN', unknown: true });
+    } else record({ state: 'not-applied', error: String(error.message).slice(0, 200) });
+    throw error;
+  }
+}
