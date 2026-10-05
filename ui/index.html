@@ -3,53 +3,56 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
-  <title>Todd Howard · Seagulled</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Seagulled</title>
   <link rel="stylesheet" href="./styles.css">
-  <script src="./app.js" defer></script>
+  <script type="module" src="./app.js"></script>
 </head>
 <body>
-  <div class="app-shell">
-    <aside class="sidebar" aria-label="Goals and settings">
-      <div class="brand"><div class="brand-mark" aria-hidden="true">✦</div><div><strong>seagulled</strong><small>with Todd Howard</small></div></div>
-      <div class="sidebar-heading"><span>GOALS</span><span id="goal-count">0</span></div>
-      <div id="goals" class="goals" aria-live="polite"></div>
-      <div class="sidebar-footer">
-        <div id="swarm-controls" class="swarm-controls" hidden><span id="swarm-status">TEAM</span><div><button id="swarm-pause" type="button">Pause all</button><button id="swarm-resume" type="button" hidden>Resume all</button><button id="swarm-stop" type="button">Stop all</button></div></div>
-        <button id="providers-button" class="provider-button" type="button"><span id="provider-light" class="provider-light"></span><span id="provider-label">Checking providers…</span><span aria-hidden="true">↗</span></button>
-        <div id="spend-label" class="spend-label">No spend recorded</div>
-      </div>
-    </aside>
-    <button id="sidebar-backdrop" class="sidebar-backdrop" type="button" aria-label="Close goals" hidden></button>
-    <main class="chat-panel">
-      <header class="topbar"><button id="mobile-goals" class="icon-button mobile-only" type="button" aria-label="Show goals">☰</button><div class="topbar-person"><div class="portrait" aria-hidden="true">TH</div><div><strong>Todd Howard</strong><small id="presence">Checking the team…</small></div></div><button id="new-chat" class="subtle-button" type="button" title="Start a goal">+ New goal</button></header>
-      <div id="notice" class="notice" role="status" hidden></div>
-      <div id="conversation" class="conversation" role="log" aria-label="Conversation with Todd" aria-live="polite"></div>
-      <div class="composer-wrap"><form id="composer" class="composer"><label for="prompt" class="sr-only">Message Todd</label><textarea id="prompt" name="prompt" rows="1" placeholder="Ask Todd to make something happen…" required></textarea><button id="send" class="send-button" type="submit" aria-label="Send message" title="Send message">↑</button></form><div class="composer-under"><label class="compose-budget" for="compose-budget">Goal budget <span>$</span><input id="compose-budget" type="number" min="0.01" max="100000" step="0.01" value="5.00" inputmode="decimal" aria-label="New goal budget in USD"></label><div class="composer-note">Todd may delegate work. Check the goal for progress and spending.</div></div></div>
-    </main>
-  </div>
-  <dialog id="edit-dialog" class="dialog"><form id="edit-form" method="dialog"><div class="dialog-heading"><div><span class="eyebrow">GOAL SETTINGS</span><h2>Edit goal</h2></div><button class="icon-button" type="button" data-close="edit-dialog" aria-label="Close">×</button></div><label class="field-label" for="goal-text">What should Todd do?</label><textarea id="goal-text" rows="4" required></textarea><label class="field-label" for="goal-budget">Budget in USD</label><div class="currency-field"><span>$</span><input id="goal-budget" type="number" min="0.01" step="0.01" inputmode="decimal" required></div><p class="field-help">Changing a running goal pauses it. Lowering the budget below recorded spend also pauses it.</p><div class="dialog-actions"><button class="subtle-button" type="button" data-close="edit-dialog">Cancel</button><button class="primary-button" type="submit">Save changes</button></div></form></dialog>
-  <dialog id="provider-dialog" class="dialog provider-dialog">
-    <div class="dialog-heading"><div><span class="eyebrow">CONNECT YOUR TEAM</span><h2>Choose a provider</h2></div><button class="icon-button" type="button" data-close="provider-dialog" aria-label="Close">×</button></div>
-    <p class="dialog-intro">Connected means a sign-in or key is available. It does not verify a live run or cloud billing.</p>
-    <div id="provider-list" class="provider-list"></div>
-    <button id="refresh-providers" class="text-button" type="button">Check providers again</button>
-    <div id="connect-panel" hidden>
-      <button id="provider-back" class="text-button" type="button">← Providers</button>
-      <h3 id="connect-title"></h3><p id="connect-detail" class="field-help"></p>
-      <form id="connect-form">
-        <div id="method-field"><label class="field-label" for="connect-method">Connection method</label><select id="connect-method"></select></div>
-        <div id="key-field">
-          <label id="connect-key-label" class="field-label" for="connect-key">API key</label><input id="connect-key" type="password" autocomplete="off" spellcheck="false" placeholder="Paste key">
-          <p id="worker-disclosure" class="field-help">On desktop, saved keys are encrypted locally. Connecting permits this provider’s key to be used by isolated FLUJO workers. Cloud execution and billing require separate qualification.</p>
-          <p id="key-local-help" class="field-help" hidden>On desktop, saved keys are encrypted locally. The app can call this provider directly; isolated FLUJO worker use is unavailable for this connection.</p>
-        </div>
-        <div id="model-field"><label class="field-label" for="connect-model">Model <span class="optional">optional</span></label><select id="connect-model"></select></div>
-        <button id="connect-submit" class="primary-button wide" type="submit">Connect</button>
-      </form>
-      <button id="disconnect-provider" class="text-button" type="button" hidden>Disconnect provider</button>
+  <main id="movie" class="movie" aria-label="Seagulled stage">
+    <div id="frame" class="frame" aria-hidden="true"><video id="movie-video" class="movie-video" muted playsinline preload="auto"></video></div>
+    <div class="film-grain" aria-hidden="true"></div>
+    <div class="film-vignette" aria-hidden="true"></div>
+    <button id="advanced-toggle" class="chrome-button advanced-toggle" type="button" aria-label="Open advanced controls">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>
+    </button>
+    <div class="action-dock">
+      <div id="voice-level" class="voice-level" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+      <button id="action" class="action-button" type="button" aria-label="Start" data-action="start">
+        <svg id="action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.7v12.6L18.2 12 8 5.7Z"/></svg>
+      </button>
     </div>
-    <p id="provider-error" class="form-error" role="alert" hidden></p>
+    <span id="live-status" class="sr-only" role="status" aria-live="polite"></span>
+    <audio id="todd-audio" preload="none" hidden></audio>
+  </main>
+
+  <dialog id="setup-dialog" class="sheet setup-sheet" aria-labelledby="setup-title">
+    <div class="sheet-head"><h1 id="setup-title">Get the team ready</h1><button class="close-button" type="button" data-close="setup-dialog" aria-label="Close setup">×</button></div>
+    <p class="sheet-intro">Sign in with Fly and Modal in your browser. Account sign-in is separate from inference access and credits.</p>
+    <div class="auth-row"><div><strong>Fly</strong><small id="fly-state">Checking…</small></div><button id="fly-connect" class="line-button" type="button">Connect</button></div>
+    <div class="auth-row"><div><strong>Modal</strong><small id="modal-state">Checking…</small></div><button id="modal-connect" class="line-button" type="button">Connect</button></div>
+    <p id="setup-error" class="sheet-error" role="alert" hidden></p>
+    <button id="setup-continue" class="solid-button" type="button" disabled>Continue</button>
+  </dialog>
+
+  <dialog id="advanced-dialog" class="sheet advanced-sheet" aria-labelledby="advanced-title">
+    <div class="sheet-head"><h1 id="advanced-title">Advanced</h1><button class="close-button" type="button" data-close="advanced-dialog" aria-label="Close advanced controls">×</button></div>
+    <div class="setting-grid">
+      <label class="setting-label" for="budget-amount">Budget</label>
+      <div class="budget-controls"><input id="budget-amount" type="number" min="0.01" step="0.01" placeholder="Default" inputmode="decimal" aria-label="Goal budget amount"><select id="budget-currency" aria-label="Budget currency"><option value="USD">USD</option><option value="EUR">EUR</option><option value="GBP">GBP</option><option value="COP">COP</option><option value="CAD">CAD</option><option value="AUD">AUD</option></select></div>
+      <div class="budget-presets" role="group" aria-label="USD budget steps"><button type="button" data-budget-usd="25">$25</button><button type="button" data-budget-usd="50" aria-pressed="true">$50</button><button type="button" data-budget-usd="100">$100</button><button type="button" data-budget-usd="500">$500</button><button type="button" data-budget-usd="1000">$1000</button></div>
+      <small id="budget-note" class="budget-note" aria-live="polite"></small>
+      <label class="setting-label" for="workers">Workers <output id="workers-value">5</output></label><input id="workers" type="range" min="1" max="6" value="5">
+      <label class="setting-label" for="conversations">Conversations per worker <output id="conversations-value">5</output></label><input id="conversations" type="range" min="1" max="10" value="5">
+      <label class="private-h100-switch" for="private-h100"><span>Private H100 + Qwen</span><input id="private-h100" type="checkbox"></label>
+      <small id="private-h100-status" class="budget-note">Off. Enabling it at Go may create paid H100 resources and permit isolated Workers to use the newly owned bearer.</small>
+    </div>
+    <div id="text-fallback" class="text-fallback" hidden><label for="fallback-goal">Voice is unavailable. Enter one sentence here.</label><textarea id="fallback-goal" rows="2" maxlength="4000"></textarea><button id="fallback-go" class="solid-button" type="button">Go</button></div>
+    <div class="quiet-actions"><button id="pause-all" class="line-button" type="button" hidden>Pause</button><button id="resume-all" class="line-button" type="button" hidden>Resume</button><button id="stop-all" class="line-button danger" type="button" hidden>Stop</button></div>
+    <details class="work-details"><summary>Provider and spend</summary><div id="provider-details"></div><div id="spend-details"></div></details>
+    <p id="movie-status" class="movie-status">Checking approved local movie clips.</p>
+    <details id="work-details" class="work-details"><summary>Work details</summary><div id="goal-details"></div></details>
+    <p id="advanced-error" class="sheet-error" role="alert" hidden></p>
   </dialog>
 </body>
 </html>

@@ -35,6 +35,9 @@ test('Todd delegates real provider work, reviews it, critiques it, and persists 
   assert.equal(result.tasks.length, 4);
   assert.deepEqual(result.tasks.map((task) => task.status), ['completed', 'completed', 'completed', 'completed']);
   assert.equal(events.filter((event) => event.type === 'usage').length, 4);
+  assert.deepEqual(events.filter((event) => event.type === 'task' && event.task.status === 'running'
+    && ['working', 'reviewing'].includes(event.task.phase)).map((event) => event.task.phase),
+  ['working', 'working', 'reviewing', 'working']);
   assert.equal(result.usage.costUsd, 0.8);
   assert.deepEqual(providers.calls.map((call) => call.maxUsd), [5, 4.8, 4.6, 4.4]);
   assert.equal((await swarm.execute({ goal: goal() })).text, result.text, 'completed goal is read, not submitted twice');
@@ -53,6 +56,31 @@ test('an unknown provider outcome holds admission and cannot replay on restart',
   const reopened = new SwarmCoordinator({ providers, dataDir });
   await assert.rejects(reopened.execute({ goal: goal() }), /uncertain provider call/);
   assert.equal(providers.calls.length, 1);
+});
+
+test('a private request reservation survives an unknown inference outcome as pending usage', async () => {
+  const providers = manager([]);
+  const events = [];
+  providers.run = async (input) => {
+    providers.calls.push(input);
+    assert.equal(events.filter((event) => event.type === 'reservation').length, 1,
+      'private allowance is held before request submission');
+    throw Object.assign(new Error('private response lost'), { outcome: 'unknown',
+      reservation: { id: input.requestId, amountUsd: 2.5, kind: 'estimated-upper' } });
+  };
+  const swarm = new SwarmCoordinator({ providers, dataDir: directory(), onEvent: (event) => events.push(event) });
+  await assert.rejects(swarm.execute({ goal: goal({ providerId: 'private-h100' }) }), /private response lost/);
+  const receipt = Object.values(swarm.registry.state.runs).find((run) => run.goalId === 'goal-one');
+  assert.equal(receipt.state, 'unknown');
+  assert.equal(receipt.usage.costUsd, null);
+  assert.equal(receipt.usage.costKind, 'unknown');
+  assert.equal(receipt.usage.reservedUsd, 2.5);
+  assert.equal(receipt.usage.billingPending, true);
+  assert.equal(receipt.usage.reservationId, receipt.id);
+  assert.equal(events.find((event) => event.type === 'reservation').reservation.id, receipt.id);
+  assert.equal(providers.calls[0].requestId, receipt.id);
+  assert.equal(providers.calls[0].goalId, 'goal-one');
+  assert.equal(events.filter((event) => event.type === 'usage').length, 1);
 });
 
 test('unknown spend stops subsequent paid work after the terminal receipt', async () => {
@@ -77,6 +105,17 @@ test('an already aborted goal creates no registry work', async () => {
   assert.equal(providers.calls.length, 0);
 });
 
+test('invalid worker and per-worker agent settings create no provider or registry work', async () => {
+  for (const patch of [{ maxWorkers: 7 }, { maxWorkers: 1.5 }, { conversationsPerWorker: 0 },
+    { conversationsPerWorker: 11 }, { agentsPerWorker: 11 }, { agentsPerWorker: '3' }]) {
+    const providers = manager([]);
+    const swarm = new SwarmCoordinator({ providers, dataDir: directory() });
+    await assert.rejects(swarm.execute({ goal: goal(patch) }), /must be an integer/);
+    assert.equal(swarm.registry.state.goals['goal-one'], undefined);
+    assert.equal(providers.calls.length, 0);
+  }
+});
+
 test('pause at a completed call resumes the exact next stage with edited goal and budget', async () => {
   const providers = manager([
     JSON.stringify({ done: false, tasks: [{ task: 'Build the original feature' }] }),
@@ -92,11 +131,13 @@ test('pause at a completed call resumes the exact next stage with edited goal an
   await assert.rejects(swarm.execute({ goal: goal(), signal: controller.signal }), { name: 'AbortError' });
   assert.equal(providers.calls.length, 1);
   const reopened = new SwarmCoordinator({ providers, dataDir });
-  const result = await reopened.execute({ goal: goal({ text: 'Ship the changed feature', budgetUsd: 6, spentUsd: 0.2 }) });
+  const result = await reopened.execute({ goal: goal({ text: 'Ship the changed feature', budgetUsd: 6,
+    spentUsd: 0.2, maxWorkers: 3, agentsPerWorker: 4 }) });
   assert.equal(result.completed, true);
   assert.equal(result.tasks.length, 4);
   assert.deepEqual(providers.calls.map((call) => call.role), ['lead', 'developer', 'reviewer', 'lead']);
   assert.equal(providers.calls[1].maxUsd, 5.8);
+  assert.equal(reopened.registry.goal('goal-one').limits.maxWorkers, 3);
   assert.match(providers.calls[1].prompt, /changed feature/);
   assert.equal(providers.calls.filter((call) => call.role === 'lead' && call.prompt.includes('Return JSON with {"done"')).length, 1);
 });
@@ -140,14 +181,43 @@ test('one isolated Fly developer receipt holds further paid review while cloud a
         sandbox: { kind: 'fly', workerId: 'fictional-fly-worker', retired: true, cleanupConfirmed: true },
         artifacts: [{ path: '/fictional/fly-result.txt', bytes: 42, sha256: 'a'.repeat(64), kind: 'run-result' }] };
     }, onEvent: (event) => events.push(event) });
-  await assert.rejects(swarm.execute({ goal: goal() }), /spend is unknown/);
+  await assert.rejects(swarm.execute({ goal: goal({ maxWorkers: 6, conversationsPerWorker: 5 }) }), /spend is unknown/);
   assert.equal(fleetCalls.length, 1);
   assert.equal(fleetCalls[0].fleetRoute.providerId, 'fictional');
+  assert.equal(fleetCalls[0].goal.maxWorkers, 6);
+  assert.equal(fleetCalls[0].goal.conversationsPerWorker, 5);
+  assert.equal(fleetCalls[0].goal.agentsPerWorker, 4);
   assert.equal(readFileSync(path.join(dataDir, 'swarm', 'registry.json'), 'utf8').includes(privateKey), false);
   assert.equal(swarm.tasks('goal-one')[1].sandbox.kind, 'fly');
   assert.equal(swarm.tasks('goal-one')[1].artifacts[0].kind, 'run-result');
   assert.equal(events.find((event) => event.type === 'usage' && event.usage.billingPending)?.usage.reservedUsd, 4.8);
   assert.deepEqual(providers.calls.map((call) => call.role), ['lead']);
+});
+
+test('private Fly admission reserves the full remaining allowance before cloud work', async () => {
+  const providers = manager([JSON.stringify({ done: false, tasks: [{ task: 'Build with Workers' }] })]);
+  providers.fleetRoute = (providerId, goalId) => ({ available: true, providerId, leaseGoalId: goalId });
+  const events = [];
+  const swarm = new SwarmCoordinator({ providers, dataDir: directory(), fleet: 'auto',
+    fleetRunner: async (input) => {
+      assert.equal(input.goal.workerTopologyVersion, 2);
+      input.reserveCloud({ id: input.reservationId, amountUsd: input.maxUsd });
+      assert.equal(events.filter((event) => event.type === 'reservation').length, 2,
+        'native lead and Fly team each have a durable before-call reservation');
+      return { available: true, text: 'Fixture Worker result', usage: {
+        costUsd: null, costKind: 'unknown', reservedUsd: input.maxUsd,
+        reservationId: input.reservationId, billingPending: true },
+        sandbox: { kind: 'fly', workerCount: 5, conversationCountVerified: 25 } };
+    }, onEvent: (event) => events.push(event) });
+  await assert.rejects(swarm.execute({ goal: goal({ providerId: 'private-h100', budgetUsd: 10,
+    maxWorkers: 5, workerTopologyVersion: 2 }) }), /spend is unknown/);
+  const reservations = events.filter((event) => event.type === 'reservation').map((event) => event.reservation);
+  assert.equal(reservations.length, 2);
+  assert.equal(reservations[0].amountUsd, 2.5);
+  assert.equal(reservations[1].amountUsd, 9.8);
+  assert.equal(reservations[1].id.endsWith('-fly'), true);
+  assert.equal(events.filter((event) => event.type === 'usage' && event.usage.reservationId === reservations[1].id).length, 1);
+  assert.equal(providers.calls.length, 1, 'the developer task did not submit a direct native request');
 });
 
 test('an unavailable or mismatched selected-provider route never invokes the fleet runner', async () => {

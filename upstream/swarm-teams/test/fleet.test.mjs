@@ -18,7 +18,7 @@ const temporary = () => path.join(mkdtempSync(path.join(tmpdir(), 'swarm-teams-'
 
 /** A FLUJO stand-in that records calls and answers flow runs after `delayMs`. */
 async function fakeFlujo({ delayMs = 0 } = {}) {
-  const state = { workspaces: ['default'], servers: {}, flows: {}, runs: [], injected: [], deleted: [] };
+  const state = { workspaces: ['default'], servers: {}, flows: {}, compiled: [], runs: [], injected: [], deleted: [] };
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, 'http://flujo');
     const workspace = url.searchParams.get('workspace');
@@ -37,6 +37,7 @@ async function fakeFlujo({ delayMs = 0 } = {}) {
     if (route === 'POST /api/mcp/servers') { (state.servers[workspace] ??= {})[body.name] = body; return send(201, body); }
     if (route === 'GET /api/flow') return send(200, Object.values(state.flows[workspace] ?? {}));
     if (route === 'POST /api/flow/compile') {
+      state.compiled.push({ workspace, spec: body.spec });
       (state.flows[workspace] ??= {})[body.spec.name] = { id: `${workspace}-${body.spec.name}`, name: body.spec.name };
       return send(201, { flow: state.flows[workspace][body.spec.name], saved: true });
     }
@@ -112,6 +113,40 @@ test('controller preserves an explicit goal id and rejects its collision before 
       supervisor, model, start: false }), (error) => error.code === 'CONFLICT');
     assert.deepEqual(Object.keys(controller.registry.state.goals), previousGoals);
     assert.deepEqual(Object.keys(controller.registry.state.workers), previousWorkers);
+  } finally { await close(); }
+});
+
+test('a selected generic team gate reaches root and child workspace installs', async () => {
+  const { flujo, controller, model, close } = await fixture();
+  try {
+    const supervisor = { origin: flujo.origin, workspace: 'default' };
+    await assert.rejects(controller.createGoal({ id: 'invalid-gate', text: 'fixture', supervisor, model,
+      teamLimits: { concurrency: 11 }, start: false }), /Invalid team limit concurrency/);
+    assert.equal(controller.registry.state.goals['invalid-gate'], undefined);
+    const created = await controller.createGoal({ id: 'selected-gate', text: 'fixture', supervisor, model,
+      teamLimits: { concurrency: 9 }, start: false });
+    const rootTeam = flujo.state.compiled.find((entry) => entry.workspace === 'default' && entry.spec.name === 'swarm_team');
+    assert.equal(rootTeam.spec.nodes.find((node) => node.type === 'subflow').concurrencyLimit, 9);
+    assert.deepEqual(created.goal.teamLimits, { concurrency: 9 });
+    const child = controller.delegate(controller.registry.worker(created.supervisorId),
+      { name: 'child', task: 'fixture work' });
+    await controller.provisioning.get(child.workerId);
+    await controller.settled.get(child.runId);
+    const childTeam = flujo.state.compiled.find((entry) => entry.workspace === `swarm-${child.workerId}`
+      && entry.spec.name === 'swarm_team');
+    assert.equal(childTeam.spec.nodes.find((node) => node.type === 'subflow').concurrencyLimit, 9);
+  } finally { await close(); }
+});
+
+test('controller installs a one-conversation goal without a local child gate', async () => {
+  const { flujo, controller, model, close } = await fixture();
+  try {
+    const created = await controller.createGoal({ id: 'lead-only-goal', text: 'fixture',
+      supervisor: { origin: flujo.origin, workspace: 'default' }, model,
+      teamLimits: { concurrency: 0 }, start: false });
+    assert.deepEqual(created.goal.teamLimits, { concurrency: 0 });
+    const rootTeam = flujo.state.compiled.find((entry) => entry.workspace === 'default' && entry.spec.name === 'swarm_team');
+    assert.equal(rootTeam.spec.nodes.some((node) => node.type === 'subflow'), false);
   } finally { await close(); }
 });
 

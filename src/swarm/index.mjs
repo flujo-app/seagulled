@@ -1,11 +1,12 @@
 import path from 'node:path';
 import { homedir } from 'node:os';
 import { Registry } from '../../upstream/swarm-teams/fleet/registry.mjs';
-import { fleetStatus, runFleetLeaf } from './fleet.mjs';
+import { fleetStatus, goalCapacity, runFleetLeaf } from './fleet.mjs';
 
 export const TODD_PERSONA = `You are Todd, the lead of a bounded team: busy, blunt, dryly funny, and good at checking actual work. Translate the user's goal into concrete assignments, inspect the developer and reviewer results supplied to you, and revise the plan when evidence warrants it. The host application handles delegation. Do not invoke Codex collaboration, spawn agents, or attempt tool calls yourself; answer only with the requested JSON or prose. Never claim that a plan, fixture, estimate, or proposed change is a completed real-world action. State uncertainty and remaining work plainly. In user-facing prose name downloadable files by filename, without host paths, commands, or ports.`;
 
 const MAX_CALLS = 6;
+const PRIVATE_REQUEST_RESERVE_USD = 2.50;
 const trim = (value, length = 64_000) => String(value ?? '').slice(0, length);
 const finite = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0;
 const aborted = (signal) => {
@@ -31,6 +32,8 @@ const usageOf = (value) => {
     costKind,
     ...(finite(usage.reservedUsd) ? { reservedUsd: usage.reservedUsd } : {}),
     ...(usage.billingPending === true ? { billingPending: true } : {}),
+    ...(typeof usage.reservationId === 'string' && /^[\w-]{1,100}$/.test(usage.reservationId)
+      ? { reservationId: usage.reservationId } : {}),
   };
 };
 
@@ -89,7 +92,7 @@ export class SwarmCoordinator {
     if (goal.text.length > 10_000) throw new Error('This goal is too long for the connected provider. Shorten it to 10,000 characters.');
     if (!finite(goal.budgetUsd) || goal.budgetUsd <= 0 || !finite(goal.spentUsd ?? 0)) throw new Error('A positive goal budget and valid spend are required.');
     if (!goal.providerId) throw new Error('Connect a provider before starting this goal.');
-    const maxWorkers = Math.min(Math.max(Number.isInteger(goal.maxWorkers) ? goal.maxWorkers : 2, 1), 6);
+    const { maxWorkers, conversationsPerWorker, agentsPerWorker } = goalCapacity(goal);
     if (this.active.has(goal.id)) throw new Error('This goal is already running.');
     const saved = this.registry.state.goals[goal.id];
     if (saved?.state === 'done') return this.summary(goal.id, saved.result);
@@ -104,6 +107,9 @@ export class SwarmCoordinator {
     const record = saved ?? this.registry.createGoal({ id: goal.id, text: goal.text, limits: {
       maxWorkers, maxChildren: maxWorkers, maxDepth: 1, maxActiveRuns: 1,
     } });
+    if (saved && (record.limits.maxWorkers !== maxWorkers || record.limits.maxChildren !== maxWorkers)) {
+      record.limits.maxWorkers = maxWorkers; record.limits.maxChildren = maxWorkers; this.registry.save();
+    }
     if (saved && saved.text !== goal.text) {
       record.text = goal.text; record.revision = (record.revision ?? 1) + 1;
       record.editedAt = Date.now(); this.registry.save();
@@ -142,16 +148,22 @@ export class SwarmCoordinator {
       run.prompt = prompt;
       this.registry.save();
       calls++;
-      this.emit({ type: 'task', goalId: goal.id, task: { id: run.id, role, status: 'running', text: task, prompt } });
+      this.emit({ type: 'task', goalId: goal.id, task: { id: run.id, role, status: 'running',
+        phase: role === 'reviewer' ? 'reviewing' : 'working', text: task, prompt } });
+      let privateRequestReserved = false;
       try {
         // Stream usage is deliberately ignored here. Only the terminal receipt is counted.
         let result;
         if (role === 'developer' && this.fleet === 'auto' && !fleetUsed) {
           const route = typeof this.providers.fleetRoute === 'function'
-            ? await this.providers.fleetRoute(goal.providerId) : { available: false };
+            ? await this.providers.fleetRoute(goal.providerId, goal.id) : { available: false };
           if (route?.available === true && route.providerId === goal.providerId) {
-            const remote = await this.fleetRunner({ goal, task: `ASSIGNMENT:\n${task}\n\nWork in your isolated sandbox. Report what was actually run and checked, plus paths and limits.`,
+            const remoteGoal = { ...goal, maxWorkers, agentsPerWorker,
+              ...(conversationsPerWorker <= 10 ? { conversationsPerWorker } : {}) };
+            const remote = await this.fleetRunner({ goal: remoteGoal, task: `ASSIGNMENT:\n${task}\n\nWork in your isolated sandbox. Report what was actually run and checked, plus paths and limits.`,
               dataDir: this.dataDir, signal, maxUsd: remaining, fleetRoute: route,
+              reservationId: `${run.id}-fly`,
+              reserveCloud: (reservation) => this.emit({ type: 'reservation', goalId: goal.id, reservation }),
               onStatus: (text) => this.emit({ type: 'task', goalId: goal.id,
                 task: { id: run.id, role, status: 'running', phase: trim(text, 200) } }) });
             if (remote.available) { result = remote; fleetUsed = true; }
@@ -160,9 +172,22 @@ export class SwarmCoordinator {
               task: { id: run.id, role, status: 'running', phase: 'The selected provider has no qualified Fly route; continuing locally.' } });
           }
         }
-        if (!result) result = await this.providers.run({ providerId: goal.providerId, prompt, signal, maxUsd: remaining,
-          goalId: goal.id, role, onEvent: () => undefined });
-        const usage = usageOf(result?.usage);
+        if (!result) {
+          if (goal.providerId === 'private-h100') {
+            if (remaining < PRIVATE_REQUEST_RESERVE_USD) throw Object.assign(
+              new Error('The remaining allowance cannot admit a private H100 request.'), { outcome: 'not_applied' });
+            privateRequestReserved = true;
+            this.emit({ type: 'reservation', goalId: goal.id,
+              reservation: { id: run.id, amountUsd: PRIVATE_REQUEST_RESERVE_USD } });
+          }
+          result = await this.providers.run({ providerId: goal.providerId, prompt, signal, maxUsd: remaining,
+            goalId: goal.id, requestId: goal.providerId === 'private-h100' ? run.id : undefined,
+            role, onEvent: () => undefined });
+        }
+        const usage = usageOf({ ...result?.usage,
+          ...(privateRequestReserved ? { reservationId: run.id,
+            ...(!finite(result?.usage?.costUsd) ? { reservedUsd: PRIVATE_REQUEST_RESERVE_USD,
+              billingPending: true } : {}) } : {}) });
         if (usage.costKind === 'unknown' || usage.costUsd === null && usage.costKind !== 'subscription') uncertainSpend = true;
         if (usage.costUsd !== null) spent += usage.costUsd;
         this.registry.settleRun(run.id, { status: 'completed', output: result?.text, usage });
@@ -186,7 +211,16 @@ export class SwarmCoordinator {
       } catch (error) {
         const known = ['not_applied', 'failed'].includes(error?.outcome) || error?.code === 'PROVIDER_UNAVAILABLE';
         const status = known ? 'failed' : 'unknown';
-        const usage = error?.usage ? usageOf(error.usage) : undefined;
+        const pendingReservation = error?.reservation?.kind === 'estimated-upper'
+          && finite(error.reservation.amountUsd) ? error.reservation.amountUsd
+          : privateRequestReserved ? PRIVATE_REQUEST_RESERVE_USD : null;
+        const usage = error?.usage || pendingReservation !== null
+          ? usageOf({ ...error.usage, ...(pendingReservation !== null ? {
+            costUsd: error?.outcome === 'not_applied' ? 0 : null,
+            costKind: error?.outcome === 'not_applied' ? 'estimated' : 'unknown',
+            ...(error?.outcome === 'not_applied' ? {} : { reservedUsd: pendingReservation, billingPending: true }),
+            reservationId: run.id,
+          } : {}) }) : undefined;
         this.registry.settleRun(run.id, { status, output: '', error: trim(error.message, 500), usage });
         this.emit({ type: 'task', goalId: goal.id, task: { id: run.id, role, status, text: task } });
         if (usage) { this.emit({ type: 'usage', goalId: goal.id, usage: { ...usage, taskId: run.id } }); error.usageRecorded = true; }

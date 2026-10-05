@@ -17,3 +17,27 @@ export function validateConnectPayload(value) {
   }
   return payload;
 }
+
+export function validateGoalOptions(value={}) {
+  if(!value||typeof value!=='object'||Array.isArray(value))throw new Error('Goal settings are invalid.');
+  if(value.privateH100!==undefined&&typeof value.privateH100!=='boolean')throw new Error('Private H100 choice is invalid.');
+  const maxWorkers=Number(value.maxWorkers??5),conversationsPerWorker=Number(value.conversationsPerWorker??5);
+  if(!Number.isInteger(maxWorkers)||maxWorkers<1||maxWorkers>6)throw new Error('Workers must be between 1 and 6.');
+  if(!Number.isInteger(conversationsPerWorker)||conversationsPerWorker<1||conversationsPerWorker>10)throw new Error('Conversations per worker must be between 1 and 10.');
+  const options={maxWorkers,conversationsPerWorker};
+  if(value.privateH100!==undefined)options.privateH100=value.privateH100;
+  if(value.budget!==undefined){
+    if(!value.budget||typeof value.budget!=='object'||Array.isArray(value.budget))throw new Error('Budget is invalid.');
+    const amount=Number(value.budget.amount),currency=value.budget.currency;
+    if(!Number.isFinite(amount)||amount<=0||typeof currency!=='string'||!/^[A-Z]{3}$/.test(currency))throw new Error('Budget is invalid.');
+    options.budget={amount,currency};
+  }
+  return options;
+}
+
+export function validateVoiceInput(value) {
+  if(!value||typeof value!=='object'||Array.isArray(value)||value.mimeType!=='audio/wav'||typeof value.dataBase64!=='string'||value.dataBase64.length>2_800_000||!/^[A-Za-z0-9+/]*={0,2}$/.test(value.dataBase64))throw new Error('Recording is invalid.');
+  const result={mimeType:'audio/wav',dataBase64:value.dataBase64};
+  if(value.language!==undefined){if(typeof value.language!=='string'||!(/^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8}){0,2}$/).test(value.language))throw new Error('Voice language is invalid.');result.language=value.language;}
+  return result;
+}

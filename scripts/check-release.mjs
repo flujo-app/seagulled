@@ -20,7 +20,7 @@ for (const file of files) {
     try { execFileSync(process.execPath, ['--check', file], { stdio: 'pipe' }); }
     catch { issues.push(`Syntax check failed: ${relative}`); }
   }
-  if (!/\.(md|json|mjs|cjs|js|html|css|yml)$/.test(file) || /package-lock\.json$/.test(file)) continue;
+  if (!/\.(md|json|mjs|cjs|js|py|html|css|yml)$/.test(file) || /package-lock\.json$/.test(file)) continue;
   const text = readFileSync(file, 'utf8');
   if (/gh[pousr]_[A-Za-z0-9]{25,}|sk-(?:proj-)?[A-Za-z0-9_-]{24,}|-----BEGIN (?:RSA |OPENSSH )?PRIVATE KEY-----/.test(text)) issues.push(`Credential pattern: ${relative}`);
   if ((relative === 'README.md' || relative.startsWith('docs/')) && /hackathon/i.test(text)) issues.push(`Private project reference: ${relative}`);

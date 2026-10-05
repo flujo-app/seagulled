@@ -16,15 +16,20 @@ const HELP = `Seagulled — talk to Todd, supervise the team.
   seagulled providers                Discover providers
   seagulled connect PROVIDER          Use native sign-in, or a saved key
   seagulled connect PROVIDER --key-env ENV_NAME --method key
-  seagulled edit GOAL --text "…" --budget 5
+  seagulled edit GOAL --text "…" --budget 50
   seagulled pause|resume|stop GOAL
   seagulled pause-all|resume-all|stop-all
 
-Options: --budget USD, --provider ID, --home DIRECTORY, --json, --no-open
+Options: --budget AMOUNT [--currency ISO_CODE], --workers COUNT,
+         --conversations COUNT, --private-h100 | --no-private-h100,
+         --provider ID, --home DIRECTORY, --json, --no-open
+Defaults: 50 USD, five workers, five total conversations per worker.
 Saved state lives in your private Seagulled folder. Keys stay out of arguments.
 `;
 const { positionals, values } = parseArgs({ allowPositionals: true, options: {
   budget: { type: 'string' }, provider: { type: 'string' }, home: { type: 'string' }, json: { type: 'boolean' },
+  currency: { type: 'string' }, workers: { type: 'string' }, conversations: { type: 'string' },
+  'private-h100': { type: 'boolean' }, 'no-private-h100': { type: 'boolean' },
   text: { type: 'string' }, method: { type: 'string' }, 'key-env': { type: 'string' }, 'no-open': { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
 } });
 const [command = 'chat', ...args] = positionals;
@@ -88,8 +93,18 @@ async function cleanup() { await service?.close(); await runtime?.close(); }
 try {
   if (values.help || command === 'help') { print(HELP); }
   else {
+    if (values.currency !== undefined && values.budget === undefined) throw new Error('Choose an amount with the budget currency.');
+    if (values['private-h100'] && values['no-private-h100']) throw new Error('Choose one private inference setting.');
+    const options = {
+      ...(values.budget !== undefined ? values.currency !== undefined
+        ? { budget: { amount: Number(values.budget), currency: values.currency.toUpperCase() } }
+        : { budgetUsd: Number(values.budget) } : {}),
+      ...(values.workers !== undefined ? { maxWorkers: Number(values.workers) } : {}),
+      ...(values.conversations !== undefined ? { conversationsPerWorker: Number(values.conversations) } : {}),
+      ...(values['private-h100'] ? { privateH100: true } : values['no-private-h100'] ? { privateH100: false } : {}),
+      ...(values.provider ? { providerId: values.provider } : {}),
+    };
     const app = await client();
-    const options = { ...(values.budget ? { budgetUsd: Number(values.budget) } : {}), ...(values.provider ? { providerId: values.provider } : {}) };
     if (command === 'serve') {
       const endpoint = app.session || (service = await createServer({ runtime }));
       if (!values['no-open']) open(`${endpoint.url}/#token=${encodeURIComponent(endpoint.token)}`);
@@ -104,7 +119,7 @@ try {
       print(await app.connect({ id: args[0], method: values.method || (key ? 'key' : 'subscription'), ...(key ? { key } : {}) }));
     } else if (['pause', 'resume', 'stop'].includes(command)) print(await app.controlGoal(args[0], command));
     else if (['pause-all', 'resume-all', 'stop-all'].includes(command)) showState(await app.controlSwarm(command.split('-')[0]));
-    else if (command === 'edit') print(await app.updateGoal(args[0], { ...(values.text ? { text: values.text } : {}), ...(values.budget ? { budgetUsd: Number(values.budget) } : {}) }));
+    else if (command === 'edit') print(await app.updateGoal(args[0], { ...(values.text ? { text: values.text } : {}), ...options }));
     else if (command === 'goal') {
       const goal = await app.chat(args.join(' '), options); print(`Todd: On it. Goal ${goal.id}.`);
       const stop = async () => { await app.controlGoal(goal.id, 'pause').catch(() => {}); };

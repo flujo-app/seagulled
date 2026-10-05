@@ -14,6 +14,123 @@ const legacyProfilePath = () => path.join(process.env.SWARM_TEAMS_HOME || path.j
 const profilePath = () => process.env.SEAGULLED_FLEET_PROFILE || legacyProfilePath();
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const unknown = (message) => Object.assign(new Error(message), { code: 'UNKNOWN', unknown: true });
+const boundedCount = (value, fallback, maximum, name) => {
+  if (value === undefined) return fallback;
+  if (!Number.isInteger(value) || value < 1 || value > maximum) {
+    throw new RangeError(`${name} must be an integer from 1 to ${maximum}.`);
+  }
+  return value;
+};
+export function goalCapacity(goal = {}) {
+  if (goal.workerTopologyVersion !== undefined && ![1, 2].includes(goal.workerTopologyVersion)) {
+    throw new RangeError('workerTopologyVersion must be 1 or 2.');
+  }
+  const maxWorkers = boundedCount(goal.maxWorkers, 5, 6, 'maxWorkers');
+  // Earlier saved goals allowed ten child agents (eleven total conversations).
+  // Preserve that exact legacy capacity only when its derived child count agrees.
+  const legacyEleven = goal.conversationsPerWorker === 11 && goal.agentsPerWorker === 10;
+  const selected = goal.conversationsPerWorker === undefined ? undefined
+    : legacyEleven ? 11 : boundedCount(goal.conversationsPerWorker, 5, 10, 'conversationsPerWorker');
+  const legacy = goal.agentsPerWorker;
+  if (legacy !== undefined && (!Number.isInteger(legacy) || legacy < 0 || legacy > 10)) {
+    throw new RangeError('agentsPerWorker must be an integer from 0 to 10.');
+  }
+  if (selected !== undefined && legacy !== undefined && legacy !== selected - 1) {
+    throw new RangeError('conversationsPerWorker and agentsPerWorker disagree.');
+  }
+  const conversationsPerWorker = selected ?? (legacy === undefined ? 5 : legacy + 1);
+  return { maxWorkers, conversationsPerWorker, agentsPerWorker: conversationsPerWorker - 1 };
+}
+export function fleetTopology(goal, { workerCap, relay = false } = {}) {
+  if (!Number.isInteger(workerCap) || workerCap < 1 || workerCap > 6) throw new RangeError('Worker count must be 1 to 6.');
+  const version = goal?.workerTopologyVersion === 2 ? 2 : 1;
+  const initialWorkers = version === 2 ? workerCap : 1;
+  const maxWorkers = version === 2 ? Math.min(12, workerCap * 2) : workerCap;
+  return { initialWorkers, limits: { maxWorkers,
+    maxDepth: relay ? version === 2 ? 3 : 2 : 1,
+    maxChildren: relay ? Math.max(1, workerCap - 1) : 1, maxActiveRuns: 2 } };
+}
+const legacyWorkerCap = (config) => Number.isInteger(config?.maxWorkers)
+  ? Math.min(Math.max(config.maxWorkers, 1), 6) : 3;
+export function fleetExecutionLimits({ goal, config, diagnostic = false, native = false } = {}) {
+  const capacity = goalCapacity(goal);
+  return {
+    workerCap: native ? 1 : diagnostic && goal?.maxWorkers === undefined
+      ? legacyWorkerCap(config) : capacity.maxWorkers,
+    teamLimits: { agentTurns: 6, leadTurns: 12, concurrency: capacity.agentsPerWorker },
+  };
+}
+const STAFF_BRANCHES = Object.freeze([
+  { name: 'context-evidence', angle: 'Map the context and gather primary evidence.' },
+  { name: 'solution-build', angle: 'Develop and check a concrete solution.' },
+  { name: 'independent-verification', angle: 'Independently verify the proposed result and artifacts.' },
+  { name: 'adversarial-review', angle: 'Challenge the conclusion with counterexamples and unresolved risks.' },
+  { name: 'handoff-synthesis', angle: 'Reconcile the evidence and prepare a bounded handoff.' },
+]);
+
+/** Admit real controller Worker runs, with one coordinating parent and bounded descendants. */
+export function staffOwnedTeam(controller, root, { task, workerCap, localChildTarget = 4,
+  onReserved = () => undefined, onStaffed = () => undefined } = {}) {
+  if (!Number.isInteger(workerCap) || workerCap < 1 || workerCap > 6) throw new RangeError('Worker count must be 1 to 6.');
+  if (!Number.isInteger(localChildTarget) || localChildTarget < 0 || localChildTarget > 10) {
+    throw new RangeError('Local child conversation count must be 0 to 10.');
+  }
+  const localStaffing = localChildTarget
+    ? `At the start of this run, call the installed start_subflow_ tool exactly ${localChildTarget} times with distinct concrete tasks. ` +
+      'Record the returned child conversation IDs; then steer and wait for those same children. ' +
+      'Do not start replacement local subflows or report a capacity gate as actual staffing. '
+    : 'This Worker has only its lead conversation; do not start a local subflow. ';
+  const leadTask = `${task}\n\n` +
+    `You coordinate ${workerCap} owned Worker Machine${workerCap === 1 ? '' : 's'}, including yourself. ` +
+    localStaffing +
+    'Read fleet_info for the already staffed child run IDs, steer them with fleet_message, wait for their original results, ' +
+    'and compare findings on the shared board. Do not redelegate a branch that is already staffed. ' +
+    'Report which Worker runs and local agent conversations actually completed.';
+  const lead = controller.delegate(root, { name: 'coordinating-worker', task: leadTask, deferRun: true });
+  onReserved(lead);
+  const leadWorker = controller.registry.worker(lead.workerId);
+  const prepared = [{ actor: root, worker: leadWorker, task: leadTask }];
+  for (const branch of STAFF_BRANCHES.slice(0, workerCap - 1)) {
+    const childTask = `${task}\n\n` +
+      `YOUR DISTINCT ANGLE: ${branch.angle} ${localStaffing}` +
+      'post findings with evidence to the shared board, and report actual conversation IDs and remaining uncertainty. ' +
+      'Your coordinating Worker can send you messages through the owned relay.';
+    const child = controller.delegate(leadWorker, { name: branch.name, task: childTask, deferRun: true });
+    onReserved(child);
+    prepared.push({ actor: leadWorker, worker: controller.registry.worker(child.workerId), task: childTask });
+  }
+  const runs = new Array(prepared.length);
+  // Child run IDs exist before the coordinating lead can inspect fleet_info.
+  for (const index of [...prepared.keys()].slice(1).concat(0)) {
+    const entry = prepared[index];
+    const run = controller.startDelegatedRun(entry.actor, entry.worker, entry.task);
+    const accepted = { workerId: entry.worker.id, runId: run.id, state: 'provisioning' };
+    runs[index] = accepted; onStaffed(accepted, runs.filter(Boolean));
+  }
+  return { lead: runs[0], runs };
+}
+export function verifiedLocalConversations(read, parentConversationId, target) {
+  const page = read?.body;
+  if (read?.status !== 200 || !Array.isArray(page?.items) || !Number.isInteger(page.total)
+    || page.hasMore !== false || page.total !== page.items.length) {
+    throw unknown('FLUJO did not confirm the original Worker conversation tree.');
+  }
+  const descendants = page.items;
+  const ids = new Set();
+  for (const item of descendants) {
+    if (!item || typeof item.id !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(item.id)
+      || typeof item.parentConversationId !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(item.parentConversationId)
+      || ids.has(item.id)) throw unknown('FLUJO returned an invalid Worker conversation tree.');
+    ids.add(item.id);
+  }
+  if (descendants.length !== target || descendants.some((item) => item.parentConversationId !== parentConversationId)) {
+    throw Object.assign(new Error(`Worker started ${descendants.length} local conversations; exactly ${target} were requested.`),
+      { outcome: 'failed', localConversations: descendants.map((item) => ({
+        id: item.id, parentConversationId: item.parentConversationId, status: safeFailureField(item.status) ?? 'unknown',
+      })) });
+  }
+  return descendants.map(({ id, status }) => ({ id, status: safeFailureField(status) ?? 'unknown' }));
+}
 const sourceFingerprint = (origin) => createHash('sha256').update(new URL(origin).origin.toLowerCase()).digest('hex').slice(0, 24);
 const holdPath = (dataDir, origin) => path.join(dataDir, 'fleet', `source-admission-${sourceFingerprint(origin)}.json`);
 const sourceHold = (dataDir, origin) => dataDir && existsSync(holdPath(dataDir, origin));
@@ -105,18 +222,34 @@ const PRODUCT_BINDINGS = Object.freeze({
   openai: { provider: 'openai', adapter: 'openai-responses', baseUrl: 'https://api.openai.com/v1' },
   anthropic: { provider: 'anthropic', adapter: 'anthropic', baseUrl: 'https://api.anthropic.com' },
 });
-const exactProductBinding = (providerId, model) => {
+const exactProductBinding = (providerId, model, route) => {
+  if (providerId === 'private-h100') {
+    try {
+      const url = new URL(model?.baseUrl);
+      return model.name === 'qwen3.8-27b' && model.provider === 'openai' && model.adapter === 'openai'
+        && url.protocol === 'https:' && !url.username && !url.password && !url.port
+        && (url.hostname.endsWith('.modal.run') || url.hostname.endsWith('.modal.direct'))
+        && /(?:^|[.-])seagulled-qwen-[a-f0-9]{12}(?:[.-]|$)/.test(url.hostname)
+        && model.baseUrl === `${url.origin}/v1` && !url.search && !url.hash
+        && (!route || route.verification === 'previously-verified'
+          && route.costPolicy === 'estimated-gpu-seconds'
+          && /^[a-f0-9-]{36}$/.test(route.ownedAttemptId ?? ''));
+    } catch { return false; }
+  }
   const expected = PRODUCT_BINDINGS[providerId];
   return Boolean(expected && model && Object.entries(expected).every(([field, value]) => model[field] === value));
 };
 
 /** Read-only discovery. Product calls require the selected provider's private route. */
-async function inspectFleet({ dataDir, providerId, fleetRoute, diagnostic = false } = {}) {
+async function inspectFleet({ dataDir, providerId, fleetRoute, goalId, diagnostic = false } = {}) {
   if (!diagnostic && (fleetRoute?.available !== true || fleetRoute.providerId !== providerId
     || typeof providerId !== 'string' || !providerId)) {
     return { available: false, detail: 'The selected provider has no Fly route. Local provider work remains available.' };
   }
-  if (!diagnostic && (!exactProductBinding(providerId, fleetRoute.model)
+  if (!diagnostic && providerId === 'private-h100' && fleetRoute.leaseGoalId !== goalId) {
+    return { available: false, detail: 'The private Worker route is not leased to this goal.' };
+  }
+  if (!diagnostic && (!exactProductBinding(providerId, fleetRoute.model, fleetRoute)
     || typeof fleetRoute.model.name !== 'string' || !fleetRoute.model.name
     || typeof fleetRoute.model.apiKey !== 'string' || !fleetRoute.model.apiKey)) {
     return { available: false, detail: 'The selected provider has no usable Fly model binding.' };
@@ -189,8 +322,8 @@ async function inspectFleet({ dataDir, providerId, fleetRoute, diagnostic = fals
   return { available: false, detail: `The configured FLUJO model endpoint is unavailable (${original.detail}); no working API fallback was found.` };
 }
 
-export async function fleetStatus({ dataDir, providerId, fleetRoute } = {}) {
-  const { config, ...publicState } = await inspectFleet({ dataDir, providerId, fleetRoute });
+export async function fleetStatus({ dataDir, providerId, fleetRoute, goalId } = {}) {
+  const { config, ...publicState } = await inspectFleet({ dataDir, providerId, fleetRoute, goalId });
   return publicState;
 }
 
@@ -202,9 +335,10 @@ export async function fleetDiagnosticStatus({ dataDir } = {}) {
 
 /** One owned Fly leaf, with no existing fleet writer or Machine adoption. */
 export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetRoute,
-  diagnostic = false, onStatus = () => undefined }) {
+  diagnostic = false, reservationId, reserveCloud, onStatus = () => undefined }) {
   if (!goal || typeof goal.id !== 'string' || !/^[\w-]{1,100}$/.test(goal.id)) throw new Error('A safe goal id is required for isolated fleet work.');
-  const discovered = await inspectFleet({ dataDir, providerId: goal.providerId, fleetRoute, diagnostic });
+  goalCapacity(goal);
+  const discovered = await inspectFleet({ dataDir, providerId: goal.providerId, fleetRoute, goalId: goal.id, diagnostic });
   if (!discovered.available) return { available: false, detail: discovered.detail };
   const config = discovered.config;
   const bootWorkspace = `seagulled-${goal.id.slice(-12)}-boot`;
@@ -227,14 +361,18 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
   let controller;
   let relay;
   let child;
+  let staffed = [];
   let bootCreated = false;
   let bootRunUnknown = false;
   let bootCleanupConfirmed = false;
   let remoteAccepted = false;
+  let cloudReserved = false;
   let cleanupConfirmed = false;
   let relayCleanupConfirmed = true;
   let result;
   let artifacts = [];
+  const localConversations = [];
+  const localConversationErrors = [];
   const artifactErrors = [];
   let delivered;
   let workspaceAbsent = false;
@@ -258,12 +396,21 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     }
     if (signal?.aborted) throw Object.assign(new Error('Cancelled'), { name: 'AbortError', outcome: 'not_applied' });
     const multiWorker = !nativeCodex(config.model);
-    let workerCap = 1;
+    const { workerCap, teamLimits } = fleetExecutionLimits({ goal, config, diagnostic, native: !multiWorker });
+    const fleetDeadlineAt = Date.now() + 30 * 60_000;
+    if (!diagnostic && goal.providerId === 'private-h100') {
+      if (typeof reservationId !== 'string' || !/^[\w-]{1,100}$/.test(reservationId)
+        || typeof reserveCloud !== 'function' || !Number.isFinite(maxUsd) || maxUsd <= 0) {
+        throw Object.assign(new Error('Private Fly work needs a durable allowance reservation.'), { outcome: 'not_applied' });
+      }
+      reserveCloud({ id: reservationId, amountUsd: maxUsd });
+      cloudReserved = true;
+      record({ state: 'budget-reserved', reservationId, reservedUsd: maxUsd });
+    }
     if (multiWorker) {
       const { ManagedCloud } = await import(pathToFileURL(path.join(config.provisioner.flujoCloudPath, 'lib', 'managed.mjs')).href);
       const managed = new ManagedCloud();
       const org = await managed.organization(config.provisioner.org);
-      workerCap = Number.isInteger(config.maxWorkers) ? Math.min(Math.max(config.maxWorkers, 1), 6) : 3;
       if (workerCap > 1) {
         onStatus('Creating an owned relay for the bounded Fly Worker tree.');
         relayCleanupConfirmed = false;
@@ -283,14 +430,45 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
         record({ state: 'relay-ready', relayApp: relay.app, relayMachineId: relay.machineId });
       }
     }
+    const topology = fleetTopology(goal, { workerCap, relay: Boolean(relay) });
     const provisioner = await flyProvisioner({ ...config.provisioner, templateWorkspace: bootWorkspace,
       fleetReachable: Boolean(relay), concurrency: workerCap,
-      teamLimits: { agentTurns: 6, leadTurns: 12, concurrency: 1 } });
+      teamLimits });
+    const observeWorkerConversations = async (worker) => {
+      if (localConversations.some((entry) => entry.workerId === worker.id)) return;
+      const runs = Object.values(controller.registry.state.runs).filter((run) => run.workerId === worker.id);
+      if (runs.length !== 1 || runs[0].state !== 'completed') {
+        throw unknown(`Worker ${worker.id} has no single completed original conversation to verify.`);
+      }
+      let connection;
+      try {
+        connection = await controller.connect(worker.target);
+        const observed = verifiedLocalConversations(await connection.client.descendants(runs[0].conversationId),
+          runs[0].conversationId, teamLimits.concurrency);
+        localConversations.push({ workerId: worker.id, leadConversationId: runs[0].conversationId,
+          children: observed });
+        record({ localConversations });
+      } catch (error) {
+        if (error.localConversations) record({ localConversationMismatch: {
+          workerId: worker.id, children: error.localConversations,
+        } });
+        throw error;
+      } finally { await connection?.close().catch(() => undefined); }
+    };
     controller = new Controller({ registryPath, operatorToken: randomBytes(32).toString('base64url'),
       publicUrl: 'http://127.0.0.1:1', remoteUrl: relay?.remoteUrl,
-      provisioner, log: () => undefined, runTimeoutMs: 20 * 60_000,
+      provisioner, log: () => undefined, runTimeoutMs: 20 * 60_000, deadlineAt: fleetDeadlineAt,
+      maxRunsPerWorker: goal.workerTopologyVersion === 2 ? 1 : undefined,
       beforeRetire: async ({ worker, target }) => {
         if (target.kind !== 'fly') return;
+        if (goal.workerTopologyVersion === 2 && Object.values(controller.registry.state.runs)
+          .some((run) => run.workerId === worker.id && run.state === 'completed')) {
+          try { await observeWorkerConversations(worker); }
+          catch (error) {
+            localConversationErrors.push({ workerId: worker.id, detail: String(error.message).slice(0, 200) });
+            record({ localConversationErrors });
+          }
+        }
         try {
           onStatus(`Collecting owned output from Worker ${worker.name}.`);
           const collected = await collectFlyArtifacts({ target, goalId: goal.id, workerId: worker.id,
@@ -308,45 +486,60 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     const address = await controller.listen(0, '127.0.0.1');
     controller.publicUrl = `http://127.0.0.1:${address.port}`;
     await relay?.start(controller.publicUrl);
-    const fleetGoal = controller.registry.createGoal({ id: goal.id, text: goal.text, limits: {
-      maxWorkers: workerCap, maxDepth: relay ? 2 : 1, maxChildren: relay ? 2 : 1, maxActiveRuns: 2,
-    } });
+    const fleetGoal = controller.registry.createGoal({ id: goal.id, text: goal.text, limits: topology.limits });
+    fleetGoal.teamLimits = teamLimits; controller.registry.save();
     const root = controller.registry.reserve({ goalId: fleetGoal.id, role: 'supervisor', name: 'Todd' }).worker;
     controller.registry.enroll(root.id, { kind: 'external', origin: config.supervisor.origin, workspace: bootWorkspace });
-    onStatus('Creating one isolated Fly Worker.');
+    onStatus(`Staffing ${topology.initialWorkers} isolated Fly Worker Machine${topology.initialWorkers === 1 ? '' : 's'}; billing remains pending.`);
     record({ state: 'provisioning' });
-    child = controller.delegate(root, { name: 'developer', task: `${task}\n\nSave final deliverable files under `
-      + `/data/flujo/workspaces/${bootWorkspace}/seagulled-output in your Worker workspace. `
-      + 'Report file paths relative to seagulled-output. If you delegate to child Workers, tell each child to use '
-      + 'seagulled-output in its own workspace. Do not treat a file outside that directory as a delivered artifact.' });
-    remoteAccepted = true;
-    record({ state: 'accepted', workerId: child.workerId, runId: child.runId });
-    while (true) {
-      if (signal?.aborted) throw unknown('Fly work was interrupted. The original run and worker need reconciliation.');
-      const current = await controller.waitRun('operator', { runId: child.runId, timeoutMs: 10_000 });
-      if (current.state !== 'running') { result = current; break; }
-      await sleep(0);
+    staffOwnedTeam(controller, root, { task: `${task}\n\nSave final deliverable files under `
+      + `/data/flujo/workspaces/${bootWorkspace}/seagulled-output in your own Worker workspace. `
+      + 'Report paths relative to seagulled-output. Each child Worker must produce its own files.',
+    workerCap: topology.initialWorkers, localChildTarget: teamLimits.concurrency, onReserved: (worker) => {
+      child ??= worker;
+      remoteAccepted = true;
+      record({ state: 'provisioning', workerId: child.workerId });
+    }, onStaffed: (run, runs) => {
+      if (child?.workerId === run.workerId) child = run;
+      staffed = [...runs]; remoteAccepted = true;
+      record({ state: 'accepted', workerId: child.workerId, runId: child.runId,
+        staffedRuns: staffed.map((item) => ({ workerId: item.workerId, runId: item.runId })) });
+    } });
+    const settled = [];
+    for (const staffedRun of staffed) {
+      while (true) {
+        if (signal?.aborted) throw unknown('Fly work was interrupted. The original runs and Workers need reconciliation.');
+        if (Date.now() >= fleetDeadlineAt) throw unknown('The Fly fleet reached its 30-minute deadline. Preserve its original runs for reconciliation.');
+        const current = await controller.waitRun('operator', { runId: staffedRun.runId, timeoutMs: 10_000 });
+        if (current.state !== 'running') { settled.push(current); break; }
+        await sleep(0);
+      }
     }
-    if (result.state !== 'completed') {
-      let failureDiagnostic = { readStatus: null, conversationStatus: result.state };
+    result = settled[0];
+    const failed = settled.find((entry) => entry.state !== 'completed');
+    if (failed) {
+      let failureDiagnostic = { readStatus: null, conversationStatus: failed.state };
       let failureRead;
       let connection;
       try {
-        const worker = controller.registry.worker(child.workerId);
+        const worker = controller.registry.worker(failed.workerId);
         connection = await controller.connect(worker.target);
-        const run = controller.registry.run(child.runId);
+        const run = controller.registry.run(failed.runId);
         failureRead = await connection.client.conversation(run.conversationId);
         failureDiagnostic = conversationFailure(failureRead);
       } catch { /* Preserve a bounded unavailable diagnostic; never replay the run. */ }
       finally { await connection?.close().catch(() => undefined); }
-      record({ failureDiagnostic });
+      record({ failureDiagnostic, failedRunId: failed.runId });
       if (!diagnostic && failureRead) recordConfirmedQuotaHold({ dataDir, model: config.model,
-        providerId: goal.providerId, goalId: goal.id, runId: child.runId, read: failureRead });
-      throw unknown(`Fly run ${child.runId} ended as ${result.state}. Its original record is retained.`);
+        providerId: goal.providerId, goalId: goal.id, runId: failed.runId, read: failureRead });
+      throw unknown(`Fly run ${failed.runId} ended as ${failed.state}. Its original record is retained.`);
     }
     const unfinished = Object.values(controller.registry.state.runs).filter((run) => run.goalId === goal.id
       && run.id !== child.runId && ['running', 'unknown'].includes(run.state));
     if (unfinished.length) throw unknown('A descendant Fly run has not reached a confirmed terminal state. Preserve the original tree for reconciliation.');
+    for (const staffedRun of staffed) {
+      await observeWorkerConversations(controller.registry.worker(staffedRun.workerId));
+    }
     record({ state: 'run-completed' });
     const artifactDir = path.join(dataDir, 'artifacts', goal.id);
     const resultPath = path.join(artifactDir, 'fly-result.txt');
@@ -360,21 +553,29 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     const retirement = await controller.retire('operator', { workerId: child.workerId });
     if (retirement.cleanupUnconfirmed?.length) throw unknown('Fly Worker cleanup is unconfirmed. Its original record blocks further provisioning.');
     cleanupConfirmed = true;
+    if (goal.workerTopologyVersion === 2 && (localConversationErrors.length || Object.values(controller.registry.state.workers)
+      .filter((worker) => worker.depth > 0).some((worker) =>
+        !localConversations.some((entry) => entry.workerId === worker.id)))) {
+      throw unknown('A spawned Worker lacks a verified five-conversation receipt. Preserve the private tree for reconciliation.');
+    }
     if (artifactErrors.length) throw Object.assign(new Error('Owned Fly output capture was incomplete. The worker tree was retired; inspect the private capture receipts.'),
       { outcome: 'failed' });
     controller.registry.finishGoal(goal.id, result.result);
     record({ state: 'fly-retired', flyCleanupConfirmed: true });
     delivered = { available: true, text: result.result, artifacts, usage: { inputTokens: 0, outputTokens: 0, costUsd: null, costKind: 'unknown',
-      reservedUsd: maxUsd, billingPending: true },
+      reservedUsd: maxUsd, billingPending: true, ...(cloudReserved ? { reservationId } : {}) },
       sandbox: { kind: 'fly', workerId: child.workerId, runId: child.runId, retired: true, cleanupConfirmed: true,
-        workerCount: controller.registry.tree(goal.id).filter((worker) => worker.depth > 0).length } };
+        workerCount: localConversations.length, initialWorkerCount: staffed.length,
+        teamLeadRuns: staffed.map((item) => item.runId),
+        localConversationCount: localConversations.reduce((sum, item) => sum + item.children.length, 0),
+        conversationCountVerified: localConversations.length + localConversations.reduce((sum, item) => sum + item.children.length, 0) } };
     return delivered;
   } catch (error) {
     if (typeof error?.message === 'string' && config.model.apiKey) {
       error.message = error.message.replaceAll(config.model.apiKey, '[redacted]');
     }
-    const usage = remoteAccepted || !relayCleanupConfirmed ? { inputTokens: 0, outputTokens: 0, costUsd: null, costKind: 'unknown',
-      reservedUsd: maxUsd, billingPending: true } : undefined;
+    const usage = remoteAccepted || !relayCleanupConfirmed || cloudReserved ? { inputTokens: 0, outputTokens: 0, costUsd: null, costKind: 'unknown',
+      reservedUsd: maxUsd, billingPending: true, ...(cloudReserved ? { reservationId } : {}) } : undefined;
     if (remoteAccepted && child && controller && !cleanupConfirmed) {
       try {
         const retirement = await controller.retire('operator', { workerId: child.workerId });
@@ -392,7 +593,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
       }
     }
     record({ state: workspaceAbsent ? 'preflight-not-applied'
-      : remoteAccepted ? error.outcome === 'failed' && cleanupConfirmed ? 'artifact-capture-incomplete'
+      : remoteAccepted ? error.outcome === 'failed' && cleanupConfirmed ? 'completed-but-unverified'
         : result?.state === 'failed' && cleanupConfirmed ? 'run-failed' : 'unknown'
         : !relayCleanupConfirmed ? 'relay-cleanup-unknown' : bootRunUnknown ? 'boot-run-unknown' : 'failed-before-dispatch',
       flyCleanupConfirmed: cleanupConfirmed,
@@ -404,6 +605,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     }
     if (remoteAccepted && error.outcome === 'failed' && cleanupConfirmed) throw Object.assign(error, { usage });
     if (remoteAccepted) throw Object.assign(unknown(`${error.message} The original Fly run outcome must be reconciled before replay.`), { usage });
+    if (cloudReserved) error = unknown(`${error.message} The private Fly allowance remains pending until cloud billing is reconciled.`);
     if (!error.outcome) error.outcome = 'not_applied';
     if (usage) error.usage = usage;
     throw error;

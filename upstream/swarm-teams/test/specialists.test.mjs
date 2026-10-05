@@ -59,3 +59,41 @@ test('installer saves only the existing three specialized FlowSpecs', async () =
   assert.equal(saved[1].nodes.find((node) => node.type === 'subflow').concurrencyLimit, 9);
   assert.equal(saved[0].nodes[1].model, 'fixture-model');
 });
+
+test('one total conversation installs a lead-only flow with no child subflow admission', async () => {
+  const [agent, team, supervisor] = buildSpecs({ model: 'fixture-model', availableServers,
+    limits: { concurrency: 0 } });
+  assert.equal(agent.name, FLOW_NAMES.agent);
+  for (const flow of [team, supervisor]) {
+    assert.equal(flow.nodes.some((node) => node.type === 'subflow'), false);
+    assert.equal(flow.edges.some((edge) => edge.to === 'agents'), false);
+    assert.match(flow.nodes[0].prompt, /one lead conversation and no local agent subflows/);
+  }
+  const saved = [];
+  await installTemplate({ workspace: 'lead-only', ensureWorkspace: async () => true,
+    servers: async () => availableServers.map((name) => ({ name, disabled: false })),
+    saveFlowSpec: async (spec) => { saved.push(spec); return { id: spec.name, name: spec.name }; } },
+  { model: { id: 'fixture-model' }, browser: false, limits: { concurrency: 0 } });
+  assert.equal(saved[1].nodes.some((node) => node.type === 'subflow'), false);
+});
+
+test('installed FLUJO inventory bounds real flow authoring tools in Worker specs', async () => {
+  const saved = [];
+  const inventory = ['read_flow', 'create_flow', 'get_flow_authoring_guide', 'validate_flow_spec'];
+  const installed = await installTemplate({ workspace: 'partial-authoring', ensureWorkspace: async () => true,
+    servers: async () => [{ name: 'flujo', disabled: false }, { name: 'filesystem', disabled: false }],
+    serverTools: async () => ({ tools: inventory.map((name) => ({ name })) }),
+    saveFlowSpec: async (spec) => { saved.push(spec); return { id: spec.name, name: spec.name }; } },
+  { model: { id: 'fixture-model' }, browser: false, limits: { concurrency: 4 } });
+  assert.deepEqual(installed.availableTools.flujo, inventory);
+  const agentFlowTools = saved[0].nodes[1].servers.find((server) => server.name === 'flujo').tools;
+  assert.deepEqual([...agentFlowTools].sort(), [...inventory].sort());
+  assert.equal(agentFlowTools.includes('update_flow'), false);
+  assert.match(saved[0].nodes[0].prompt, /Flow authoring is unavailable/);
+  assert.equal(saved[1].nodes.find((node) => node.type === 'subflow').concurrencyLimit, 4);
+  const complete = buildSpecs({ model: 'fixture-model', availableServers: ['flujo'],
+    availableTools: { flujo: [...inventory, 'update_flow'] }, limits: { concurrency: 4 } });
+  assert.ok(complete[0].nodes[1].servers[0].tools.includes('update_flow'));
+  assert.ok(complete[1].nodes[1].servers[0].tools.includes('update_flow'));
+  assert.match(complete[0].nodes[0].prompt, /read_flow first and use update_flow/);
+});

@@ -1,5 +1,15 @@
 # RC acceptance
 
+## Unreleased avatar and first-install work
+
+The current checkout extends RC4 with local voice capture and recognition, guided Fly and Modal account sign-in, dated user-currency allowances, a 50 USD default, and requested limits of five Workers and five total conversations per Worker. This work has not been published as a new release. The integrated source-test snapshot passed 156 cases; provider, swarm and desktop contracts are frozen for the next integration stage.
+
+A packaged Windows check exercised synthetic microphone audio through the actual AudioWorklet, PCM encoder, IPC and pinned local Whisper recognizer. Packaged PTY startup and all 1,325 helper inventory entries passed, and a temporary clean profile reached enabled Fly and Modal sign-in buttons without host CLIs on PATH. Public model weights were reused for that offline startup check. No browser account login or paid provider run was exercised by those checks, and physical microphone hardware remains unqualified.
+
+The generated avatar artwork was rejected and removed. The current ambient stage does not satisfy the requested movie/avatar experience. The private H100+Qwen path and requested 25-conversation topology remain source work under review, with live provisioning, inference, accounting, and cleanup acceptance outstanding. Earlier interruption and cleanup holds remain authoritative.
+
+## Published RC4 baseline
+
 Seagulled 0.1.0-rc.4 is a Windows Electron app and a Node CLI with a shared durable conversation, goals, controls, provider setup and bounded team coordinator. The full live company across Fly workers is still unqualified.
 
 The candidate is checked with 95 automated cases. Packaged Electron startup, renderer isolation, provider discovery, shared CLI access and shutdown are separate release gates; the CLI archive runs independently. Package auditing excludes private-state entries. These checks do not replace live cloud qualification.

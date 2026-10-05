@@ -17,7 +17,9 @@
     "test": "node --test tests/*.test.mjs upstream/swarm-teams/test/fleet.test.mjs upstream/swarm-teams/test/recovery.test.mjs upstream/swarm-teams/test/diagnostics-guard.test.mjs upstream/swarm-teams/test/specialists.test.mjs",
     "package": "electron-builder --dir",
     "dist": "electron-builder --win portable --publish never",
-    "check": "node scripts/check-release.mjs"
+    "check": "node scripts/check-release.mjs",
+    "prepackage": "node scripts/prepare-helpers.mjs",
+    "predist": "node scripts/prepare-helpers.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.56.0",
@@ -34,6 +36,8 @@
       "electron/**/*",
       "ui/**/*",
       "src/**/*",
+      "!**/__pycache__/**",
+      "!**/*.pyc",
       "bin/**/*",
       "upstream/swarm-teams/{fleet,lib,template}/**/*",
       "upstream/factory/receipts.mjs",
@@ -49,7 +53,16 @@
       "target": [
         "portable"
       ],
-      "artifactName": "Seagulled-${version}-${arch}.${ext}"
+      "artifactName": "Seagulled-${version}-${arch}.${ext}",
+      "extraResources": [
+        {
+          "from": ".private/helpers/win32-x64",
+          "to": "helpers",
+          "filter": [
+            "**/*"
+          ]
+        }
+      ]
     },
     "linux": {
       "target": [
@@ -61,12 +74,17 @@
         "dmg"
       ],
       "category": "public.app-category.productivity"
-    }
+    },
+    "npmRebuild": false
   },
   "license": "MIT",
   "author": "flujo-app",
   "repository": {
     "type": "git",
     "url": "https://github.com/flujo-app/seagulled.git"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "4.3.0",
+    "node-pty": "1.1.0"
   }
 }

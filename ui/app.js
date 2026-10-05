@@ -1,276 +1,261 @@
-(() => {
-  'use strict';
+import {VoiceCapture} from './voice-capture.mjs';
+import {oneSentence,budgetOptions} from './goal-input.mjs';
+import {sceneFor} from './stage.mjs';
+import {MoviePlayer} from './movie-player.mjs';
+import movieManifest from './movie-manifest.json' with {type:'json'};
 
-  const $ = (id) => document.getElementById(id);
-  const dom = Object.fromEntries(['goals','goal-count','conversation','prompt','composer','send','notice','presence','spend-label','provider-label','provider-light','provider-dialog','provider-list','provider-error','connect-panel','connect-title','connect-detail','connect-form','connect-method','connect-key','connect-model','key-field','model-field','connect-submit','edit-dialog','edit-form','goal-text','goal-budget'].map(id => [id, $(id)]));
-  let state = {version:1, conversation:[], goals:[], providers:[], spend:{usd:0,unknownCalls:0,subscriptionCalls:0}, swarm:{status:'idle'}};
-  let selectedGoalId = null;
-  let selectedProvider = null;
-  let connecting = false;
-  let sending = false;
-  let eventTimer = null;
-  const money = value => `$${Number(value || 0).toFixed(2)}`;
-  const terminal = new Set(['completed','done','stopped','failed','error','cancelled','interrupted']);
+const $=id=>document.getElementById(id);
+const elements=Object.fromEntries(['movie','frame','movie-video','movie-status','action','action-icon','voice-level','advanced-toggle','live-status','todd-audio','setup-dialog','advanced-dialog','fly-state','modal-state','fly-connect','modal-connect','setup-error','setup-continue','budget-amount','budget-currency','budget-note','workers','workers-value','conversations','conversations-value','private-h100','private-h100-status','text-fallback','fallback-goal','fallback-go','pause-all','resume-all','stop-all','work-details','goal-details','provider-details','spend-details','advanced-error'].map(id=>[id,$(id)]));
+const allowedCurrencies=new Set(['USD','EUR','GBP','COP','CAD','AUD']);
+const terminal=new Set(['completed','stopped','failed','interrupted','cancelled']);
+let state={version:1,conversation:[],goals:[],spend:{},swarm:{status:'idle'}};
+let auth={fly:{connected:false,available:false,detail:'Checking…'},modal:{connected:false,available:false,detail:'Checking…'}};
+let voice={transcribe:false,speak:false,reason:'Voice is not ready.'};
+let mode='ready',started=false,authBusy=false,goalSubmitting=false,pendingGoal=null,goTimer=null,workingSince=0,workingKey='',voiceWait=null,capturePending=false;
+let knownMessages=null,speechQueue=Promise.resolve(),speechEpoch=0,audioUrl=null,activeSpeechFinish=null,refreshTimer=null;
+let budgetWait=null,budgetQuote=null,budgetCustom=false,budgetEpoch=0,currencySwitch=null,selectedPreset=50;
+const capture=new VoiceCapture({onLevel:level=>{elements['voice-level'].style.setProperty('--level',String(Math.max(.2,level*3)));},onHeard:()=>announce('Listening to your goal.'),onReady:()=>{setMode('listening');announce('Listening. Speak one sentence.');}});
+const moviePlayer=new MoviePlayer({video:elements['movie-video'],stage:elements.movie,manifest:movieManifest,onStatus:({status,detail})=>{
+  elements['movie-status'].textContent=status==='missing'||status==='missing-scene'||status==='failed'
+    ? `${detail||'Approved movie footage is unavailable.'} Narration is separate from the film; lip movement is not synchronized.`
+    : status==='playing'?'Local silent film is playing. Narration is separate; lip movement is not synchronized.':'Checking approved local movie clips.';
+}});
 
-  function browserBridge() {
-    const hash = new URLSearchParams(location.hash.slice(1));
-    const tokenFromUrl = hash.get('token');
-    if (tokenFromUrl) {
-      sessionStorage.setItem('seagulled-bootstrap', tokenFromUrl);
-      history.replaceState(null, '', location.pathname + location.search);
-    }
-    const token = sessionStorage.getItem('seagulled-bootstrap');
-    async function request(path, method = 'GET', body) {
-      const headers = {'Authorization': `Bearer ${token || ''}`};
-      if (body !== undefined) headers['Content-Type'] = 'application/json';
-      const response = await fetch(path, {method,headers,body:body === undefined ? undefined : JSON.stringify(body),cache:'no-store'});
-      const raw = await response.text();
-      let data;
-      try { data = raw ? JSON.parse(raw) : null; } catch { data = null; }
-      if (!response.ok) throw new Error(data?.error || data?.message || `Request failed (${response.status})`);
-      return data;
-    }
-    let notify = () => {};
-    async function listen() {
-      while (true) {
-        try {
-          const response = await fetch('/api/events', {headers:{Authorization:`Bearer ${token || ''}`},cache:'no-store'});
-          if (!response.ok || !response.body) throw new Error(`Live updates unavailable (${response.status})`);
-          const reader = response.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = '';
-          while (true) {
-            const {value,done} = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, {stream:true});
-            let boundary;
-            while ((boundary = buffer.indexOf('\n\n')) !== -1) {
-              const block = buffer.slice(0,boundary).replace(/\r/g,'');
-              buffer = buffer.slice(boundary + 2);
-              const data = block.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
-              if (data) { try { notify(JSON.parse(data)); } catch { /* Ignore malformed event. */ } }
-            }
-          }
-        } catch (error) { showNotice(error.message); }
-        await new Promise(resolve => setTimeout(resolve, 2000));
-      }
-    }
-    return {
-      state: () => request('/api/state'),
-      chat: (text,options={}) => request('/api/chat','POST',{text,...options}),
-      updateGoal: (id,patch) => request(`/api/goals/${encodeURIComponent(id)}`,'PATCH',patch),
-      controlGoal: (id,action) => request(`/api/goals/${encodeURIComponent(id)}/${encodeURIComponent(action)}`,'POST',{}),
-      controlSwarm: action => request(`/api/swarm/${encodeURIComponent(action)}`,'POST',{}),
-      readArtifact: (goalId,taskId,index) => request(`/api/goals/${encodeURIComponent(goalId)}/artifacts/${encodeURIComponent(taskId)}/${index}`),
-      discover: () => request('/api/providers/discover','POST',{}),
-      connect: payload => request('/api/providers/connect','POST',payload),
-      disconnect: id => request(`/api/providers/${encodeURIComponent(id)}`,'DELETE'),
-      onEvent: callback => { notify = callback; listen(); return () => { notify = () => {}; }; }
-    };
+function browserBridge() {
+  const hash=new URLSearchParams(location.hash.slice(1));const fresh=hash.get('token');
+  if(fresh){sessionStorage.setItem('seagulled-bootstrap',fresh);history.replaceState(null,'',location.pathname+location.search);}
+  const token=sessionStorage.getItem('seagulled-bootstrap');
+  async function request(path,method='GET',body) {
+    const headers={Authorization:`Bearer ${token||''}`};if(body!==undefined)headers['Content-Type']='application/json';
+    const response=await fetch(path,{method,headers,body:body===undefined?undefined:JSON.stringify(body),cache:'no-store'});
+    const raw=await response.text();let data;try{data=raw?JSON.parse(raw):null;}catch{data=null;}
+    if(!response.ok)throw new Error(data?.error||data?.message||`Request failed (${response.status}).`);
+    return data;
   }
-  const bridge = window.seagulled || browserBridge();
+  let notify=()=>{};
+  async function events() {
+    while(true){
+      try{
+        const response=await fetch('/api/events',{headers:{Authorization:`Bearer ${token||''}`},cache:'no-store'});
+        if(!response.ok||!response.body)throw new Error('Live updates are unavailable.');
+        const reader=response.body.getReader(),decoder=new TextDecoder();let buffer='';
+        while(true){const {value,done}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true}).replace(/\r/g,'');let cut;
+          while((cut=buffer.indexOf('\n\n'))>=0){const block=buffer.slice(0,cut);buffer=buffer.slice(cut+2);const line=block.split('\n').filter(x=>x.startsWith('data:')).map(x=>x.slice(5).trimStart()).join('\n');if(line){try{notify(JSON.parse(line));}catch{}}}
+        }
+      }catch{announce('Live updates are interrupted.');}
+      await new Promise(resolve=>setTimeout(resolve,2000));
+    }
+  }
+  return {
+    state:()=>request('/api/state'),chat:(text,options)=>request('/api/chat','POST',{text,...options}),
+    defaultBudget:currency=>request(`/api/budget/default?currency=${encodeURIComponent(currency)}`),
+    updateGoal:(id,patch)=>request(`/api/goals/${encodeURIComponent(id)}`,'PATCH',patch),
+    controlSwarm:action=>request(`/api/swarm/${encodeURIComponent(action)}`,'POST',{}),
+    authState:()=>request('/api/auth/state'),authConnect:payload=>request('/api/auth/connect','POST',payload),authCancel:()=>request('/api/auth/cancel','POST',{}),
+    voiceCapabilities:()=>request('/api/voice/capabilities'),transcribeAudio:payload=>request('/api/voice/transcribe','POST',payload),
+    speak:text=>request('/api/voice/speak','POST',{text}),stopSpeaking:()=>request('/api/voice/stop','POST',{}),
+    onEvent:callback=>{notify=callback;void events();return()=>{notify=()=>{};}}
+  };
+}
+const bridge=window.seagulled||browserBridge();
 
-  function showNotice(message) { dom.notice.textContent = message; dom.notice.hidden = false; }
-  function clearNotice() { dom.notice.hidden = true; dom.notice.textContent = ''; }
-  function errorText(error) { return error?.message || String(error || 'Something went wrong.'); }
-  function node(tag, className, text) { const el=document.createElement(tag); if(className) el.className=className; if(text !== undefined) el.textContent=text; return el; }
-  function formattedTime(at) { const date=new Date(at); return Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}); }
-  function budgetText(goal) { return Number(goal.pendingUsd)>0 ? `${money(goal.spentUsd)} tracked · ${money(goal.pendingUsd)} pending / ${money(goal.budgetUsd)} cap` : `${money(goal.spentUsd)} used of ${money(goal.budgetUsd)}`; }
+function announce(message){elements['live-status'].textContent=message;}
+function errorMessage(error){return error?.message||String(error||'That action could not be completed.');}
+function showError(message,target='advanced'){
+  const box=target==='setup'?elements['setup-error']:elements['advanced-error'];box.textContent=message;box.hidden=false;announce(message);
+  if(target==='advanced'&&!elements['advanced-dialog'].open)elements['advanced-dialog'].showModal();
+}
+function clearError(target){const box=target==='setup'?elements['setup-error']:elements['advanced-error'];box.hidden=true;box.textContent='';}
+function iconFor(action){
+  if(action==='start'||action==='go')return '<path d="M8 5.7v12.6L18.2 12 8 5.7Z"/>';
+  if(action==='listen')return '<rect x="9" y="3" width="6" height="12" rx="3"/><path d="M6 10a6 6 0 0 0 12 0M12 16v5M8 21h8"/>';
+  if(action==='stop-listening'||action==='stop-speaking')return '<rect x="6.5" y="6.5" width="11" height="11" rx="2"/>';
+  return '<circle cx="12" cy="12" r="7"/><path d="M12 8v4l3 2"/>';
+}
+function setAction(action,label,disabled=false){elements.action.dataset.action=action;elements.action.setAttribute('aria-label',label);elements.action.disabled=disabled;elements['action-icon'].innerHTML=iconFor(action);}
+function setMode(next){mode=next;elements.movie.dataset.mode=next;elements['voice-level'].classList.toggle('active',next==='listening');
+  if(next==='listening')setAction('stop-listening','Stop listening');
+  else if(next==='transcribing'||next==='preparing-listen'||next==='submitting'||next==='setup')setAction('busy','Working',true);
+  else if(next==='go')setAction('go','Go');
+  else if(next==='speaking')setAction('stop-speaking','Stop Todd speaking');
+  else setAction(started?'listen':'start',started?'Speak a goal':'Start');
+  updateScene();
+}
+function latestGoal(){return state.goals?.at(-1)||null;}
+function updateScene(){
+  const goal=latestGoal();const key=goal?.status==='running'&&goal?.tasks?.some(task=>task.status==='running')?`${goal.id}:${goal.tasks.filter(task=>task.status==='running').map(task=>task.id).join(',')}`:'';
+  if(key!==workingKey){workingKey=key;workingSince=key?performance.now():0;}
+  const scene=sceneFor({mode,goal,workingMs:workingSince?performance.now()-workingSince:0});
+  if(elements.movie.dataset.scene!==scene){elements.movie.dataset.scene=scene;elements.frame.dataset.scene=scene;void moviePlayer.setScene(scene);}
+}
+setInterval(updateScene,350);
 
-  function renderConversation() {
-    const pane = dom.conversation;
-    const nearBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 140;
-    pane.replaceChildren();
-    const messages=state.conversation.filter(item=>item.role!=='team' && item.role!=='system' && item.role!=='status');
-    if (!messages.length) {
-      const intro=node('section','intro');
-      intro.append(node('div','intro-kicker','A BUSY MAN WITH A PLAN'));
-      const heading=node('h1','', 'Tell me what you want done.');
-      const copy=node('p','', 'I’ll find the right people, keep an eye on the work, and drop back in when there’s something worth seeing.');
-      intro.append(heading,copy);
-      const suggestions=node('div','suggestions');
-      for (const value of ['Plan my next project','Research an idea','Build a small app']) {
-        const button=node('button','',value); button.type='button'; button.addEventListener('click',()=>{dom.prompt.value=value; dom.prompt.focus(); resizePrompt();}); suggestions.append(button);
-      }
-      intro.append(suggestions); pane.append(intro);
-      return;
-    }
-    for (const item of messages) {
-      const isUser=item.role==='user';
-      const row=node('div',`message ${isUser?'user':'assistant'}`);
-      if (!isUser) row.append(node('div','message-avatar','TH'));
-      const bubble=node('div','message-bubble');
-      bubble.append(document.createTextNode(item.text || ''));
-      const at=formattedTime(item.at); if(at) bubble.append(node('span','message-meta',at));
-      row.append(bubble); pane.append(row);
-    }
-    if (nearBottom) pane.scrollTop=pane.scrollHeight;
+function node(tag,text,className){const el=document.createElement(tag);if(text!==undefined)el.textContent=text;if(className)el.className=className;return el;}
+function budgetLine(goal){const budget=goal.budget;if(!budget)return `${Number(goal.budgetUsd||0).toFixed(2)} USD allowance`;
+  const amount=new Intl.NumberFormat(undefined,{maximumFractionDigits:2}).format(budget.amount);
+  return `${amount} ${budget.currency} allowance · ${Number(budget.allowanceUsd).toFixed(2)} USD limit`;
+}
+function appendGoalEditor(card,goal){
+  const details=node('details',undefined,'goal-editor');details.append(node('summary','Edit goal'));
+  const form=node('form');form.className='goal-edit-form';
+  const textLabel=node('label','Goal');const textInput=node('textarea');textInput.value=goal.text||'';textInput.rows=3;textInput.maxLength=4000;textInput.required=true;textLabel.append(textInput);
+  const budgetLabel=node('label','Budget');const amount=node('input');amount.type='number';amount.min='0.01';amount.step='any';amount.required=true;amount.value=String(goal.budget?.amount??goal.budgetUsd??5);amount.setAttribute('aria-label','Edit budget amount');
+  const currency=node('select');currency.setAttribute('aria-label','Edit budget currency');for(const code of allowedCurrencies){const option=node('option',code);option.value=code;currency.append(option);}currency.value=goal.budget?.currency||'USD';budgetLabel.append(amount,currency);
+  const workerLabel=node('label','Workers');const workers=node('input');workers.type='number';workers.min='1';workers.max='6';workers.step='1';workers.required=true;workers.value=String(goal.maxWorkers??5);workerLabel.append(workers);
+  const conversationLabel=node('label','Conversations per worker');const conversations=node('input');conversations.type='number';conversations.min='1';conversations.max='10';conversations.step='1';conversations.required=true;conversations.value=String(goal.conversationsPerWorker??(goal.agentsPerWorker===undefined?5:goal.agentsPerWorker+1));conversationLabel.append(conversations);
+  const save=node('button','Save changes','line-button');save.type='submit';form.append(textLabel,budgetLabel,workerLabel,conversationLabel,save);
+  form.addEventListener('submit',async event=>{event.preventDefault();const sentence=oneSentence(textInput.value);if(!sentence){showError('Enter one sentence for Todd.');return;}
+    let options;try{const {privateH100:_route,...limits}=budgetOptions({amount:amount.value,currency:currency.value,workers:workers.value,conversations:conversations.value});options=limits;}catch(error){showError(errorMessage(error));return;}
+    save.disabled=true;clearError('advanced');try{await bridge.updateGoal(goal.id,{text:sentence,...options});details.open=false;await refresh();announce('Goal changes saved.');}catch(error){save.disabled=false;showError(errorMessage(error));}
+  });details.append(form);details.addEventListener('toggle',()=>{if(!details.open&&details.isConnected)renderDetails();});card.append(details);
+}
+function renderDetails(){
+  const privateRoute=state.providers?.find(provider=>provider.id==='private-h100');
+  elements['private-h100-status'].textContent=elements['private-h100'].checked
+    ? privateRoute?.ready===true&&privateRoute?.connected===true&&privateRoute?.available===true
+      ? 'At Go, this uses paid H100 resources and permits isolated Workers to use the newly owned bearer; execution is verified when work starts.'
+      : 'At Go, this may create paid H100 resources and permit isolated Workers to use the newly owned bearer; this route is not verified yet.'
+    :'Off. Enabling it at Go may create paid H100 resources and permit isolated Workers to use the newly owned bearer.';
+  const providers=elements['provider-details'];providers.replaceChildren();
+  const ready=state.providers?.filter(provider=>provider.available&&provider.connected&&(provider.id!=='private-h100'||elements['private-h100'].checked))||[];
+  providers.append(node('p',ready.length?`${ready.map(provider=>provider.name||provider.id).join(', ')} available. First execution still needs verification.`:'No inference provider is ready. A goal may remain queued.'));
+  for(const provider of state.providers||[]){if(provider.id!=='modal'&&provider.id!=='private-h100'&&!provider.connected)continue;providers.append(node('p',`${provider.name||provider.id}: ${provider.detail||'Status unknown.'}`));}
+  const spend=elements['spend-details'];spend.replaceChildren();
+  spend.append(node('p',`${Number(state.spend?.reportedUsd||0).toFixed(2)} USD provider-reported · ${Number(state.spend?.estimatedUsd||0).toFixed(2)} USD estimated · ${Number(state.spend?.pendingUsd||0).toFixed(2)} USD pending. These figures are not a bill.`));
+  if(Number(state.spend?.unknownCalls)>0||Number(state.spend?.subscriptionCalls)>0)spend.append(node('p',`${Number(state.spend.unknownCalls||0)} calls without a price · ${Number(state.spend.subscriptionCalls||0)} subscription calls.`));
+  const host=elements['goal-details'];const editing=host.querySelector('.goal-editor[open]');
+  if(!editing){host.replaceChildren();for(const goal of [...(state.goals||[])].reverse().slice(0,12)){
+    const card=node('section',undefined,'goal-detail');card.append(node('strong',goal.text||'Goal'),node('small',`${goal.status||'queued'}${goal.privateH100===true?' · private H100 + Qwen requested':''} · ${budgetLine(goal)} · ${Number(goal.spentUsd||0).toFixed(2)} USD tracked${Number(goal.pendingUsd)>0?` · ${Number(goal.pendingUsd).toFixed(2)} USD pending`:''}`));
+    if(goal.budget?.quoteSource==='https://www.exchangerate-api.com'&&goal.budget?.quoteAsOf){const source=node('small',`FX quote ${new Date(goal.budget.quoteAsOf).toLocaleString()} · Source: `);const link=node('a','ExchangeRate-API');link.href=goal.budget.quoteSource;link.target='_blank';link.rel='noopener noreferrer';source.append(link);card.append(source);}
+    if(!terminal.has(goal.status))appendGoalEditor(card,goal);
+    if(goal.error)card.append(node('p',goal.error));
+    const tasks=Array.isArray(goal.tasks)?goal.tasks:[];
+    if(tasks.length){const details=node('details');details.append(node('summary',`${tasks.length} work item${tasks.length===1?'':'s'}`));for(const task of tasks){const item=node('p',`${task.role||'Task'} · ${task.status||'queued'}${task.text?` — ${task.text}`:''}`);details.append(item);if(task.result){const result=node('details');result.append(node('summary','Result'),node('p',task.result));details.append(result);}}card.append(details);}
+    host.append(card);
   }
+  if(!state.goals?.length)host.append(node('p','No goals yet.'));}
+  const active=state.goals?.some(goal=>['running','queued','pausing','stopping'].includes(goal.status));
+  const paused=state.goals?.some(goal=>goal.status==='paused')||state.swarm?.admissionPaused;
+  elements['pause-all'].hidden=!active||Boolean(state.swarm?.admissionPaused);
+  elements['resume-all'].hidden=!paused;
+  elements['stop-all'].hidden=!active&&!paused;
+}
+function applyState(next){
+  if(!next||!Array.isArray(next.conversation)||!Array.isArray(next.goals))return;
+  const first=knownMessages===null;if(first)knownMessages=new Set(next.conversation.map(message=>message.id));
+  const newTodd=first?[]:next.conversation.filter(message=>{const fresh=!knownMessages.has(message.id);knownMessages.add(message.id);return fresh&&message.role==='todd'&&message.text;});
+  state=next;renderDetails();updateScene();
+  if(newTodd.length){announce('Todd responded.');if(voice.speak&&mode!=='listening'){const epoch=speechEpoch;for(const message of newTodd.slice(-3))speechQueue=speechQueue.then(()=>epoch===speechEpoch?speakTodd(message.text):undefined).catch(error=>{if(!/Voice stopped|aborted|canceled/i.test(errorMessage(error)))showError(errorMessage(error));});}}
+}
+async function refresh(){const data=await bridge.state();applyState(data?.state||data);}
+function normalizeAuth(raw){
+  const source=raw?.accounts||raw?.auth||raw||{};
+  return Object.fromEntries(['fly','modal'].map(id=>{const item=Array.isArray(source)?source.find(value=>value?.id===id):source[id];const detail=String(item?.detail||'Sign-in is unavailable.');return [id,{connected:item?.connected===true,available:item?.loginAvailable===true||item?.available===true,detail:/terminal helper/i.test(detail)?`${id==='fly'?'Fly':'Modal'} browser sign-in is unavailable in this build.`:detail}];}));
+}
+async function refreshAuth(){try{auth=normalizeAuth(await bridge.authState());}catch(error){auth=normalizeAuth({});showError(errorMessage(error),'setup');}renderAuth();return auth;}
+function authReady(){return auth.fly.connected&&auth.modal.connected;}
+function renderAuth(){for(const id of ['fly','modal']){const item=auth[id];$(`${id}-state`).textContent=item.connected?'Connected':item.detail;$(`${id}-connect`).disabled=item.connected||!item.available||authBusy;$(`${id}-connect`).textContent=item.connected?'Connected':'Connect';}elements['setup-continue'].disabled=!authReady()||authBusy;}
+function showSetup(){setMode('setup');clearError('setup');renderAuth();if(!elements['setup-dialog'].open)elements['setup-dialog'].showModal();void refreshAuth();}
+async function connectAccount(id){if(authBusy||!auth[id]?.available)return;authBusy=true;renderAuth();$(`${id}-state`).textContent='Opening browser sign-in…';clearError('setup');try{await bridge.authConnect({id});await refreshAuth();}catch(error){showError(errorMessage(error),'setup');await refreshAuth();}finally{authBusy=false;renderAuth();}}
 
-  function renderGoals() {
-    const openDetails=new Set([...dom.goals.querySelectorAll('.goal-details[open]')].map(element=>element.dataset.goalId));
-    const openResults=new Set([...dom.goals.querySelectorAll('.task-result[open]')].map(element=>element.dataset.taskId));
-    dom.goals.replaceChildren();
-    dom['goal-count'].textContent=String(state.goals.length);
-    if (!state.goals.length) { dom.goals.append(node('p','empty-goals','Your goals will appear here after you ask Todd to get started.')); return; }
-    for (const goal of [...state.goals].reverse()) {
-      const card=node('article',`goal-card ${goal.status==='running'?'active':''}`);
-      const top=node('div','goal-top'); top.append(node('p','goal-title',goal.text || 'Untitled goal'),node('span',`goal-status ${goal.status || ''}`,goal.status || 'queued')); card.append(top);
-      if(goal.status==='pausing')card.append(node('p','goal-helper','Finishing the current task before pausing.'));
-      const meta=node('div','goal-meta'); meta.append(node('span','',budgetText(goal)),node('span','',goal.providerId || 'Waiting for provider')); card.append(meta);
-      const bar=node('div','budget-bar'); const pending=Number(goal.pendingUsd)||0;const fill=node('div',`budget-fill ${pending>0?'pending':''} ${Number(goal.spentUsd)+pending>=Number(goal.budgetUsd)?'limit':''}`); fill.style.width=`${Math.min(100,Math.max(0,((Number(goal.spentUsd)||0)+pending)/(Number(goal.budgetUsd)||1)*100))}%`;bar.append(fill);card.append(bar);
-      const actions=node('div','goal-actions');
-      const edit=actionButton('Edit',()=>openEdit(goal)); actions.append(edit);
-      if (goal.status==='paused') actions.append(actionButton('Resume',()=>control(goal.id,'resume')));
-      else if (!terminal.has(goal.status)) actions.append(actionButton('Pause',()=>control(goal.id,'pause')));
-      if (!terminal.has(goal.status)) actions.append(actionButton('Stop',()=>control(goal.id,'stop')));
-      card.append(actions);
-      const tasks=Array.isArray(goal.tasks)?goal.tasks:[];
-      if (tasks.length || goal.error) {
-        const details=node('details','goal-details');details.dataset.goalId=goal.id;details.open=openDetails.has(goal.id);
-        const summary=node('summary','',`Work details${tasks.length?` · ${tasks.length}`:''}`); details.append(summary);
-        if(goal.error) details.append(node('p','field-help',goal.error));
-        const list=node('ul','task-list'); for(const task of tasks){
-          const li=node('li','');li.append(node('span','task-role',task.role || 'Task'),document.createTextNode(` · ${task.status || 'queued'}${task.text ? ` — ${task.text}` : ''}`));
-          if(task.result){const result=node('details','task-result');result.dataset.taskId=task.id;result.open=openResults.has(task.id);result.append(node('summary','','Result'),node('pre','',task.result));li.append(result);}
-          if(Array.isArray(task.artifacts))task.artifacts.forEach((artifact,index)=>{
-            const name=String(artifact.path || `Artifact ${index+1}`).split(/[\\/]/).pop();
-            const button=actionButton(`↓ ${name}`,()=>downloadArtifact(goal.id,task.id,index));button.className='artifact-button';li.append(button);
-          });
-          list.append(li);
-        } details.append(list); card.append(details);
-      }
-      dom.goals.append(card);
+function fallbackAvailable(){return voice.transcribe!==true||!navigator.mediaDevices?.getUserMedia||!window.AudioWorkletNode;}
+function openFallback(message){elements['text-fallback'].hidden=false;if(message)showError(message);else if(!elements['advanced-dialog'].open)elements['advanced-dialog'].showModal();elements['fallback-goal'].focus();}
+async function enterExperience(){started=true;await refreshAuth();if(!authReady()){showSetup();return;}if(fallbackAvailable()){openFallback(voice.reason||'Voice capture is unavailable.');return;}beginListening();}
+async function ensureVoiceReady(){
+  if(voice.ready===true)return true;
+  if(voice.transcribe!==true)return false;
+  if(voiceWait)return voiceWait;
+  voiceWait=(async()=>{setMode('transcribing');announce('Preparing local speech recognition.');const until=Date.now()+180000;
+    while(Date.now()<until){await new Promise(resolve=>setTimeout(resolve,1200));
+      try{voice=await bridge.voiceCapabilities();}catch(error){voice={transcribe:false,speak:false,ready:false,reason:errorMessage(error)};}
+      if(voice.ready===true)return true;
+      if(voice.transcribe!==true||voice.status==='unavailable')return false;
     }
-  }
-  function actionButton(label, handler) { const button=node('button','',label); button.type='button';button.addEventListener('click',handler);return button; }
-  function renderStatus() {
-    const connected=state.providers.filter(p=>p.connected);
-    dom['provider-light'].classList.toggle('connected',connected.length>0);
-    dom['provider-label'].textContent=connected.length ? `${connected.length} provider${connected.length===1?'':'s'} connected` : 'Connect a provider';
-    const running=state.goals.filter(g=>g.status==='running').length;
-    const finishing=state.goals.some(g=>g.status==='pausing');
-    dom.presence.textContent=finishing?'Finishing current task':state.swarm?.admissionPaused ? 'Team paused' : running ? `Supervising ${running} goal${running===1?'':'s'}` : connected.length ? 'Ready to delegate' : 'Waiting for a provider';
-    const spend=state.spend || {};
-    const notes=[];
-    if(Number(spend.pendingUsd)>0)notes.push(`Pending ${money(spend.pendingUsd)}`);
-    if(spend.unknownCalls) notes.push(`${spend.unknownCalls} unpriced call${spend.unknownCalls===1?'':'s'}`);
-    if(spend.subscriptionCalls) notes.push(`${spend.subscriptionCalls} subscription call${spend.subscriptionCalls===1?'':'s'}`);
-    const tracked=spend.reportedUsd !== undefined || spend.estimatedUsd !== undefined
-      ? `Reported ${money(spend.reportedUsd)} · Estimated ${money(spend.estimatedUsd)}`
-      : `Tracked usage ${money(spend.usd)}`;
-    dom['spend-label'].textContent=`${tracked}${notes.length ? ` · ${notes.join(', ')}` : ''}`;
-    const active=state.goals.filter(g=>['running','queued','pausing','stopping'].includes(g.status)).length;
-    const paused=state.goals.filter(g=>g.status==='paused').length;
-    const admissionPaused=Boolean(state.swarm?.admissionPaused);
-    $('swarm-controls').hidden=!active && !paused && !admissionPaused;
-    $('swarm-status').textContent=finishing?'TEAM · PAUSING':admissionPaused?'TEAM · PAUSED':active?`TEAM · ${active} ACTIVE`:`TEAM · ${paused} PAUSED`;
-    $('swarm-pause').hidden=!active || admissionPaused;
-    $('swarm-resume').hidden=finishing || (!admissionPaused && (!!active || !paused));
-    $('swarm-stop').hidden=!active && !paused;
-  }
-  function applyState(next) {
-    if (!next || !Array.isArray(next.conversation) || !Array.isArray(next.goals)) return;
-    state=next; renderConversation();renderGoals();renderStatus();
-    if (dom['provider-dialog'].open) renderProviderList();
-  }
-  async function refresh() { const result=await bridge.state();applyState(result?.state || result); }
-  async function control(id,action) { try {clearNotice();await bridge.controlGoal(id,action);await refresh();} catch(error){showNotice(errorText(error));} }
-  async function controlTeam(action) {try{clearNotice();await bridge.controlSwarm(action);await refresh();}catch(error){showNotice(errorText(error));}}
-  async function downloadArtifact(goalId,taskId,index) {
-    try {
-      const artifact=await bridge.readArtifact(goalId,taskId,index);
-      if(!artifact || typeof artifact.data!=='string')throw new Error('Artifact is unavailable.');
-      const raw=atob(artifact.data);const bytes=new Uint8Array(raw.length);for(let i=0;i<raw.length;i++)bytes[i]=raw.charCodeAt(i);
-      const name=String(artifact.name || 'artifact').split(/[\\/]/).pop().replace(/[^a-zA-Z0-9._-]/g,'_').slice(0,160) || 'artifact';
-      const url=URL.createObjectURL(new Blob([bytes],{type:'application/octet-stream'}));
-      const link=node('a','');link.href=url;link.download=name;document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
-    } catch(error) { showNotice(errorText(error)); }
-  }
-  function openEdit(goal) {selectedGoalId=goal.id;dom['goal-text'].value=goal.text || '';dom['goal-budget'].value=Number(goal.budgetUsd || 5).toFixed(2);dom['edit-dialog'].showModal();dom['goal-text'].focus();}
-  function methodId(method) {return typeof method==='string'?method:String(method?.id || method?.method || method?.name || '');}
-  function methodLabel(method) {const id=methodId(method);return ({'api-key':'API key','key':'API key','oauth':'Sign in','native':'Use native login','native-login':'Use native login','cli':'Use native login','subscription':'Use native login'})[id] || id.replace(/[-_]/g,' ');}
-  function supportedMethods(provider) {return (Array.isArray(provider.methods)?provider.methods:[]).filter(method=>methodId(method));}
-  function workerKeyProvider(provider) {return provider?.fleetSupported===true && supportedMethods(provider).some(method=>['key','api-key'].includes(methodId(method)));}
-  function providerAction(provider) {
-    if(!provider?.connected)return 'connect';
-    return workerKeyProvider(provider) && provider.available && !provider.fleetEligible ? 'allow-workers' : 'disconnect';
-  }
-  function providerDetail(provider) {
-    const detail=provider.detail || (provider.available?'Ready to connect':'Unavailable on this device');
-    if(detail==='CLI not installed.')return 'Native provider client not installed on this device.';
-    if(detail.includes('Sign in through the native app or CLI first.'))return 'Choose Connect to finish sign-in in your browser.';
-    return detail.replaceAll('CLI subscriptions','native subscriptions').replaceAll('CLI found;','Native client found;').replaceAll('CLI not found;','Native client not found;');
-  }
-  function renderProviderList() {
-    dom['provider-list'].replaceChildren();
-    if(!state.providers.length) {dom['provider-list'].append(node('p','field-help','No supported providers were found. Check again after installing or signing in to a supported provider.'));return;}
-    for(const provider of state.providers){
-      const methods=supportedMethods(provider);
-      const choice=node('button','provider-choice'); choice.type='button';choice.disabled=!provider.connected && !methods.length;
-      const left=node('span','');left.append(node('strong','',provider.name || provider.id));
-      let description=providerDetail(provider);
-      if(provider.connected && provider.fleetEligible)description+=' Worker route permitted; live execution unverified.';
-      else if(provider.connected && provider.fleetDetail)description+=` ${provider.fleetDetail}`;
-      left.append(node('small','',description));choice.append(left,node('span',provider.connected?'connected-tag':'',provider.connected?'Connected':'→'));
-      choice.addEventListener('click',()=>selectProvider(provider.id));dom['provider-list'].append(choice);
-    }
-  }
-  function selectProvider(id) {
-    selectedProvider=state.providers.find(p=>p.id===id);if(!selectedProvider)return;
-    dom['provider-error'].hidden=true;dom['provider-list'].hidden=true;$('refresh-providers').hidden=true;dom['connect-panel'].hidden=false;
-    dom['connect-title'].textContent=selectedProvider.name || selectedProvider.id;
-    dom['connect-detail'].textContent=providerDetail(selectedProvider)+(selectedProvider.id.toLowerCase().includes('modal')?' The app can call Modal inference directly; this does not enable isolated worker execution.':'');
-    $('connect-key-label').textContent=selectedProvider.id.toLowerCase().includes('modal')?'Modal inference Proxy Token':'API key';
-    const methods=supportedMethods(selectedProvider);
-    dom['connect-method'].replaceChildren();for(const method of methods){const option=node('option','',methodLabel(method));option.value=methodId(method);dom['connect-method'].append(option);}
-    dom['connect-model'].replaceChildren();const defaultOption=node('option','','Provider default');defaultOption.value='';dom['connect-model'].append(defaultOption);
-    for(const model of selectedProvider.models || []) {const id=typeof model==='string'?model:String(model.id||model.name);const option=node('option','',id);option.value=id;dom['connect-model'].append(option);}
-    const action=providerAction(selectedProvider);
-    dom['model-field'].hidden=action==='disconnect' || !selectedProvider.models?.length;
-    dom['connect-submit'].textContent=action==='allow-workers'?'Allow worker use':action==='disconnect'?'Disconnect':'Connect';
-    $('disconnect-provider').hidden=action!=='allow-workers';
-    dom['connect-key'].value='';updateMethodFields();
-  }
-  function updateMethodFields(){const id=dom['connect-method'].value;const action=providerAction(selectedProvider);$('method-field').hidden=action==='disconnect';dom['key-field'].hidden=action==='disconnect' || !['key','api-key'].includes(id);$('worker-disclosure').hidden=!workerKeyProvider(selectedProvider);$('key-local-help').hidden=workerKeyProvider(selectedProvider);dom['connect-key'].required=!dom['key-field'].hidden && action!=='allow-workers';dom['connect-key'].placeholder=action==='allow-workers'?'Use saved key or paste a new one':'Paste key';}
-  function openProviders(){dom['provider-error'].hidden=true;dom['provider-list'].hidden=false;$('refresh-providers').hidden=false;dom['connect-panel'].hidden=true;renderProviderList();if(!dom['provider-dialog'].open)dom['provider-dialog'].showModal();}
-  function resizePrompt(){dom.prompt.style.height='auto';dom.prompt.style.height=Math.min(dom.prompt.scrollHeight,150)+'px';}
-  function scheduleRefresh(){if(eventTimer)return;eventTimer=setTimeout(async()=>{eventTimer=null;try{await refresh();}catch(error){showNotice(errorText(error));}},160);}
+    voice={...voice,transcribe:false,ready:false,reason:'Local speech recognition did not become ready.'};return false;
+  })().finally(()=>{voiceWait=null;});
+  return voiceWait;
+}
+async function beginListening(){if(goalSubmitting||mode==='listening'||voiceWait||capturePending)return;if(!authReady()){showSetup();return;}if(fallbackAvailable()){openFallback(voice.reason||'Voice capture is unavailable.');return;}
+  moviePlayer.interrupt();
+  capturePending=true;
+  if(!await ensureVoiceReady()){capturePending=false;setMode('ready');openFallback(voice.reason||'Voice capture is unavailable.');return;}
+  void stopTodd();setMode('preparing-listen');announce('Opening microphone.');
+  capture.start().then(async audio=>{
+    setMode('transcribing');announce('Understanding your goal.');
+    const result=await bridge.transcribeAudio({...audio,language:navigator.language||'en-US'});
+    const sentence=oneSentence(result?.text);
+    if(!sentence){setMode('ready');openFallback('Please give Todd one sentence.');if(typeof result?.text==='string')elements['fallback-goal'].value=result.text.slice(0,4000);return;}
+    pendingGoal=sentence;setMode('go');announce('Goal understood. Starting work.');
+    clearTimeout(goTimer);goTimer=setTimeout(()=>void submitGoal(),350);
+  }).catch(error=>{if(errorMessage(error)==='Listening canceled.')return;setMode('ready');openFallback(errorMessage(error));}).finally(()=>{capturePending=false;});
+}
+function goalOptions(){if(!elements['budget-amount'].value.trim())throw new Error('Enter a budget amount.');return budgetOptions({amount:elements['budget-amount'].value,currency:elements['budget-currency'].value,workers:elements.workers.value,conversations:elements.conversations.value,privateH100:elements['private-h100'].checked});}
+async function submitGoal(){if(goalSubmitting||!pendingGoal)return;if(!authReady()){showSetup();return;}clearTimeout(goTimer);const text=pendingGoal;let options;
+  try{if(currencySwitch)await currencySwitch;if(budgetWait)await budgetWait;options=goalOptions();}catch(error){showError(errorMessage(error));return;}
+  goalSubmitting=true;setMode('submitting');try{await bridge.chat(text,options);pendingGoal=null;elements['fallback-goal'].value='';await refresh();announce('Todd has your goal.');elements['advanced-dialog'].close();setMode('ready');}catch(error){setMode('go');showError(errorMessage(error));}finally{goalSubmitting=false;}
+}
 
-  dom.composer.addEventListener('submit',async event=>{
-    event.preventDefault();const text=dom.prompt.value.trim();if(!text||sending)return;
-    const budgetUsd=Number($('compose-budget').value);
-    if(!Number.isFinite(budgetUsd)||budgetUsd<=0||budgetUsd>100000){showNotice('Choose a budget between $0.01 and $100,000.');$('compose-budget').focus();return;}
-    sending=true;dom.send.disabled=true;clearNotice();dom.prompt.value='';resizePrompt();
-    try{await bridge.chat(text,{budgetUsd});$('compose-budget').value='5.00';await refresh();}catch(error){dom.prompt.value=text;resizePrompt();showNotice(errorText(error));}finally{sending=false;dom.send.disabled=false;dom.prompt.focus();}
-  });
-  dom.prompt.addEventListener('input',resizePrompt);
-  dom.prompt.addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();dom.composer.requestSubmit();}});
-  dom['edit-form'].addEventListener('submit',async event=>{event.preventDefault();const text=dom['goal-text'].value.trim();const budgetUsd=Number(dom['goal-budget'].value);if(!text||!Number.isFinite(budgetUsd)||budgetUsd<=0)return;try{await bridge.updateGoal(selectedGoalId,{text,budgetUsd});dom['edit-dialog'].close();await refresh();clearNotice();}catch(error){showNotice(errorText(error));}});
-  dom['connect-method'].addEventListener('change',updateMethodFields);
-  dom['connect-form'].addEventListener('submit',async event=>{
-    event.preventDefault();if(!selectedProvider||connecting)return;
-    const action=providerAction(selectedProvider);
-    connecting=true;dom['connect-submit'].disabled=true;dom['connect-submit'].textContent=action==='disconnect'?'Disconnecting…':dom['connect-method'].value==='subscription'?'Waiting for sign-in…':'Connecting…';dom['provider-error'].hidden=true;
-    try{
-      if(action==='disconnect')await bridge.disconnect(selectedProvider.id);
-      else {const payload={id:selectedProvider.id,method:dom['connect-method'].value};if(!dom['key-field'].hidden){const key=dom['connect-key'].value.trim();if(key)payload.key=key;if(workerKeyProvider(selectedProvider))payload.fleetAllowed=true;}if(!dom['model-field'].hidden && dom['connect-model'].value)payload.model=dom['connect-model'].value;await bridge.connect(payload);}
-      dom['connect-key'].value='';await refresh();dom['provider-dialog'].close();clearNotice();
-    }catch(error){dom['provider-error'].textContent=errorText(error);dom['provider-error'].hidden=false;}
-    finally{connecting=false;dom['connect-submit'].disabled=false;dom['connect-submit'].textContent=action==='allow-workers'?'Allow worker use':action==='disconnect'?'Disconnect':'Connect';}
-  });
-  $('disconnect-provider').addEventListener('click',async()=>{if(!selectedProvider||connecting)return;connecting=true;try{await bridge.disconnect(selectedProvider.id);dom['connect-key'].value='';await refresh();dom['provider-dialog'].close();clearNotice();}catch(error){dom['provider-error'].textContent=errorText(error);dom['provider-error'].hidden=false;}finally{connecting=false;}});
-  $('provider-back').addEventListener('click',()=>{dom['connect-panel'].hidden=true;dom['provider-list'].hidden=false;$('refresh-providers').hidden=false;dom['connect-key'].value='';});
-  for(const action of ['pause','resume','stop'])$(`swarm-${action}`).addEventListener('click',()=>controlTeam(action));
-  $('refresh-providers').addEventListener('click',async()=>{try{const discovered=await bridge.discover();if(discovered?.providers)applyState({...state,providers:discovered.providers});else await refresh();dom['provider-error'].hidden=true;}catch(error){dom['provider-error'].textContent=errorText(error);dom['provider-error'].hidden=false;}});
-  $('providers-button').addEventListener('click',openProviders);
-  $('new-chat').addEventListener('click',()=>{dom.prompt.focus();dom.prompt.scrollIntoView({block:'nearest'});});
-  function toggleSidebar(open){document.querySelector('.sidebar').classList.toggle('open',open);$('sidebar-backdrop').hidden=!open;}
-  $('mobile-goals').addEventListener('click',()=>toggleSidebar(!document.querySelector('.sidebar').classList.contains('open')));
-  $('sidebar-backdrop').addEventListener('click',()=>toggleSidebar(false));
-  document.addEventListener('keydown',event=>{if(event.key==='Escape')toggleSidebar(false);});
-  document.addEventListener('click',event=>{const target=event.target.closest('[data-close]');if(target)$(target.dataset.close)?.close();});
-  dom['provider-dialog'].addEventListener('close',()=>{dom['connect-key'].value='';});
-  bridge.onEvent(event=>{if(event?.type==='state')applyState(event.state);else scheduleRefresh();});
-  (async()=>{try{await refresh();try{const discovered=await bridge.discover();if(discovered?.providers)applyState({...state,providers:discovered.providers});else await refresh();}catch(error){showNotice(`Provider check: ${errorText(error)}`);}if(!state.providers.some(p=>p.connected))openProviders();}catch(error){showNotice(errorText(error));openProviders();}})();
-})();
+function clearAudio(){const audio=elements['todd-audio'];audio.pause();audio.removeAttribute('src');audio.load();if(audioUrl){URL.revokeObjectURL(audioUrl);audioUrl=null;}audio.onplaying=audio.onended=audio.onerror=null;}
+async function stopTodd(){speechEpoch++;activeSpeechFinish?.();activeSpeechFinish=null;clearAudio();if(mode==='speaking')setMode('ready');try{await bridge.stopSpeaking?.();}catch{}}
+function speechChunks(text){const sentence=String(text).trim().match(/^.{1,1000}?[.!?。！？](?=\s|$)/s)?.[0]||String(text).trim().slice(0,900);return sentence?[sentence]:[];}
+async function speakTodd(text){if(!voice.speak||!text)return;const epoch=speechEpoch;
+  for(const chunk of speechChunks(text)){
+    if(epoch!==speechEpoch)return;
+    const result=await bridge.speak(chunk);if(epoch!==speechEpoch)return;
+    if(result?.mimeType!=='audio/wav'||typeof result.dataBase64!=='string')throw new Error('Todd voice returned unsupported audio.');
+    const raw=atob(result.dataBase64);if(raw.length<44||raw.length>10*1024*1024)throw new Error('Todd voice returned invalid audio.');
+    const bytes=new Uint8Array(raw.length);for(let i=0;i<raw.length;i++)bytes[i]=raw.charCodeAt(i);
+    clearAudio();audioUrl=URL.createObjectURL(new Blob([bytes],{type:'audio/wav'}));const audio=elements['todd-audio'];audio.src=audioUrl;
+    await new Promise((resolve,reject)=>{activeSpeechFinish=resolve;audio.onplaying=()=>{if(epoch===speechEpoch){setMode('speaking');announce('Todd is speaking.');}};audio.onended=resolve;audio.onerror=()=>reject(new Error('Todd voice could not be played.'));void audio.play().catch(reject);});
+    activeSpeechFinish=null;if(epoch===speechEpoch)clearAudio();
+  }
+  if(epoch===speechEpoch){setMode('ready');announce('Todd finished speaking.');}
+}
+
+async function controlTeam(action){try{await bridge.controlSwarm(action);await refresh();announce(`Team ${action} requested.`);}catch(error){showError(errorMessage(error));}}
+function amountForUsd(usd,quote){const digits=new Intl.NumberFormat('en',{style:'currency',currency:quote.currency}).resolvedOptions().maximumFractionDigits;const scale=10**digits;return Math.max(1/scale,Math.round(usd/quote.usdPerUnit*scale)/scale);}
+function markPreset(usd){for(const button of document.querySelectorAll('[data-budget-usd]'))button.setAttribute('aria-pressed',String(Number(button.dataset.budgetUsd)===usd));}
+function budgetNote(quote,usd=selectedPreset??50){const amount=amountForUsd(usd,quote);elements['budget-note'].textContent=quote.currency==='USD'?`${usd} USD allowance selected.`:`${amount} ${quote.currency} ≈ ${usd} USD · rate ${new Date(quote.quoteAsOf).toLocaleDateString()}`;}
+function loadBudget(currency,{convertCustom=false}={}){
+  const generation=++budgetEpoch;
+  const previous=budgetQuote,previousAmount=Number(elements['budget-amount'].value),wasCustom=budgetCustom;
+  elements['budget-note'].textContent='Checking currency allowance…';
+  const pending=(async()=>{try{
+      const quote=await bridge.defaultBudget(currency);
+      if(generation!==budgetEpoch)return;
+      if(!quote||quote.currency!==currency||!Number.isFinite(quote.usdPerUnit)||quote.usdPerUnit<=0)throw new Error('Currency allowance is unavailable.');
+      budgetQuote=quote;elements['budget-currency'].value=currency;
+      if(convertCustom&&wasCustom&&selectedPreset!==null){elements['budget-amount'].value=String(amountForUsd(selectedPreset,quote));budgetNote(quote);}
+      else if(convertCustom&&wasCustom&&previous&&Number.isFinite(previousAmount)&&previousAmount>0){
+        const digits=new Intl.NumberFormat('en',{style:'currency',currency}).resolvedOptions().maximumFractionDigits;
+        elements['budget-amount'].value=String(Math.max(1/10**digits,Math.round(previousAmount*previous.usdPerUnit/quote.usdPerUnit*10**digits)/10**digits));
+        budgetCustom=true;elements['budget-note'].textContent=`Converted your allowance using the ${new Date(quote.quoteAsOf||Date.now()).toLocaleDateString()} rate.`;
+      }else if(!convertCustom&&budgetCustom){elements['budget-note'].textContent='Your chosen allowance will be checked before work starts.';}
+      else{elements['budget-amount'].value=String(amountForUsd(50,quote));budgetCustom=false;selectedPreset=50;markPreset(50);budgetNote(quote,50);}
+    }catch(error){if(generation!==budgetEpoch)return;if(previous&&convertCustom){elements['budget-currency'].value=previous.currency;budgetQuote=previous;showError(errorMessage(error));}
+      else{elements['budget-currency'].value='USD';elements['budget-amount'].value='50.00';budgetQuote={amount:50,currency:'USD',allowanceUsd:50,usdPerUnit:1};budgetCustom=false;selectedPreset=50;markPreset(50);elements['budget-note'].textContent='50 USD allowance selected. Local currency is unavailable.';}
+    }})();
+  budgetWait=pending;void pending.finally(()=>{if(budgetWait===pending)budgetWait=null;});
+  return budgetWait;
+}
+function chooseCurrency(){let region;try{region=new Intl.Locale(navigator.language||'en-US').region;}catch{region='US';}const byRegion={CO:'COP',US:'USD',GB:'GBP',CA:'CAD',AU:'AUD',DE:'EUR',FR:'EUR',ES:'EUR',IT:'EUR'};const choice=byRegion[region]||'USD';elements['budget-currency'].value=allowedCurrencies.has(choice)?choice:'USD';return loadBudget(elements['budget-currency'].value);}
+
+elements.action.addEventListener('click',()=>{const action=elements.action.dataset.action;if(action==='start')void enterExperience();else if(action==='listen')beginListening();else if(action==='stop-listening')capture.stop();else if(action==='go')void submitGoal();else if(action==='stop-speaking')void stopTodd();});
+elements['advanced-toggle'].addEventListener('click',()=>{renderDetails();clearError('advanced');if(!elements['advanced-dialog'].open)elements['advanced-dialog'].showModal();});
+for(const button of document.querySelectorAll('[data-close]'))button.addEventListener('click',()=>$(button.dataset.close).close());
+elements['setup-dialog'].addEventListener('close',()=>{if(authBusy)void bridge.authCancel?.();if(mode==='setup')setMode('ready');});
+elements['setup-continue'].addEventListener('click',()=>{if(!authReady())return;elements['setup-dialog'].close();if(pendingGoal)void submitGoal();else if(fallbackAvailable())openFallback(voice.reason||'Voice capture is unavailable.');else beginListening();});
+for(const id of ['fly','modal'])$(`${id}-connect`).addEventListener('click',()=>void connectAccount(id));
+elements['fallback-go'].addEventListener('click',()=>{const sentence=oneSentence(elements['fallback-goal'].value);if(!sentence){showError('Enter one sentence for Todd.');return;}pendingGoal=sentence;void submitGoal();});
+for(const id of ['workers','conversations'])elements[id].addEventListener('input',()=>{$(`${id}-value`).value=elements[id].value;$(`${id}-value`).textContent=elements[id].value;});
+elements['private-h100'].addEventListener('change',renderDetails);
+elements['budget-amount'].addEventListener('input',()=>{budgetCustom=true;selectedPreset=null;markPreset(null);elements['budget-note'].textContent='Your chosen allowance will be checked before work starts.';});
+for(const button of document.querySelectorAll('[data-budget-usd]'))button.addEventListener('click',()=>{const usd=Number(button.dataset.budgetUsd);void (async()=>{if(currencySwitch)await currencySwitch;if(budgetWait)await budgetWait;if(!budgetQuote){showError('Currency allowance is unavailable.');return;}selectedPreset=usd;budgetCustom=true;elements['budget-amount'].value=String(amountForUsd(usd,budgetQuote));markPreset(usd);budgetNote(budgetQuote,usd);})();});
+elements['budget-currency'].addEventListener('change',()=>{const selected=elements['budget-currency'].value;const prior=budgetWait;const switchJob=(async()=>{if(prior)await prior;await loadBudget(selected,{convertCustom:true});})();currencySwitch=switchJob;void switchJob.finally(()=>{if(currencySwitch===switchJob)currencySwitch=null;});});
+for(const action of ['pause','resume','stop'])$(`${action}-all`).addEventListener('click',()=>void controlTeam(action));
+window.addEventListener('beforeunload',()=>{capture.cancel();moviePlayer.destroy();clearAudio();clearTimeout(goTimer);});
+bridge.onEvent(event=>{if(event?.type==='state')applyState(event.state);else if(!refreshTimer)refreshTimer=setTimeout(()=>{refreshTimer=null;void refresh().catch(()=>{});},150);});
+void moviePlayer.load();void chooseCurrency();setMode('ready');
+void (async()=>{try{await refresh();}catch(error){announce(errorMessage(error));}
+  try{voice=await bridge.voiceCapabilities();}catch(error){voice={transcribe:false,speak:false,reason:errorMessage(error)};}
+  await refreshAuth();setMode('ready');})();

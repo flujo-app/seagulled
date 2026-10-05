@@ -6,11 +6,133 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
-import { conversationFailure, fleetStatus, fleetDiagnosticStatus, recordConfirmedQuotaHold, runFleetLeaf } from '../src/swarm/fleet.mjs';
+import { conversationFailure, fleetStatus, fleetDiagnosticStatus, fleetExecutionLimits, goalCapacity,
+  fleetTopology, recordConfirmedQuotaHold, runFleetLeaf, staffOwnedTeam,
+  verifiedLocalConversations } from '../src/swarm/fleet.mjs';
 import { createOwnedRelay } from '../src/swarm/relay.mjs';
 import { buildSpecs } from '../upstream/swarm-teams/template/flows.mjs';
 import { Controller } from '../upstream/swarm-teams/fleet/controller.mjs';
-import { FlujoClient } from '../upstream/swarm-teams/lib/flujo-client.mjs';
+import { FlujoClient, rawRequest } from '../upstream/swarm-teams/lib/flujo-client.mjs';
+
+test('goal capacity maps selected worker and agent counts to bounded Fly execution limits', async () => {
+  assert.deepEqual(goalCapacity({}), { maxWorkers: 5, conversationsPerWorker: 5, agentsPerWorker: 4 });
+  assert.deepEqual(fleetExecutionLimits({ goal: { maxWorkers: 6, conversationsPerWorker: 5 }, config: { maxWorkers: 2 } }), {
+    workerCap: 6, teamLimits: { agentTurns: 6, leadTurns: 12, concurrency: 4 },
+  });
+  assert.deepEqual(goalCapacity({ agentsPerWorker: 10 }),
+    { maxWorkers: 5, conversationsPerWorker: 11, agentsPerWorker: 10 }, 'legacy child limit is not silently reduced');
+  assert.deepEqual(goalCapacity({ conversationsPerWorker: 11, agentsPerWorker: 10 }),
+    { maxWorkers: 5, conversationsPerWorker: 11, agentsPerWorker: 10 }, 'migrated legacy goal remains valid');
+  assert.equal(fleetExecutionLimits({ goal: { maxWorkers: 6, conversationsPerWorker: 5 }, native: true }).workerCap, 1);
+  assert.equal(fleetExecutionLimits({ goal: {}, config: { maxWorkers: 4 }, diagnostic: true }).workerCap, 4);
+  for (const setting of [{ maxWorkers: 0 }, { maxWorkers: 7 }, { maxWorkers: 2.5 },
+    { conversationsPerWorker: 0 }, { conversationsPerWorker: 11 },
+    { agentsPerWorker: 11 }, { agentsPerWorker: '4' }]) {
+    const dataDir = mkdtempSync(path.join(tmpdir(), 'seagulled-invalid-capacity-'));
+    assert.throws(() => goalCapacity(setting), /must be an integer/);
+    await assert.rejects(runFleetLeaf({ goal: { id: 'invalid-capacity', providerId: 'openai', ...setting },
+      task: 'fixture', dataDir, maxUsd: 2 }), /must be an integer/);
+    assert.equal(existsSync(path.join(dataDir, 'fleet')), false);
+  }
+  assert.throws(() => goalCapacity({ conversationsPerWorker: 5, agentsPerWorker: 5 }), /disagree/);
+  assert.deepEqual(fleetTopology({ workerTopologyVersion: 2 }, { workerCap: 5, relay: true }), {
+    initialWorkers: 5, limits: { maxWorkers: 10, maxDepth: 3, maxChildren: 4, maxActiveRuns: 2 },
+  });
+  assert.deepEqual(fleetTopology({}, { workerCap: 5, relay: true }), {
+    initialWorkers: 1, limits: { maxWorkers: 5, maxDepth: 2, maxChildren: 4, maxActiveRuns: 2 },
+  }, 'already admitted goals retain the original one-starter, five-cap topology');
+  assert.throws(() => goalCapacity({ workerTopologyVersion: 3 }), /must be 1 or 2/);
+});
+
+test('default staffing admits five actual Worker runs beneath one external supervisor', async () => {
+  const registryPath = path.join(mkdtempSync(path.join(tmpdir(), 'seagulled-staff-')), 'registry.json');
+  const provisioned = [];
+  const controller = new Controller({ registryPath, operatorToken: 'fixture-operator-token-more-than-32-characters',
+    publicUrl: 'http://127.0.0.1:1', remoteUrl: 'http://relay.fixture', maxRunsPerWorker: 1,
+    provisioner: { async provision(worker, _fleet, context) {
+      provisioned.push({ workerId: worker.id, limits: context.teamLimits });
+      return { kind: 'fixture', workerId: worker.id };
+    }, async connect() { return { client: { async runFlow({ conversationId }) {
+      assert.equal(Object.values(controller.registry.state.workers).length, 6,
+        'no Worker conversation starts until all five Machine slots are reserved');
+      return { conversationId, status: 'completed', output: 'fixture result' };
+    } }, close: async () => undefined }; } },
+  });
+  try {
+    const goal = controller.registry.createGoal({ id: 'staff-fixture', text: 'Fixture work',
+      limits: { maxWorkers: 5, maxDepth: 2, maxChildren: 4, maxActiveRuns: 2 } });
+    goal.teamLimits = fleetExecutionLimits({ goal: {} }).teamLimits;
+    controller.registry.save();
+    const root = controller.registry.reserve({ goalId: goal.id, role: 'supervisor', name: 'Todd' }).worker;
+    controller.registry.enroll(root.id, { kind: 'external', origin: 'http://127.0.0.1:1', workspace: 'fixture' });
+    const { lead, runs } = staffOwnedTeam(controller, root, { task: 'Fixture work', workerCap: 5,
+      localChildTarget: 4 });
+    assert.equal(runs.length, 5);
+    assert.equal(new Set(runs.map((run) => run.runId)).size, 5);
+    assert.equal(controller.registry.worker(lead.workerId).parentId, root.id);
+    assert.deepEqual(runs.slice(1).map((run) => controller.registry.worker(run.workerId).parentId),
+      Array(4).fill(lead.workerId));
+    assert.equal(Object.values(controller.registry.state.workers).length, 6, 'external Todd is outside the five Machine cap');
+    assert.match(controller.registry.run(lead.runId).task, /start_subflow_ tool exactly 4 times/);
+    assert.throws(() => staffOwnedTeam(controller, root, { task: 'Duplicate', workerCap: 5 }), /all 5 Workers/);
+    await Promise.all([...controller.settled.values()]);
+    assert.equal(Object.values(controller.registry.state.runs).filter((run) => run.state === 'completed').length, 5);
+    assert.equal(provisioned.length, 5);
+    assert.ok(provisioned.every((item) => item.limits.concurrency === 4));
+    assert.throws(() => controller.startRun({ worker: controller.registry.worker(lead.workerId),
+      startedBy: root.id, task: 'A second lead conversation' }), /conversation run limit/);
+  } finally { await controller.close(); }
+});
+
+test('local conversation receipt accepts only the exact observed child tree', () => {
+  const parent = 'lead-id';
+  const items = Array.from({ length: 4 }, (_, index) => ({ id: `child-${index}`, parentConversationId: parent,
+    status: 'completed' }));
+  assert.deepEqual(verifiedLocalConversations({ status: 200, body: { items, total: 4, hasMore: false } }, parent, 4),
+    items.map(({ id, status }) => ({ id, status })));
+  assert.throws(() => verifiedLocalConversations({ status: 200, body: { items: items.slice(0, 3), total: 3,
+    hasMore: false } }, parent, 4), /exactly 4/);
+  assert.throws(() => verifiedLocalConversations({ status: 200, body: { items: [...items, {
+    id: 'extra', parentConversationId: parent }], total: 5, hasMore: false } }, parent, 4), /exactly 4/);
+  assert.throws(() => verifiedLocalConversations({ status: 200, body: { items, total: 4, hasMore: true } },
+    parent, 4), /did not confirm/);
+});
+
+test('fleet deadline blocks a late Worker before any model submission', async () => {
+  const registryPath = path.join(mkdtempSync(path.join(tmpdir(), 'seagulled-deadline-')), 'registry.json');
+  let modelCalls = 0;
+  const controller = new Controller({ registryPath, operatorToken: 'fixture-operator-token-more-than-32-characters',
+    publicUrl: 'http://127.0.0.1:1', deadlineAt: Date.now() + 100,
+    provisioner: { async provision(worker) {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      return { kind: 'fixture', workerId: worker.id };
+    }, async connect() { return { client: { async runFlow() { modelCalls++; return { status: 'completed', output: 'late' }; } },
+      close: async () => undefined }; } } });
+  try {
+    const goal = controller.registry.createGoal({ id: 'deadline-fixture', text: 'Fixture', limits: { maxWorkers: 2 } });
+    const root = controller.registry.reserve({ goalId: goal.id, role: 'supervisor' }).worker;
+    controller.registry.enroll(root.id, { kind: 'external', origin: 'http://127.0.0.1:1', workspace: 'fixture' });
+    const run = controller.delegate(root, { name: 'late-worker', task: 'Fixture' });
+    await controller.settled.get(run.runId);
+    assert.equal(controller.registry.run(run.runId).state, 'failed');
+    assert.equal(modelCalls, 0);
+    assert.throws(() => controller.delegate(root, { name: 'too-late', task: 'Fixture' }), /deadline has passed/);
+  } finally { await controller.close(); }
+});
+
+test('FLUJO HTTP deadline is absolute even while a server keeps sending bytes', async () => {
+  const server = http.createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/plain' });
+    const interval = setInterval(() => response.write('.'), 10);
+    response.on('close', () => clearInterval(interval));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const started = Date.now();
+    await assert.rejects(rawRequest(`http://127.0.0.1:${server.address().port}/`, { timeoutMs: 80 }), /timeout after 80 ms/);
+    assert.ok(Date.now() - started < 1000);
+  } finally { await new Promise((resolve) => server.close(resolve)); }
+});
 
 test('product Fly admission requires the exact selected provider binding before any probe or intent', async () => {
   const dataDir = mkdtempSync(path.join(tmpdir(), 'seagulled-route-bound-'));
@@ -27,6 +149,38 @@ test('product Fly admission requires the exact selected provider binding before 
       task: 'fixture', dataDir, maxUsd: 2, fleetRoute: route });
     assert.equal(result.available, false);
     assert.equal(existsSync(path.join(dataDir, 'fleet')), false);
+  }
+});
+
+test('private H100 Fly route accepts only the verified owned endpoint identity before any probe', async () => {
+  const dataDir = mkdtempSync(path.join(tmpdir(), 'seagulled-private-route-'));
+  const previousProfile = process.env.SEAGULLED_FLEET_PROFILE;
+  process.env.SEAGULLED_FLEET_PROFILE = path.join(dataDir, 'missing-profile.json');
+  const valid = { available: true, providerId: 'private-h100', verification: 'previously-verified',
+    costPolicy: 'estimated-gpu-seconds', ownedAttemptId: '11111111-2222-3333-4444-555555555555',
+    leaseGoalId: 'owned-goal',
+    model: { name: 'qwen3.8-27b', provider: 'openai', adapter: 'openai',
+      baseUrl: 'https://owner-seagulled-qwen-a1b2c3d4e5f6.modal.run/v1', apiKey: 'owned-fixture-token' } };
+  try {
+    const accepted = await fleetStatus({ dataDir, providerId: 'private-h100', fleetRoute: valid, goalId: 'owned-goal' });
+    assert.match(accepted.detail, /profile was found/, 'binding passes to tooling discovery without fetching a model');
+    assert.equal((await fleetStatus({ dataDir, providerId: 'private-h100', fleetRoute: valid,
+      goalId: 'different-goal' })).available, false, 'another goal cannot borrow the route');
+    for (const route of [
+    { ...valid, providerId: 'openai' },
+    { ...valid, verification: 'unverified' },
+    { ...valid, ownedAttemptId: 'missing' },
+    { ...valid, model: { ...valid.model, name: 'other-model' } },
+    { ...valid, model: { ...valid.model, baseUrl: 'https://original-project.modal.run/v1' } },
+    { ...valid, model: { ...valid.model, baseUrl: 'http://owner-seagulled-qwen-a1b2c3d4e5f6.modal.run/v1' } },
+    ]) {
+      const status = await fleetStatus({ dataDir, providerId: 'private-h100', fleetRoute: route, goalId: 'owned-goal' });
+      assert.equal(status.available, false);
+      assert.equal(existsSync(path.join(dataDir, 'fleet')), false);
+    }
+  } finally {
+    if (previousProfile === undefined) delete process.env.SEAGULLED_FLEET_PROFILE;
+    else process.env.SEAGULLED_FLEET_PROFILE = previousProfile;
   }
 });
 

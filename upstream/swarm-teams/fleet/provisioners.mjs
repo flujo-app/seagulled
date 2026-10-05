@@ -13,11 +13,12 @@ import { attemptError, cleanupAttempt, provisionWithCleanup } from './attempt.mj
  * conversations and MCP servers but share that machine's filesystem, so this is for
  * development and for teams that do not need separate sandboxes.
  */
-export function workspaceProvisioner({ origin, token, model, browser = true, specialists }) {
+export function workspaceProvisioner({ origin, token, model, browser = true, teamLimits, specialists }) {
   return {
     async provision(worker, fleet, context = {}) {
       const target = { kind: 'workspace', origin, workspace: `swarm-${worker.id}`, token };
-      await installTemplate(new FlujoClient(target), { model, fleet, browser, specialists: context.specialists ?? specialists });
+      await installTemplate(new FlujoClient(target), { model, fleet, browser,
+        limits: context.teamLimits ?? teamLimits, specialists: context.specialists ?? specialists });
       return target;
     },
     async retire(target) {
@@ -66,7 +67,8 @@ export async function flyProvisioner({ flujoCloudPath, templateWorkspace, source
       try {
         connection = await this.connect(target);
         await installTemplate(connection.client, { model: { id: MODEL_ID }, enableBundled: true,
-          fleet: reachable ? { url: fleet.remoteUrl ?? fleet.url, token: fleet.token } : undefined, limits: teamLimits,
+          fleet: reachable ? { url: fleet.remoteUrl ?? fleet.url, token: fleet.token } : undefined,
+          limits: context.teamLimits ?? teamLimits,
           specialists: context.specialists ?? specialists });
       } catch (error) {
         throw attemptError(error, await cleanupAttempt(managed, app));

@@ -10,17 +10,19 @@ export function rawRequest(url, { method = 'GET', headers = {}, body, timeoutMs 
   return new Promise((resolve, reject) => {
     const target = new URL(url);
     const payload = body === undefined ? undefined : Buffer.from(typeof body === 'string' ? body : JSON.stringify(body));
+    let timer;
+    const stopTimer = () => { if (timer) clearTimeout(timer); };
     const request = (target.protocol === 'https:' ? https : http).request(target, {
       method,
       headers: { ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': payload.length } : {}), ...headers },
     }, (response) => {
       const chunks = [];
       response.on('data', (chunk) => chunks.push(chunk));
-      response.on('end', () => resolve({ status: response.statusCode, text: Buffer.concat(chunks).toString('utf8') }));
-      response.on('error', reject);
+      response.on('end', () => { stopTimer(); resolve({ status: response.statusCode, text: Buffer.concat(chunks).toString('utf8') }); });
+      response.on('error', (error) => { stopTimer(); reject(error); });
     });
-    if (timeoutMs > 0) request.setTimeout(timeoutMs, () => request.destroy(new Error(`timeout after ${timeoutMs} ms`)));
-    request.on('error', reject);
+    if (timeoutMs > 0) timer = setTimeout(() => request.destroy(new Error(`timeout after ${timeoutMs} ms`)), timeoutMs);
+    request.on('error', (error) => { stopTimer(); reject(error); });
     request.end(payload);
   });
 }
@@ -103,6 +105,11 @@ export class FlujoClient {
     return Array.isArray(body) ? body : Object.values(body.servers ?? body);
   }
 
+  async serverTools(name) {
+    const body = await this.expect('GET', `/api/mcp/servers/${encodeURIComponent(name)}/tools`);
+    return { tools: Array.isArray(body?.tools) ? body.tools : [], error: body?.error };
+  }
+
   async upsertServer(config) {
     const exists = (await this.servers()).some((server) => server.name === config.name);
     return this.expect(exists ? 'PUT' : 'POST',
@@ -128,6 +135,11 @@ export class FlujoClient {
 
   async conversation(id) {
     return this.api('GET', `/v1/chat/conversations/${encodeURIComponent(id)}`);
+  }
+
+  /** Read FLUJO's persisted conversation hierarchy without opening message bodies. */
+  async descendants(id) {
+    return this.api('GET', `/v1/chat/conversations?paged=1&limit=200&descendantsOf=${encodeURIComponent(id)}`);
   }
 
   async inject(id, content) {

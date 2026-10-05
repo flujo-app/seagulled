@@ -52,8 +52,20 @@ export async function installTemplate(client, { model, fleet, browser = true, bo
     servers = await client.servers();
   }
   const availableServers = servers.filter((server) => !server.disabled).map((server) => server.name);
+  const availableTools = {};
+  if (availableServers.includes('flujo') && typeof client.serverTools === 'function') {
+    // The installed server inventory is authority for attached FLUJO tool names.
+    // A disconnected server can answer HTTP 200 with an empty list and error.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const observed = await client.serverTools('flujo').catch(() => ({ tools: [] }));
+      availableTools.flujo = (observed.error ? [] : Array.isArray(observed.tools) ? observed.tools : [])
+        .map((tool) => tool?.name).filter((name) => typeof name === 'string');
+      if (availableTools.flujo.length || attempt === 2) break;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
   const flows = [];
-  for (const spec of buildSpecs({ model: modelId, availableServers, limits, specialists })) flows.push(await client.saveFlowSpec(spec));
+  for (const spec of buildSpecs({ model: modelId, availableServers, availableTools, limits, specialists })) flows.push(await client.saveFlowSpec(spec));
   return { workspace: client.workspace, workspaceCreated: created, modelId, availableServers,
-    flows: Object.fromEntries(flows.map((flow) => [flow.name, flow.id])), names: FLOW_NAMES };
+    availableTools, flows: Object.fromEntries(flows.map((flow) => [flow.name, flow.id])), names: FLOW_NAMES };
 }

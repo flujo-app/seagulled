@@ -81,6 +81,13 @@
     "scope": "optional existing-flow specialist briefs and stable controller goal identity",
     "merged": false
   },
+  "teamLimitsSuccessor": {
+    "privateEngineCommit": "290dd6a7c19fa92c267bddd04f625f6cfbe39459",
+    "upstreamCommit": "6b3a1cb4081b48faefddccc3d8a478e0219dfb33",
+    "pullRequest": "https://github.com/flujo-app/iambrokeplshlp/pull/60",
+    "scope": "validated generic team limits forwarded to root and delegated installs",
+    "merged": false
+  },
   "lifecycleSuccessor": {
     "privateEngineCommit": "4b0363e",
     "pullRequest": "https://github.com/flujo-app/iambrokeplshlp/pull/57",
