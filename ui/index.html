@@ -31,9 +31,8 @@
     <p class="sheet-intro">Sign in with Fly and Modal in your browser; inference access and credits are checked separately.</p>
     <div class="auth-row"><div><strong>Fly</strong><small id="fly-state">Checking…</small></div><button id="fly-connect" class="line-button" type="button">Connect</button></div>
     <div class="auth-row"><div><strong>Modal</strong><small id="modal-state">Checking…</small></div><button id="modal-connect" class="line-button" type="button">Connect</button></div>
-    <div class="auth-row inference-row"><div><strong>Inference</strong><small id="inference-state">Checking providers…</small></div><button id="provider-setup" class="line-button" type="button" disabled>Choose</button></div>
+    <div class="auth-row inference-row"><div><strong>Inference</strong><small id="inference-state">Checking providers…</small></div></div>
     <p id="setup-error" class="sheet-error" role="alert" hidden></p>
-    <button id="setup-continue" class="solid-button" type="button" disabled>Continue</button>
   </dialog>
 
   <dialog id="advanced-dialog" class="sheet advanced-sheet" aria-labelledby="advanced-title">
@@ -49,7 +48,7 @@
       <label class="setting-label" for="workers">Workers <output id="workers-value">5</output></label><input id="workers" type="range" min="1" max="6" value="5">
       <label class="setting-label" for="conversations">Conversations per worker <output id="conversations-value">5</output></label><input id="conversations" type="range" min="1" max="10" value="5">
       <label class="private-h100-switch" for="private-h100"><span>Private H100 + Qwen</span><input id="private-h100" type="checkbox"></label>
-      <small id="private-h100-status" class="budget-note">Off. Enabling it at Go may create paid H100 resources and permit isolated Workers to use the newly owned bearer.</small>
+      <small id="private-h100-status" class="budget-note">Off. If enabled, Go may start paid private inference within this goal's allowance.</small>
     </div>
     <div id="text-fallback" class="text-fallback" hidden><label for="fallback-goal">Voice is unavailable. Enter one sentence here.</label><textarea id="fallback-goal" rows="2" maxlength="4000"></textarea><button id="fallback-go" class="solid-button" type="button">Go</button></div>
     <div class="quiet-actions"><button id="pause-all" class="line-button" type="button" hidden>Pause</button><button id="resume-all" class="line-button" type="button" hidden>Resume</button><button id="stop-all" class="line-button danger" type="button" hidden>Stop</button></div>

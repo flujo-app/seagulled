@@ -5,7 +5,7 @@ import {MoviePlayer} from './movie-player.mjs';
 import movieManifest from './movie-manifest.json' with {type:'json'};
 
 const $=id=>document.getElementById(id);
-const elements=Object.fromEntries(['movie','frame','movie-video','movie-status','narration-status','action','action-icon','voice-level','advanced-toggle','live-status','todd-audio','setup-dialog','advanced-dialog','fly-state','modal-state','fly-connect','modal-connect','inference-state','provider-setup','setup-error','setup-continue','budget-amount','budget-currency','budget-note','goal-provider','goal-provider-note','workers','workers-value','conversations','conversations-value','private-h100','private-h100-status','text-fallback','fallback-goal','fallback-go','pause-all','resume-all','stop-all','work-details','goal-details','provider-details','spend-details','provider-connect-details','provider-choice','provider-guidance','provider-model-row','provider-model','provider-key-row','provider-key','provider-storage-note','provider-worker-row','provider-worker-consent','provider-connect','provider-disconnect','advanced-error'].map(id=>[id,$(id)]));
+const elements=Object.fromEntries(['movie','frame','movie-video','movie-status','narration-status','action','action-icon','voice-level','advanced-toggle','live-status','todd-audio','setup-dialog','advanced-dialog','fly-state','modal-state','fly-connect','modal-connect','inference-state','setup-error','budget-amount','budget-currency','budget-note','goal-provider','goal-provider-note','workers','workers-value','conversations','conversations-value','private-h100','private-h100-status','text-fallback','fallback-goal','fallback-go','pause-all','resume-all','stop-all','work-details','goal-details','provider-details','spend-details','provider-connect-details','provider-choice','provider-guidance','provider-model-row','provider-model','provider-key-row','provider-key','provider-storage-note','provider-worker-row','provider-worker-consent','provider-connect','provider-disconnect','advanced-error'].map(id=>[id,$(id)]));
 const allowedCurrencies=new Set(['USD','EUR','GBP','COP','CAD','AUD']);
 const providerModels={openai:['gpt-6.1-sol','gpt-6-luna','gpt-6-astra'],anthropic:['claude-sonnet-5-5']};
 const supportedProviders=new Set(['codex','claude','openai','anthropic']);
@@ -13,10 +13,10 @@ const terminal=new Set(['completed','stopped','failed','interrupted','cancelled'
 let state={version:1,conversation:[],goals:[],spend:{},swarm:{status:'idle'}};
 let auth={fly:{connected:false,available:false,detail:'Checking…'},modal:{connected:false,available:false,detail:'Checking…'}};
 let voice={transcribe:false,speak:false,reason:'Voice is not ready.'};
-let mode='ready',started=false,authBusy=false,goalSubmitting=false,goalPostStarted=false,pendingGoal=null,goTimer=null,workingSince=0,workingKey='',voiceWait=null,capturePending=false,inputEpoch=0,suppressTodd=false;
+let mode='ready',started=false,authBusy=false,setupEpoch=0,setupInputEpoch=0,goalSubmitting=false,goalPostStarted=false,pendingGoal=null,goTimer=null,workingSince=0,workingKey='',voiceWait=null,capturePending=false,inputEpoch=0,suppressTodd=false;
 let knownMessages=null,speechQueue=Promise.resolve(),speechEpoch=0,audioUrl=null,activeSpeechFinish=null,refreshTimer=null;
 let budgetWait=null,budgetQuote=null,budgetCustom=false,budgetEpoch=0,currencySwitch=null,selectedPreset=50,quoteExpiryTimer=null;
-let providerBusy=false,providerSetupPending=false,providerWait=null,displayedProvider='';
+let providerBusy=false,providerWait=null,displayedProvider='';
 const capture=new VoiceCapture({onLevel:level=>{elements['voice-level'].style.setProperty('--level',String(Math.max(.2,level*3)));},onHeard:()=>announce('Listening to your goal.'),onReady:()=>{setMode('listening');announce('Listening. Speak one sentence.');}});
 const moviePlayer=new MoviePlayer({video:elements['movie-video'],stage:elements.movie,manifest:movieManifest,onStatus:({status,detail})=>{
   elements['movie-status'].textContent=status==='missing'||status==='missing-scene'||status==='failed'
@@ -209,9 +209,9 @@ function renderDetails(){
   const privateRoute=state.providers?.find(provider=>provider.id==='private-h100');
   elements['private-h100-status'].textContent=elements['private-h100'].checked
     ? privateRoute?.ready===true&&privateRoute?.connected===true&&privateRoute?.available===true
-      ? 'At Go, this uses paid H100 resources and permits isolated Workers to use the newly owned bearer; execution is verified when work starts.'
-      : 'At Go, this may create paid H100 resources and permit isolated Workers to use the newly owned bearer; this route is not verified yet.'
-    :'Off. Enabling it at Go may create paid H100 resources and permit isolated Workers to use the newly owned bearer.';
+      ? "At Go, private H100 may start paid inference within this goal's allowance; execution is verified when work starts."
+      : "At Go, private H100 may start paid inference within this goal's allowance; availability is checked then."
+    :"Off. If enabled, Go may start paid private inference within this goal's allowance.";
   const providers=elements['provider-details'];providers.replaceChildren();
   const ready=state.providers?.filter(provider=>provider.available&&provider.connected&&(provider.id!=='private-h100'||elements['private-h100'].checked))||[];
   providers.append(node('p',ready.length?`${ready.map(provider=>provider.name||provider.id).join(', ')} connected locally. Company readiness is checked separately.`:'No inference provider is ready. A goal may remain queued.'));
@@ -255,14 +255,16 @@ function renderAuth(){for(const id of ['fly','modal']){const item=auth[id];$(`${
   elements['inference-state'].textContent=!authReady()?'Finish Fly and Modal sign-in first.'
     : elements['private-h100'].checked?'Private H100 is requested; inference is checked at Go.'
     : provider?`${provider.name||provider.id} is connected locally; company readiness is checked separately.`
-    :'Connect a supported inference provider, or continue with a queued goal.';
-  elements['setup-continue'].disabled=!authReady()||authBusy;
-  elements['setup-continue'].textContent=authReady()&&!provider&&!elements['private-h100'].checked?'Continue with queued goal':'Continue';
-  elements['provider-setup'].disabled=!authReady()||authBusy;
+    :'You can save a queued goal before connecting inference.';
   renderProviderForm();
 }
-function showSetup(){setMode('setup');clearError('setup');renderAuth();if(!elements['setup-dialog'].open)elements['setup-dialog'].showModal();void refreshAuth();}
-async function connectAccount(id){if(authBusy||!auth[id]?.available)return;authBusy=true;renderAuth();$(`${id}-state`).textContent='Opening browser sign-in…';clearError('setup');try{await bridge.authConnect({id});await refreshAuth();}catch(error){showError(errorMessage(error),'setup');await refreshAuth();}finally{authBusy=false;renderAuth();}}
+function advanceSetup(epoch){if(epoch!==setupEpoch||setupInputEpoch!==inputEpoch||mode!=='setup'||!elements['setup-dialog'].open||authBusy||!authReady())return;
+  setupEpoch++;setMode('ready');elements['setup-dialog'].close();
+  if(pendingGoal)void submitGoal();else if(fallbackAvailable())openFallback(voice.reason||'Voice capture is unavailable.');else beginListening();
+}
+function showSetup(){const epoch=++setupEpoch;setupInputEpoch=inputEpoch;setMode('setup');clearError('setup');renderAuth();if(!elements['setup-dialog'].open)elements['setup-dialog'].showModal();void refreshAuth().then(()=>advanceSetup(epoch));}
+async function connectAccount(id){if(authBusy||!auth[id]?.available)return;const epoch=setupEpoch;authBusy=true;renderAuth();$(`${id}-state`).textContent='Opening browser sign-in…';clearError('setup');let verified=false;
+  try{await bridge.authConnect({id});await refreshAuth();verified=authReady();}catch(error){showError(errorMessage(error),'setup');await refreshAuth();}finally{authBusy=false;renderAuth();if(verified)advanceSetup(epoch);}}
 async function refreshProviders(){if(providerWait)return providerWait;providerWait=(async()=>{try{await bridge.discover();await refresh();}catch(error){announce(errorMessage(error));}})().finally(()=>{providerWait=null;});return providerWait;}
 async function connectProvider(){
   if(providerBusy||!authReady())return;
@@ -277,7 +279,6 @@ async function connectProvider(){
   }
   providerBusy=true;renderProviderForm();clearError('advanced');
   try{await bridge.connect(payload);await refresh();announce(`${providerState(id)?.name||id} connection saved.`);
-    if(providerSetupPending&&ordinaryInference()){providerSetupPending=false;elements['advanced-dialog'].close();void enterExperience();}
   }catch(error){showError(errorMessage(error));}
   finally{elements['provider-key'].value='';providerBusy=false;renderProviderForm();renderAuth();}
 }
@@ -402,10 +403,7 @@ function chooseCurrency(){let region;try{region=new Intl.Locale(navigator.langua
 elements.action.addEventListener('click',()=>{const action=elements.action.dataset.action;if(action==='start')void enterExperience();else if(action==='listen')beginListening();else if(action==='stop-listening')capture.stop();else if(action==='go')void submitGoal();else if(action==='stop-speaking')void stopTodd();});
 elements['advanced-toggle'].addEventListener('click',()=>{renderDetails();clearError('advanced');if(!elements['advanced-dialog'].open)elements['advanced-dialog'].showModal();void refreshVoiceCapabilities();});
 for(const button of document.querySelectorAll('[data-close]'))button.addEventListener('click',()=>$(button.dataset.close).close());
-elements['setup-dialog'].addEventListener('close',()=>{if(authBusy)void bridge.authCancel?.();if(mode==='setup')setMode('ready');});
-elements['advanced-dialog'].addEventListener('close',()=>{providerSetupPending=false;});
-elements['setup-continue'].addEventListener('click',()=>{if(!authReady())return;elements['setup-dialog'].close();if(pendingGoal)void submitGoal();else if(fallbackAvailable())openFallback(voice.reason||'Voice capture is unavailable.');else beginListening();});
-elements['provider-setup'].addEventListener('click',()=>{if(!authReady())return;providerSetupPending=true;elements['setup-dialog'].close();renderDetails();if(!elements['advanced-dialog'].open)elements['advanced-dialog'].showModal();elements['provider-connect-details'].open=true;elements['provider-choice'].focus();void refreshProviders();});
+elements['setup-dialog'].addEventListener('close',()=>{setupEpoch++;if(authBusy)void bridge.authCancel?.();if(mode==='setup')setMode('ready');});
 for(const id of ['fly','modal'])$(`${id}-connect`).addEventListener('click',()=>void connectAccount(id));
 elements['provider-choice'].addEventListener('change',renderProviderForm);
 elements['goal-provider'].addEventListener('change',renderGoalProvider);
