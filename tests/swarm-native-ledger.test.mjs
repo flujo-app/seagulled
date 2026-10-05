@@ -133,6 +133,20 @@ test('accepted owner, input, inventory and invocation persist before the sole ef
   } finally { f.close(); }
 });
 
+test('terminal-ready cannot be added after an original is already terminal', async () => {
+  const f = fixture();
+  try {
+    const who = f.actor('lead');
+    const args = f.input(who, f.origin(who, 'root-lead'), 'call-one');
+    const accepted = await f.ledger.accept(args);
+    await f.invoke('call-one', 'goal-one', (_, owner) => f.live(owner));
+    f.ledger.sdkFinished('call-one', 'goal-one', 'completed');
+    await f.ledger.terminal('call-one', 'goal-one', f.prove('call-one', accepted.owner));
+    assert.throws(() => f.ledger.terminalPrepared('call-one', 'goal-one'), hasCode('TERMINAL_PROOF'));
+    assert.equal((await f.ledger.status('call-one', 'goal-one')).terminalReady, false);
+  } finally { f.close(); }
+});
+
 test('public JSON origins and mismatched actor/root/target envelopes have no authority', async () => {
   const f = fixture();
   try {

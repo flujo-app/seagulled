@@ -43,6 +43,8 @@ const validRecord = (key, record, goalId, limits) => {
     || ['live', 'terminal'].includes(record.state) && record.invocationEffect !== 'resolved'
     || record.state === 'terminal' !== Boolean(record.terminal)
     || record.cancel && !['uncertain', 'resolved'].includes(record.cancel.state)
+    || record.sdkOutcome && !['completed', 'error', 'cancelled'].includes(record.sdkOutcome)
+    || record.terminalReady && record.sdkOutcome !== 'completed'
     || digest(JSON.stringify({ owner: record.owner, payload: record.payload })) !== record.fingerprint) return false;
   return true;
 };
@@ -228,6 +230,7 @@ export class NativeOriginalLedger {
       handleRetained: this.handles.has(handleKey(record.owner.goalId, record.id)),
       loss: record.loss && Object.freeze(copy(record.loss)),
       cancel: record.cancel && Object.freeze(copy(record.cancel)),
+      sdkOutcome: record.sdkOutcome ?? null, terminalReady: record.terminalReady === true,
       events: Object.freeze(copy(record.events)), result: record.result && Object.freeze(copy(record.result)),
       terminal: record.terminal && Object.freeze(copy(record.terminal)) });
   }
@@ -339,6 +342,46 @@ export class NativeOriginalLedger {
     }
     record.result = result;
     this.save(scope);
+    return this.view(record);
+  }
+
+  // Provider callbacks are acknowledged only after these same-ID observations
+  // are durable. Neither observation is terminal proof or a hold release.
+  sdkFinished(callId, goalId, outcome) {
+    if (!['completed', 'error', 'cancelled'].includes(outcome)) fail('IDENTITY');
+    const scope = this.scope(goalId);
+    const record = scope.state.records[id(callId)] ?? fail('NOT_FOUND');
+    if (record.sdkOutcome && record.sdkOutcome !== outcome) fail('CHANGED_ORIGINAL');
+    if (record.state === 'terminal' && !record.sdkOutcome) fail('CHANGED_ORIGINAL');
+    if (!record.sdkOutcome) { record.sdkOutcome = outcome; this.save(scope); }
+    return this.view(record);
+  }
+
+  terminalPrepared(callId, goalId) {
+    const scope = this.scope(goalId);
+    const record = scope.state.records[id(callId)] ?? fail('NOT_FOUND');
+    if (record.state === 'terminal') {
+      if (record.terminalReady) return this.view(record);
+      fail('TERMINAL_PROOF');
+    }
+    if (record.sdkOutcome !== 'completed') fail('TERMINAL_PROOF');
+    if (!record.terminalReady) { record.terminalReady = true; this.save(scope); }
+    return this.view(record);
+  }
+
+  // A source session can be stopped before a qualifying live event, or while
+  // its finished SDK stream still awaits a source terminal write. The exact
+  // cancel ID is journaled before touching that original local session.
+  async cancelPending(callId, goalId, effect) {
+    const scope = this.scope(goalId);
+    const record = scope.state.records[id(callId)] ?? fail('NOT_FOUND');
+    if (record.cancel) return this.view(record);
+    if (!['accepted', 'uncertain', 'live'].includes(record.state) || typeof effect !== 'function') fail('LOST_HANDLE');
+    const cancelId = `cancel-${randomUUID()}`;
+    record.cancel = { id: cancelId, state: 'uncertain' };
+    this.save(scope);
+    await effect(cancelId);
+    if (record.state !== 'terminal') { record.cancel.state = 'resolved'; this.save(scope); }
     return this.view(record);
   }
 
