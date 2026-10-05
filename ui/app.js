@@ -5,8 +5,10 @@ import {MoviePlayer} from './movie-player.mjs';
 import movieManifest from './movie-manifest.json' with {type:'json'};
 
 const $=id=>document.getElementById(id);
-const elements=Object.fromEntries(['movie','frame','movie-video','movie-status','action','action-icon','voice-level','advanced-toggle','live-status','todd-audio','setup-dialog','advanced-dialog','fly-state','modal-state','fly-connect','modal-connect','setup-error','setup-continue','budget-amount','budget-currency','budget-note','workers','workers-value','conversations','conversations-value','private-h100','private-h100-status','text-fallback','fallback-goal','fallback-go','pause-all','resume-all','stop-all','work-details','goal-details','provider-details','spend-details','advanced-error'].map(id=>[id,$(id)]));
+const elements=Object.fromEntries(['movie','frame','movie-video','movie-status','narration-status','action','action-icon','voice-level','advanced-toggle','live-status','todd-audio','setup-dialog','advanced-dialog','fly-state','modal-state','fly-connect','modal-connect','inference-state','provider-setup','setup-error','setup-continue','budget-amount','budget-currency','budget-note','workers','workers-value','conversations','conversations-value','private-h100','private-h100-status','text-fallback','fallback-goal','fallback-go','pause-all','resume-all','stop-all','work-details','goal-details','provider-details','spend-details','provider-connect-details','provider-choice','provider-guidance','provider-model-row','provider-model','provider-key-row','provider-key','provider-storage-note','provider-worker-row','provider-worker-consent','provider-connect','provider-disconnect','advanced-error'].map(id=>[id,$(id)]));
 const allowedCurrencies=new Set(['USD','EUR','GBP','COP','CAD','AUD']);
+const providerModels={openai:['gpt-6.1-sol','gpt-6-luna','gpt-6-astra'],anthropic:['claude-sonnet-5-5']};
+const supportedProviders=new Set(['codex','claude','openai','anthropic']);
 const terminal=new Set(['completed','stopped','failed','interrupted','cancelled']);
 let state={version:1,conversation:[],goals:[],spend:{},swarm:{status:'idle'}};
 let auth={fly:{connected:false,available:false,detail:'Checking…'},modal:{connected:false,available:false,detail:'Checking…'}};
@@ -14,6 +16,7 @@ let voice={transcribe:false,speak:false,reason:'Voice is not ready.'};
 let mode='ready',started=false,authBusy=false,goalSubmitting=false,pendingGoal=null,goTimer=null,workingSince=0,workingKey='',voiceWait=null,capturePending=false;
 let knownMessages=null,speechQueue=Promise.resolve(),speechEpoch=0,audioUrl=null,activeSpeechFinish=null,refreshTimer=null;
 let budgetWait=null,budgetQuote=null,budgetCustom=false,budgetEpoch=0,currencySwitch=null,selectedPreset=50;
+let providerBusy=false,providerSetupPending=false,providerWait=null,displayedProvider='';
 const capture=new VoiceCapture({onLevel:level=>{elements['voice-level'].style.setProperty('--level',String(Math.max(.2,level*3)));},onHeard:()=>announce('Listening to your goal.'),onReady:()=>{setMode('listening');announce('Listening. Speak one sentence.');}});
 const moviePlayer=new MoviePlayer({video:elements['movie-video'],stage:elements.movie,manifest:movieManifest,onStatus:({status,detail})=>{
   elements['movie-status'].textContent=status==='missing'||status==='missing-scene'||status==='failed'
@@ -51,6 +54,8 @@ function browserBridge() {
     defaultBudget:currency=>request(`/api/budget/default?currency=${encodeURIComponent(currency)}`),
     updateGoal:(id,patch)=>request(`/api/goals/${encodeURIComponent(id)}`,'PATCH',patch),
     controlSwarm:action=>request(`/api/swarm/${encodeURIComponent(action)}`,'POST',{}),
+    discover:()=>request('/api/providers/discover','POST',{}),connect:payload=>request('/api/providers/connect','POST',payload),
+    disconnect:id=>request(`/api/providers/${encodeURIComponent(id)}`,'DELETE'),
     authState:()=>request('/api/auth/state'),authConnect:payload=>request('/api/auth/connect','POST',payload),authCancel:()=>request('/api/auth/cancel','POST',{}),
     voiceCapabilities:()=>request('/api/voice/capabilities'),transcribeAudio:payload=>request('/api/voice/transcribe','POST',payload),
     speak:text=>request('/api/voice/speak','POST',{text}),stopSpeaking:()=>request('/api/voice/stop','POST',{}),
@@ -60,6 +65,12 @@ function browserBridge() {
 const bridge=window.seagulled||browserBridge();
 
 function announce(message){elements['live-status'].textContent=message;}
+function renderNarration(){const source=voice.narration,status=voice.narrationStatus;
+  elements['narration-status'].textContent=source==='kokoro'?`Narration: ${voice.voiceName||'Michael (preset)'} local preset.`
+    :source==='system'?status==='preparing'?'Narration: installed system voice while the local preset prepares.':'Narration: installed system voice.'
+    :'Narration is unavailable.';
+}
+async function refreshVoiceCapabilities(){try{voice=await bridge.voiceCapabilities();}catch(error){voice={transcribe:false,speak:false,ready:false,reason:errorMessage(error)};}renderNarration();}
 function errorMessage(error){return error?.message||String(error||'That action could not be completed.');}
 function showError(message,target='advanced'){
   const box=target==='setup'?elements['setup-error']:elements['advanced-error'];box.textContent=message;box.hidden=false;announce(message);
@@ -109,6 +120,30 @@ function appendGoalEditor(card,goal){
     save.disabled=true;clearError('advanced');try{await bridge.updateGoal(goal.id,{text:sentence,...options});details.open=false;await refresh();announce('Goal changes saved.');}catch(error){save.disabled=false;showError(errorMessage(error));}
   });details.append(form);details.addEventListener('toggle',()=>{if(!details.open&&details.isConnected)renderDetails();});card.append(details);
 }
+function providerState(id){return state.providers?.find(item=>item.id===id)||null;}
+function ordinaryInference(){return state.providers?.find(item=>item.connected===true&&item.available===true&&item.id!=='private-h100')||null;}
+function renderProviderForm(){
+  const id=elements['provider-choice'].value,item=providerState(id),native=id==='codex'||id==='claude',api=Object.hasOwn(providerModels,id),connected=item?.connected===true;
+  if(id!==displayedProvider){
+    displayedProvider=id;elements['provider-key'].value='';elements['provider-worker-consent'].checked=item?.fleetEligible===true;
+    const model=elements['provider-model'];model.replaceChildren();for(const name of providerModels[id]||[]){const option=node('option',name);option.value=name;model.append(option);}
+    const saved=item?.models?.[0];if(providerModels[id]?.includes(saved))model.value=saved;
+  }
+  elements['provider-model-row'].hidden=!api;elements['provider-key-row'].hidden=!api;elements['provider-storage-note'].hidden=!api;
+  elements['provider-worker-row'].hidden=!api;elements['provider-key'].required=api&&!connected;
+  const nativeMissing=native&&/CLI not installed/i.test(item?.detail||'');
+  if(!id)elements['provider-guidance'].textContent='Choose a supported provider to connect inference.';
+  else if(!authReady())elements['provider-guidance'].textContent='Finish Fly and Modal sign-in before connecting inference.';
+  else if(nativeMissing)elements['provider-guidance'].textContent=`${item?.name||id} is not installed; choose an API provider.`;
+  else if(native&&connected)elements['provider-guidance'].textContent=`${item?.name||id} is connected locally; remote five-by-five staffing remains unverified.`;
+  else if(native)elements['provider-guidance'].textContent=`Connect ${item?.name||id} through its native account flow.`;
+  else if(connected&&item?.fleetEligible)elements['provider-guidance'].textContent='This API key may be used by isolated Workers; remote capacity is verified at run time.';
+  else if(connected)elements['provider-guidance'].textContent='This API key is connected locally; worker use needs your separate choice.';
+  else elements['provider-guidance'].textContent='Enter an API key to connect this model.';
+  elements['provider-connect'].textContent=providerBusy?'Connecting…':native?'Connect account':connected?'Update connection':'Connect API';
+  elements['provider-connect'].disabled=providerBusy||!authReady()||!supportedProviders.has(id)||nativeMissing||(api&&!connected&&!elements['provider-key'].value.trim());
+  elements['provider-disconnect'].hidden=!connected;elements['provider-disconnect'].disabled=providerBusy;
+}
 function renderDetails(){
   const privateRoute=state.providers?.find(provider=>provider.id==='private-h100');
   elements['private-h100-status'].textContent=elements['private-h100'].checked
@@ -139,12 +174,13 @@ function renderDetails(){
   elements['pause-all'].hidden=!active||Boolean(state.swarm?.admissionPaused);
   elements['resume-all'].hidden=!paused;
   elements['stop-all'].hidden=!active&&!paused;
+  renderProviderForm();
 }
 function applyState(next){
   if(!next||!Array.isArray(next.conversation)||!Array.isArray(next.goals))return;
   const first=knownMessages===null;if(first)knownMessages=new Set(next.conversation.map(message=>message.id));
   const newTodd=first?[]:next.conversation.filter(message=>{const fresh=!knownMessages.has(message.id);knownMessages.add(message.id);return fresh&&message.role==='todd'&&message.text;});
-  state=next;renderDetails();updateScene();
+  state=next;renderDetails();renderAuth();updateScene();
   if(newTodd.length){announce('Todd responded.');if(voice.speak&&mode!=='listening'){const epoch=speechEpoch;for(const message of newTodd.slice(-3))speechQueue=speechQueue.then(()=>epoch===speechEpoch?speakTodd(message.text):undefined).catch(error=>{if(!/Voice stopped|aborted|canceled/i.test(errorMessage(error)))showError(errorMessage(error));});}}
 }
 async function refresh(){const data=await bridge.state();applyState(data?.state||data);}
@@ -154,20 +190,51 @@ function normalizeAuth(raw){
 }
 async function refreshAuth(){try{auth=normalizeAuth(await bridge.authState());}catch(error){auth=normalizeAuth({});showError(errorMessage(error),'setup');}renderAuth();return auth;}
 function authReady(){return auth.fly.connected&&auth.modal.connected;}
-function renderAuth(){for(const id of ['fly','modal']){const item=auth[id];$(`${id}-state`).textContent=item.connected?'Connected':item.detail;$(`${id}-connect`).disabled=item.connected||!item.available||authBusy;$(`${id}-connect`).textContent=item.connected?'Connected':'Connect';}elements['setup-continue'].disabled=!authReady()||authBusy;}
+function renderAuth(){for(const id of ['fly','modal']){const item=auth[id];$(`${id}-state`).textContent=item.connected?'Connected':item.detail;$(`${id}-connect`).disabled=item.connected||!item.available||authBusy;$(`${id}-connect`).textContent=item.connected?'Connected':'Connect';}
+  const provider=ordinaryInference();
+  elements['inference-state'].textContent=!authReady()?'Finish Fly and Modal sign-in first.'
+    : elements['private-h100'].checked?'Private H100 is requested; inference is checked at Go.'
+    : provider?`${provider.name||provider.id} is connected; first execution verifies inference.`
+    :'Connect a supported inference provider, or continue with a queued goal.';
+  elements['setup-continue'].disabled=!authReady()||authBusy;
+  elements['setup-continue'].textContent=authReady()&&!provider&&!elements['private-h100'].checked?'Continue with queued goal':'Continue';
+  elements['provider-setup'].disabled=!authReady()||authBusy;
+  renderProviderForm();
+}
 function showSetup(){setMode('setup');clearError('setup');renderAuth();if(!elements['setup-dialog'].open)elements['setup-dialog'].showModal();void refreshAuth();}
 async function connectAccount(id){if(authBusy||!auth[id]?.available)return;authBusy=true;renderAuth();$(`${id}-state`).textContent='Opening browser sign-in…';clearError('setup');try{await bridge.authConnect({id});await refreshAuth();}catch(error){showError(errorMessage(error),'setup');await refreshAuth();}finally{authBusy=false;renderAuth();}}
+async function refreshProviders(){if(providerWait)return providerWait;providerWait=(async()=>{try{await bridge.discover();await refresh();}catch(error){announce(errorMessage(error));}})().finally(()=>{providerWait=null;});return providerWait;}
+async function connectProvider(){
+  if(providerBusy||!authReady())return;
+  const id=elements['provider-choice'].value;if(!supportedProviders.has(id))return;
+  const native=id==='codex'||id==='claude';let payload;
+  if(native)payload={id,method:'subscription'};
+  else{
+    const model=elements['provider-model'].value;if(!providerModels[id]?.includes(model)){showError('Choose a supported model.');return;}
+    payload={id,method:'key',model,fleetAllowed:elements['provider-worker-consent'].checked};
+    const key=elements['provider-key'].value.trim();if(key)payload.key=key;
+    if(!key&&!providerState(id)?.connected){showError('Enter an API key.');return;}
+  }
+  providerBusy=true;renderProviderForm();clearError('advanced');
+  try{await bridge.connect(payload);await refresh();announce(`${providerState(id)?.name||id} connection saved.`);
+    if(providerSetupPending&&ordinaryInference()){providerSetupPending=false;elements['advanced-dialog'].close();void enterExperience();}
+  }catch(error){showError(errorMessage(error));}
+  finally{elements['provider-key'].value='';providerBusy=false;renderProviderForm();renderAuth();}
+}
+async function disconnectProvider(){const id=elements['provider-choice'].value;if(providerBusy||!providerState(id)?.connected)return;
+  providerBusy=true;renderProviderForm();clearError('advanced');try{await bridge.disconnect(id);await refresh();announce(`${id} disconnected.`);}catch(error){showError(errorMessage(error));}finally{providerBusy=false;renderProviderForm();renderAuth();}
+}
 
 function fallbackAvailable(){return voice.transcribe!==true||!navigator.mediaDevices?.getUserMedia||!window.AudioWorkletNode;}
 function openFallback(message){elements['text-fallback'].hidden=false;if(message)showError(message);else if(!elements['advanced-dialog'].open)elements['advanced-dialog'].showModal();elements['fallback-goal'].focus();}
-async function enterExperience(){started=true;await refreshAuth();if(!authReady()){showSetup();return;}if(fallbackAvailable()){openFallback(voice.reason||'Voice capture is unavailable.');return;}beginListening();}
+async function enterExperience(){started=true;await refreshAuth();if(!authReady()||(!ordinaryInference()&&!elements['private-h100'].checked)){showSetup();return;}if(fallbackAvailable()){openFallback(voice.reason||'Voice capture is unavailable.');return;}beginListening();}
 async function ensureVoiceReady(){
   if(voice.ready===true)return true;
   if(voice.transcribe!==true)return false;
   if(voiceWait)return voiceWait;
   voiceWait=(async()=>{setMode('transcribing');announce('Preparing local speech recognition.');const until=Date.now()+180000;
     while(Date.now()<until){await new Promise(resolve=>setTimeout(resolve,1200));
-      try{voice=await bridge.voiceCapabilities();}catch(error){voice={transcribe:false,speak:false,ready:false,reason:errorMessage(error)};}
+      try{voice=await bridge.voiceCapabilities();}catch(error){voice={transcribe:false,speak:false,ready:false,reason:errorMessage(error)};}renderNarration();
       if(voice.ready===true)return true;
       if(voice.transcribe!==true||voice.status==='unavailable')return false;
     }
@@ -241,14 +308,21 @@ function loadBudget(currency,{convertCustom=false}={}){
 function chooseCurrency(){let region;try{region=new Intl.Locale(navigator.language||'en-US').region;}catch{region='US';}const byRegion={CO:'COP',US:'USD',GB:'GBP',CA:'CAD',AU:'AUD',DE:'EUR',FR:'EUR',ES:'EUR',IT:'EUR'};const choice=byRegion[region]||'USD';elements['budget-currency'].value=allowedCurrencies.has(choice)?choice:'USD';return loadBudget(elements['budget-currency'].value);}
 
 elements.action.addEventListener('click',()=>{const action=elements.action.dataset.action;if(action==='start')void enterExperience();else if(action==='listen')beginListening();else if(action==='stop-listening')capture.stop();else if(action==='go')void submitGoal();else if(action==='stop-speaking')void stopTodd();});
-elements['advanced-toggle'].addEventListener('click',()=>{renderDetails();clearError('advanced');if(!elements['advanced-dialog'].open)elements['advanced-dialog'].showModal();});
+elements['advanced-toggle'].addEventListener('click',()=>{renderDetails();clearError('advanced');if(!elements['advanced-dialog'].open)elements['advanced-dialog'].showModal();void refreshVoiceCapabilities();});
 for(const button of document.querySelectorAll('[data-close]'))button.addEventListener('click',()=>$(button.dataset.close).close());
 elements['setup-dialog'].addEventListener('close',()=>{if(authBusy)void bridge.authCancel?.();if(mode==='setup')setMode('ready');});
+elements['advanced-dialog'].addEventListener('close',()=>{providerSetupPending=false;});
 elements['setup-continue'].addEventListener('click',()=>{if(!authReady())return;elements['setup-dialog'].close();if(pendingGoal)void submitGoal();else if(fallbackAvailable())openFallback(voice.reason||'Voice capture is unavailable.');else beginListening();});
+elements['provider-setup'].addEventListener('click',()=>{if(!authReady())return;providerSetupPending=true;elements['setup-dialog'].close();renderDetails();if(!elements['advanced-dialog'].open)elements['advanced-dialog'].showModal();elements['provider-connect-details'].open=true;elements['provider-choice'].focus();void refreshProviders();});
 for(const id of ['fly','modal'])$(`${id}-connect`).addEventListener('click',()=>void connectAccount(id));
+elements['provider-choice'].addEventListener('change',renderProviderForm);
+elements['provider-key'].addEventListener('input',renderProviderForm);
+elements['provider-worker-consent'].addEventListener('change',renderProviderForm);
+elements['provider-connect'].addEventListener('click',()=>void connectProvider());
+elements['provider-disconnect'].addEventListener('click',()=>void disconnectProvider());
 elements['fallback-go'].addEventListener('click',()=>{const sentence=oneSentence(elements['fallback-goal'].value);if(!sentence){showError('Enter one sentence for Todd.');return;}pendingGoal=sentence;void submitGoal();});
 for(const id of ['workers','conversations'])elements[id].addEventListener('input',()=>{$(`${id}-value`).value=elements[id].value;$(`${id}-value`).textContent=elements[id].value;});
-elements['private-h100'].addEventListener('change',renderDetails);
+elements['private-h100'].addEventListener('change',()=>{renderDetails();renderAuth();});
 elements['budget-amount'].addEventListener('input',()=>{budgetCustom=true;selectedPreset=null;markPreset(null);elements['budget-note'].textContent='Your chosen allowance will be checked before work starts.';});
 for(const button of document.querySelectorAll('[data-budget-usd]'))button.addEventListener('click',()=>{const usd=Number(button.dataset.budgetUsd);void (async()=>{if(currencySwitch)await currencySwitch;if(budgetWait)await budgetWait;if(!budgetQuote){showError('Currency allowance is unavailable.');return;}selectedPreset=usd;budgetCustom=true;elements['budget-amount'].value=String(amountForUsd(usd,budgetQuote));markPreset(usd);budgetNote(budgetQuote,usd);})();});
 elements['budget-currency'].addEventListener('change',()=>{const selected=elements['budget-currency'].value;const prior=budgetWait;const switchJob=(async()=>{if(prior)await prior;await loadBudget(selected,{convertCustom:true});})();currencySwitch=switchJob;void switchJob.finally(()=>{if(currencySwitch===switchJob)currencySwitch=null;});});
@@ -257,5 +331,5 @@ window.addEventListener('beforeunload',()=>{capture.cancel();moviePlayer.destroy
 bridge.onEvent(event=>{if(event?.type==='state')applyState(event.state);else if(!refreshTimer)refreshTimer=setTimeout(()=>{refreshTimer=null;void refresh().catch(()=>{});},150);});
 void moviePlayer.load();void chooseCurrency();setMode('ready');
 void (async()=>{try{await refresh();}catch(error){announce(errorMessage(error));}
-  try{voice=await bridge.voiceCapabilities();}catch(error){voice={transcribe:false,speak:false,reason:errorMessage(error)};}
-  await refreshAuth();setMode('ready');})();
+  await refreshVoiceCapabilities();
+  await refreshAuth();void refreshProviders();setMode('ready');})();

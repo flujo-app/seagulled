@@ -93,5 +93,12 @@
     "pullRequest": "https://github.com/flujo-app/iambrokeplshlp/pull/57",
     "scope": "bounded consumer hooks, artifact-capture holds, cancellation and cleanup verification",
     "merged": false
+  },
+  "staffingSuccessor": {
+    "privateEngineCommit": "714f610ac894f4fc54e687aba6e03daa37a96b1e",
+    "upstreamCommit": "97e599818945b6031317117a855034a32eb2ac87",
+    "pullRequest": "https://github.com/flujo-app/iambrokeplshlp/pull/61",
+    "scope": "deferred initial Worker staffing, lead-only flows, installed tool inventories and explicit Fly environment/cloud record directory",
+    "merged": false
   }
 }

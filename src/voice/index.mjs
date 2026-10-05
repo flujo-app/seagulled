@@ -4,6 +4,7 @@ import { readFileSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { decodeRecording, pcmWave } from './wav.mjs';
+import { createNarration } from './narration.mjs';
 
 const aborted = () => Object.assign(new Error('Voice stopped.'), { name: 'AbortError' });
 const unavailable = () => new Error('Voice recognition is unavailable; open advanced controls to enter your goal.');
@@ -38,10 +39,11 @@ export function windowsSpeech(payload, { signal, timeoutMs = 60000 } = {}) {
   });
 }
 
-export function createVoice({ dataDir, workerFactory = (url, options) => new Worker(url, options), speech = windowsSpeech } = {}) {
+export function createVoice({ dataDir, workerFactory = (url, options) => new Worker(url, options), speech } = {}) {
+  speech ??= createNarration({ dataDir, systemSpeech: windowsSpeech });
   const cacheDir = path.join(dataDir, 'voice', 'models');
   mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
-  let worker, ready, cancelStartup, generation = 0, status = 'idle', closed = false, pending, narration, speakAvailable;
+  let worker, ready, cancelStartup, generation = 0, status = 'idle', closed = false, pending, narration;
   const reset = async () => {
     generation++;
     const old = worker; cancelStartup?.(); cancelStartup = undefined; worker = undefined; ready = undefined; status = 'idle';
@@ -85,11 +87,12 @@ export function createVoice({ dataDir, workerFactory = (url, options) => new Wor
       if (closed) throw aborted();
       // Prepare in the background at first start; downloads require no paid key.
       prepare().catch(() => {});
-      if (speakAvailable === undefined) {
-        try { speakAvailable = Boolean((await speech({ action: 'capabilities' }, { timeoutMs: 5000 })).available); }
-        catch { speakAvailable = false; }
-      }
+      let voiceState;
+      try { voiceState = await speech({ action: 'capabilities' }, { timeoutMs: 5000 }); }
+      catch { voiceState = { available: false }; }
+      const speakAvailable = voiceState?.available === true;
       return { transcribe: status !== 'unavailable', speak: speakAvailable, ready: status === 'ready', status,
+        ...(voiceState?.narration ? { narration: voiceState.narration, narrationStatus: voiceState.narrationStatus, voiceName: voiceState.voiceName } : {}),
         ...(status === 'unavailable' ? { reason: 'Local speech recognition could not load.' } : !speakAvailable ? { reason: 'Local narration is unavailable.' } : {}) };
     },
     async transcribe(payload) {
@@ -125,8 +128,9 @@ export function createVoice({ dataDir, workerFactory = (url, options) => new Wor
       const job = narration; job?.controller.abort();
       if (pending || status === 'preparing') await reset();
       await job?.promise?.catch(() => {});
+      await speech.stop?.();
       return { stopped: true };
     },
-    async close() { closed = true; await this.stop(); await reset(); },
+    async close() { closed = true; await this.stop(); await reset(); await speech.close?.(); },
   };
 }

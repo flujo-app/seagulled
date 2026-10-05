@@ -33,12 +33,14 @@ export function workspaceProvisioner({ origin, token, model, browser = true, tea
  * must run where flujo-cloud can run (Fly CLI signed in, native FLUJO as snapshot source).
  * Child Workers can use the fleet tools only if `fleet.url` is reachable from Fly.
  */
-export async function flyProvisioner({ flujoCloudPath, templateWorkspace, source, org, region = 'iad', memoryMb = 4096, fleetReachable = false, concurrency = 8, captureSpacingMs = 8000, teamLimits, specialists }) {
+export async function flyProvisioner({ flujoCloudPath, templateWorkspace, source, org, region = 'iad', memoryMb = 4096, fleetReachable = false, concurrency = 8, captureSpacingMs = 8000, teamLimits, specialists,
+  flyEnv, cloudDirectory }) {
   const lib = (name) => import(pathToFileURL(path.join(flujoCloudPath, 'lib', name)).href);
   const { ManagedCloud } = await lib('managed.mjs');
   const { createFlyRunner, unusedLoopbackPort } = await lib('process.mjs');
   const { readPrivateJson } = await lib('private-files.mjs');
-  const managed = new ManagedCloud();
+  const managed = new ManagedCloud({ ...(flyEnv ? { env: flyEnv } : {}),
+    ...(cloudDirectory ? { directory: cloudDirectory } : {}) });
   // Bounded parallel provisioning. Snapshot capture of the one template workspace is
   // exclusive, so a busy source is retried instead of failing the Worker.
   let active = 0;

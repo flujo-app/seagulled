@@ -7,11 +7,12 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { conversationFailure, fleetStatus, fleetDiagnosticStatus, fleetExecutionLimits, goalCapacity,
-  fleetTopology, recordConfirmedQuotaHold, runFleetLeaf, staffOwnedTeam,
+  fleetTopology, flyAccountLease, isolatedFlyEnvironment, recordConfirmedQuotaHold, runFleetLeaf, staffOwnedTeam,
   verifiedLocalConversations } from '../src/swarm/fleet.mjs';
 import { createOwnedRelay } from '../src/swarm/relay.mjs';
 import { buildSpecs } from '../upstream/swarm-teams/template/flows.mjs';
 import { Controller } from '../upstream/swarm-teams/fleet/controller.mjs';
+import { flyProvisioner } from '../upstream/swarm-teams/fleet/provisioners.mjs';
 import { FlujoClient, rawRequest } from '../upstream/swarm-teams/lib/flujo-client.mjs';
 
 test('goal capacity maps selected worker and agent counts to bounded Fly execution limits', async () => {
@@ -42,6 +43,49 @@ test('goal capacity maps selected worker and agent counts to bounded Fly executi
     initialWorkers: 1, limits: { maxWorkers: 5, maxDepth: 2, maxChildren: 4, maxActiveRuns: 2 },
   }, 'already admitted goals retain the original one-starter, five-cap topology');
   assert.throws(() => goalCapacity({ workerTopologyVersion: 3 }), /must be 1 or 2/);
+});
+
+test('Fly account lease selects one verified personal config and drops inherited service credentials', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-fly-account-'));
+  const flyctlPath = path.join(root, process.platform === 'win32' ? 'flyctl.exe' : 'flyctl');
+  const flyConfigDir = path.join(root, 'personal-fly');
+  mkdirSync(flyConfigDir);
+  writeFileSync(flyctlPath, 'fixture executable');
+  writeFileSync(path.join(flyConfigDir, 'config.yml'), 'fixture personal config');
+  const providers = { async flyFleetLease() { return { flyctlPath, flyConfigDir,
+    token: 'provider-internal-token-must-not-cross-the-lease' }; } };
+  const lease = await flyAccountLease(providers);
+  assert.deepEqual(lease, { flyctlPath, flyConfigDir });
+  const env = isolatedFlyEnvironment(lease, { PATH: 'fixture-path', FLY_API_TOKEN: 'inherited-service-token',
+    FLY_ACCESS_TOKEN: 'inherited-access-token', FLY_CONFIG_DIR: 'foreign-config',
+    FLYCTL_PATH: 'foreign-helper', FLUJO_CLOUD_HOME: 'foreign-cloud-records',
+    FLUJO_SNAPSHOT_CONTROL_TOKEN: 'foreign-source-token', FLUJO_LOCAL_INSTANCE_DIR: 'fixture-local-instances' });
+  assert.deepEqual(env, { PATH: 'fixture-path', FLUJO_LOCAL_INSTANCE_DIR: 'fixture-local-instances',
+    FLY_CONFIG_DIR: flyConfigDir, FLYCTL_PATH: flyctlPath });
+  assert.equal(await flyAccountLease({ async flyFleetLease() { return { flyctlPath,
+    flyConfigDir: path.join(root, 'missing') }; } }), null);
+  const dataDir = mkdtempSync(path.join(tmpdir(), 'seagulled-fly-no-account-'));
+  assert.deepEqual(await runFleetLeaf({ goal: { id: 'no-account', providerId: 'openai' }, dataDir }),
+    { available: false, detail: 'A verified personal Fly sign-in and the bundled Fly helper are required for isolated Workers.' });
+  assert.equal(existsSync(path.join(dataDir, 'fleet')), false);
+});
+
+test('Fly provisioner gives ManagedCloud only the selected account and owned record directory', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-managed-lease-'));
+  const lib = path.join(root, 'lib'); mkdirSync(lib);
+  writeFileSync(path.join(lib, 'managed.mjs'), 'export class ManagedCloud { constructor(options) { globalThis.__seagulledManagedLeaseFixture = options; } }');
+  writeFileSync(path.join(lib, 'process.mjs'), 'export const createFlyRunner = () => ({}); export const unusedLoopbackPort = async () => 1;');
+  writeFileSync(path.join(lib, 'private-files.mjs'), 'export const readPrivateJson = async () => ({});');
+  const cloudDirectory = path.join(root, 'private-product-records');
+  const flyEnv = { FLYCTL_PATH: path.join(root, 'bundled-flyctl'), FLY_CONFIG_DIR: path.join(root, 'personal-config') };
+  try {
+    await flyProvisioner({ flujoCloudPath: root, templateWorkspace: 'fixture', flyEnv, cloudDirectory });
+    assert.deepEqual(globalThis.__seagulledManagedLeaseFixture, { env: flyEnv, directory: cloudDirectory });
+    const relayJournal = path.join(root, 'relay.json');
+    await assert.rejects(createOwnedRelay({ journalPath: relayJournal, flujoCloudPath: root,
+      org: 'personal' }), /isolated personal Fly account/);
+    assert.equal(existsSync(relayJournal), false);
+  } finally { delete globalThis.__seagulledManagedLeaseFixture; }
 });
 
 test('default staffing admits five actual Worker runs beneath one external supervisor', async () => {
@@ -378,6 +422,8 @@ test('keyless Codex boot refusal stops before Fly provisioning and deletes its o
 test('owned relay journals before Fly mutation, forwards through its own proxy, and confirms retirement', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'seagulled-relay-'));
   const journalPath = path.join(root, 'relay.json');
+  const flyctlPath = path.join(root, 'flyctl-fixture');
+  const flyEnv = { FLYCTL_PATH: flyctlPath, FLY_CONFIG_DIR: path.join(root, 'personal-config') };
   const calls = [];
   const flyRunner = { run: async (args) => {
     calls.push(args.slice(0, 2).join(' '));
@@ -391,9 +437,13 @@ test('owned relay journals before Fly mutation, forwards through its own proxy, 
   const fakeProxy = new EventEmitter();
   fakeProxy.stdin = { end: () => undefined };
   fakeProxy.kill = () => { proxyStopped = true; };
-  const relay = await createOwnedRelay({ journalPath, org: 'personal', flyRunner,
+  const relay = await createOwnedRelay({ journalPath, org: 'personal', flyRunner, flyEnv, flyctlPath,
     portAllocator: async () => 48121,
-    spawnImpl: (_binary, args) => { assert.ok(args.includes('--watch-stdin')); return fakeProxy; },
+    spawnImpl: (binary, args, options) => {
+      assert.equal(binary, flyctlPath);
+      assert.deepEqual(options.env, flyEnv);
+      assert.ok(args.includes('--watch-stdin')); return fakeProxy;
+    },
     agentFactory: ({ controllerOrigin, lanes }) => {
       assert.equal(controllerOrigin, 'http://127.0.0.1:48122');
       assert.equal(lanes, 2);

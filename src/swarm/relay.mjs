@@ -11,14 +11,18 @@ const API = 'https://api.machines.dev/v1';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function createOwnedRelay({ journalPath, flujoCloudPath, org, region = 'iad', fetchImpl = fetch,
-  spawnImpl = spawn, flyRunner, portAllocator, agentFactory = startRelayAgent } = {}) {
+  spawnImpl = spawn, flyRunner, flyEnv, flyctlPath, portAllocator, agentFactory = startRelayAgent } = {}) {
   if (!journalPath || existsSync(journalPath)) throw new Error('Relay intent already exists; reconcile the original resource before creating another.');
   if (!/^[a-z0-9-]{1,64}$/.test(org ?? '') || !/^[a-z]{3}$/.test(region)) throw new Error('A valid Fly organization and region are required.');
   let fly = flyRunner;
   let allocate = portAllocator;
   if (!fly || !allocate) {
     const { createFlyRunner, unusedLoopbackPort } = await import(pathToFileURL(path.join(flujoCloudPath, 'lib', 'process.mjs')).href);
-    fly ??= createFlyRunner();
+    if (!fly && (!flyEnv || !path.isAbsolute(flyctlPath ?? '') || flyEnv.FLYCTL_PATH !== flyctlPath
+      || !flyEnv.FLY_CONFIG_DIR || flyEnv.FLY_API_TOKEN)) {
+      throw new Error('An isolated personal Fly account and bundled helper are required for the relay.');
+    }
+    fly ??= createFlyRunner({ env: flyEnv, binary: flyctlPath });
     allocate ??= unusedLoopbackPort;
   }
   const app = `seagulled-relay-${randomBytes(6).toString('hex')}`;
@@ -118,10 +122,10 @@ export async function createOwnedRelay({ journalPath, flujoCloudPath, org, regio
       async start(controllerOrigin) {
         if (proxy) throw new Error('Relay transport is already running.');
         const port = await allocate();
-        const binary = process.env.FLYCTL_PATH || 'flyctl';
+        const binary = flyctlPath ?? flyEnv?.FLYCTL_PATH ?? process.env.FLYCTL_PATH ?? 'flyctl';
         proxy = spawnImpl(binary, ['proxy', `${port}:4300`, `${machine.id}.vm.${app}.internal`,
           '--app', app, '--org', org, '--bind-addr', '127.0.0.1', '--watch-stdin', '--quiet'],
-        { windowsHide: true, shell: false, stdio: ['pipe', 'ignore', 'ignore'] });
+        { windowsHide: true, shell: false, stdio: ['pipe', 'ignore', 'ignore'], ...(flyEnv ? { env: flyEnv } : {}) });
         let exited = false;
         proxy.on('error', () => { exited = true; });
         proxy.on('exit', () => { exited = true; });

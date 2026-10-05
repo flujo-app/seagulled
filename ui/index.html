@@ -28,9 +28,10 @@
 
   <dialog id="setup-dialog" class="sheet setup-sheet" aria-labelledby="setup-title">
     <div class="sheet-head"><h1 id="setup-title">Get the team ready</h1><button class="close-button" type="button" data-close="setup-dialog" aria-label="Close setup">×</button></div>
-    <p class="sheet-intro">Sign in with Fly and Modal in your browser. Account sign-in is separate from inference access and credits.</p>
+    <p class="sheet-intro">Sign in with Fly and Modal in your browser; inference access and credits are checked separately.</p>
     <div class="auth-row"><div><strong>Fly</strong><small id="fly-state">Checking…</small></div><button id="fly-connect" class="line-button" type="button">Connect</button></div>
     <div class="auth-row"><div><strong>Modal</strong><small id="modal-state">Checking…</small></div><button id="modal-connect" class="line-button" type="button">Connect</button></div>
+    <div class="auth-row inference-row"><div><strong>Inference</strong><small id="inference-state">Checking providers…</small></div><button id="provider-setup" class="line-button" type="button" disabled>Choose</button></div>
     <p id="setup-error" class="sheet-error" role="alert" hidden></p>
     <button id="setup-continue" class="solid-button" type="button" disabled>Continue</button>
   </dialog>
@@ -49,8 +50,18 @@
     </div>
     <div id="text-fallback" class="text-fallback" hidden><label for="fallback-goal">Voice is unavailable. Enter one sentence here.</label><textarea id="fallback-goal" rows="2" maxlength="4000"></textarea><button id="fallback-go" class="solid-button" type="button">Go</button></div>
     <div class="quiet-actions"><button id="pause-all" class="line-button" type="button" hidden>Pause</button><button id="resume-all" class="line-button" type="button" hidden>Resume</button><button id="stop-all" class="line-button danger" type="button" hidden>Stop</button></div>
+    <details id="provider-connect-details" class="work-details provider-connect-details"><summary>Connect inference</summary>
+      <label for="provider-choice">Provider</label><select id="provider-choice"><option value="">Choose provider</option><option value="codex">Codex native</option><option value="claude">Claude native</option><option value="openai">OpenAI API</option><option value="anthropic">Anthropic API</option></select>
+      <p id="provider-guidance" class="provider-guidance">Choose a supported provider to connect inference.</p>
+      <label id="provider-model-row" for="provider-model" hidden>Model <select id="provider-model"></select></label>
+      <label id="provider-key-row" for="provider-key" hidden>API key <input id="provider-key" type="password" maxlength="500" autocomplete="off" spellcheck="false"></label>
+      <p id="provider-storage-note" class="provider-guidance" hidden>Keys stay outside Git; desktop saves them encrypted. API billing is separate from account sign-in.</p>
+      <label id="provider-worker-row" class="worker-consent" for="provider-worker-consent" hidden><input id="provider-worker-consent" type="checkbox"><span>Allow isolated Workers to use this API key for goals with this provider; desktop saves it encrypted outside Git.</span></label>
+      <div class="provider-actions"><button id="provider-connect" class="solid-button" type="button" disabled>Connect</button><button id="provider-disconnect" class="line-button" type="button" hidden>Disconnect</button></div>
+    </details>
     <details class="work-details"><summary>Provider and spend</summary><div id="provider-details"></div><div id="spend-details"></div></details>
     <p id="movie-status" class="movie-status">Checking approved local movie clips.</p>
+    <p id="narration-status" class="narration-status">Checking narration source.</p>
     <details id="work-details" class="work-details"><summary>Work details</summary><div id="goal-details"></div></details>
     <p id="advanced-error" class="sheet-error" role="alert" hidden></p>
   </dialog>

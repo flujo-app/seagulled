@@ -2,7 +2,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { homedir } from 'node:os';
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { Controller } from '../../upstream/swarm-teams/fleet/controller.mjs';
 import { flyProvisioner } from '../../upstream/swarm-teams/fleet/provisioners.mjs';
 import { FlujoClient } from '../../upstream/swarm-teams/lib/flujo-client.mjs';
@@ -14,6 +14,39 @@ const legacyProfilePath = () => path.join(process.env.SWARM_TEAMS_HOME || path.j
 const profilePath = () => process.env.SEAGULLED_FLEET_PROFILE || legacyProfilePath();
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const unknown = (message) => Object.assign(new Error(message), { code: 'UNKNOWN', unknown: true });
+const flyUnavailable = 'A verified personal Fly sign-in and the bundled Fly helper are required for isolated Workers.';
+const regularFile = (value) => {
+  try { return typeof value === 'string' && path.isAbsolute(value) && statSync(value).isFile(); }
+  catch { return false; }
+};
+const validFlyAccount = (account) => Boolean(account
+  && typeof account.flyConfigDir === 'string' && path.isAbsolute(account.flyConfigDir)
+  && regularFile(account.flyctlPath) && regularFile(path.join(account.flyConfigDir, 'config.yml')));
+/** Backend-only, read-only account lease. It never returns a Fly token or public path. */
+export async function flyAccountLease(providers, signal) {
+  if (typeof providers?.flyFleetLease !== 'function') return null;
+  const lease = await providers.flyFleetLease({ signal }).catch((error) => {
+    if (error?.name === 'AbortError') throw Object.assign(error, { outcome: 'not_applied' });
+    return null;
+  });
+  return validFlyAccount(lease) ? { flyctlPath: lease.flyctlPath, flyConfigDir: lease.flyConfigDir } : null;
+}
+/** The cloud SDK and all Fly CLI children receive only this selected personal account. */
+export function isolatedFlyEnvironment(account, sourceEnv = process.env) {
+  if (!account || !regularFile(account.flyctlPath) || typeof account.flyConfigDir !== 'string'
+    || !path.isAbsolute(account.flyConfigDir) || !regularFile(path.join(account.flyConfigDir, 'config.yml'))) {
+    throw new Error(flyUnavailable);
+  }
+  const env = {};
+  for (const key of ['PATH', 'Path', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'HOME', 'USERPROFILE',
+    'APPDATA', 'LOCALAPPDATA', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'NODE_EXTRA_CA_CERTS',
+    'FLUJO_LOCAL_INSTANCE_DIR']) {
+    if (typeof sourceEnv[key] === 'string') env[key] = sourceEnv[key];
+  }
+  env.FLY_CONFIG_DIR = account.flyConfigDir;
+  env.FLYCTL_PATH = account.flyctlPath;
+  return env;
+}
 const boundedCount = (value, fallback, maximum, name) => {
   if (value === undefined) return fallback;
   if (!Number.isInteger(value) || value < 1 || value > maximum) {
@@ -335,9 +368,10 @@ export async function fleetDiagnosticStatus({ dataDir } = {}) {
 
 /** One owned Fly leaf, with no existing fleet writer or Machine adoption. */
 export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetRoute,
-  diagnostic = false, reservationId, reserveCloud, onStatus = () => undefined }) {
+  diagnostic = false, reservationId, reserveCloud, flyAccount, onStatus = () => undefined }) {
   if (!goal || typeof goal.id !== 'string' || !/^[\w-]{1,100}$/.test(goal.id)) throw new Error('A safe goal id is required for isolated fleet work.');
   goalCapacity(goal);
+  if (!diagnostic && !validFlyAccount(flyAccount)) return { available: false, detail: flyUnavailable };
   const discovered = await inspectFleet({ dataDir, providerId: goal.providerId, fleetRoute, goalId: goal.id, diagnostic });
   if (!discovered.available) return { available: false, detail: discovered.detail };
   const config = discovered.config;
@@ -346,7 +380,10 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
   const registryPath = path.join(dataDir, 'fleet', goal.id, 'registry.json');
   const intentPath = path.join(path.dirname(registryPath), 'intent.json');
   const relayPath = path.join(path.dirname(registryPath), 'relay.json');
-  if (existsSync(registryPath) || existsSync(intentPath) || existsSync(relayPath)) throw unknown('A prior Fly fleet intent exists for this goal. Reconcile its original worker before more provisioning.');
+  const cloudDirectory = path.join(path.dirname(registryPath), 'cloud');
+  if (existsSync(registryPath) || existsSync(intentPath) || existsSync(relayPath) || existsSync(cloudDirectory)) {
+    throw unknown('A prior Fly fleet intent exists for this goal. Reconcile its original worker before more provisioning.');
+  }
   if (signal?.aborted) throw Object.assign(new Error('Cancelled'), { name: 'AbortError', outcome: 'not_applied' });
   if ((await boot.workspaces()).includes(bootWorkspace)) throw unknown('The isolated FLUJO boot workspace already exists. Reconcile it before cloning.');
   mkdirSync(path.dirname(intentPath), { recursive: true, mode: 0o700 });
@@ -359,6 +396,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     renameSync(temporary, intentPath);
   };
   let controller;
+  let cloudManaged;
   let relay;
   let child;
   let staffed = [];
@@ -395,6 +433,13 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
       }
     }
     if (signal?.aborted) throw Object.assign(new Error('Cancelled'), { name: 'AbortError', outcome: 'not_applied' });
+    if (!validFlyAccount(flyAccount)) {
+      throw Object.assign(new Error(flyUnavailable), { outcome: 'not_applied' });
+    }
+    const flyEnv = isolatedFlyEnvironment(flyAccount);
+    mkdirSync(cloudDirectory, { recursive: true, mode: 0o700 });
+    const { ManagedCloud } = await import(pathToFileURL(path.join(config.provisioner.flujoCloudPath, 'lib', 'managed.mjs')).href);
+    cloudManaged = new ManagedCloud({ env: flyEnv, directory: cloudDirectory });
     const multiWorker = !nativeCodex(config.model);
     const { workerCap, teamLimits } = fleetExecutionLimits({ goal, config, diagnostic, native: !multiWorker });
     const fleetDeadlineAt = Date.now() + 30 * 60_000;
@@ -408,15 +453,13 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
       record({ state: 'budget-reserved', reservationId, reservedUsd: maxUsd });
     }
     if (multiWorker) {
-      const { ManagedCloud } = await import(pathToFileURL(path.join(config.provisioner.flujoCloudPath, 'lib', 'managed.mjs')).href);
-      const managed = new ManagedCloud();
-      const org = await managed.organization(config.provisioner.org);
+      const org = await cloudManaged.organization(config.provisioner.org);
       if (workerCap > 1) {
         onStatus('Creating an owned relay for the bounded Fly Worker tree.');
         relayCleanupConfirmed = false;
         try {
           relay = await createOwnedRelay({ journalPath: relayPath, flujoCloudPath: config.provisioner.flujoCloudPath,
-            org, region: config.provisioner.region ?? 'iad' });
+            org, region: config.provisioner.region ?? 'iad', flyEnv, flyctlPath: flyAccount.flyctlPath });
         } catch (error) {
           // The relay factory journals before the first Fly mutation. A failed
           // creation is safe to dismiss only when its journal confirms no app
@@ -433,7 +476,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     const topology = fleetTopology(goal, { workerCap, relay: Boolean(relay) });
     const provisioner = await flyProvisioner({ ...config.provisioner, templateWorkspace: bootWorkspace,
       fleetReachable: Boolean(relay), concurrency: workerCap,
-      teamLimits });
+      teamLimits, flyEnv, cloudDirectory });
     const observeWorkerConversations = async (worker) => {
       if (localConversations.some((entry) => entry.workerId === worker.id)) return;
       const runs = Object.values(controller.registry.state.runs).filter((run) => run.workerId === worker.id);
@@ -472,7 +515,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
         try {
           onStatus(`Collecting owned output from Worker ${worker.name}.`);
           const collected = await collectFlyArtifacts({ target, goalId: goal.id, workerId: worker.id,
-            dataDir, flujoCloudPath: config.provisioner.flujoCloudPath });
+            dataDir, flujoCloudPath: config.provisioner.flujoCloudPath, managed: cloudManaged });
           artifacts.push(...collected);
           record({ artifactCount: artifacts.length });
         } catch (error) {

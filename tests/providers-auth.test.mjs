@@ -205,3 +205,96 @@ test('incomplete packaged helpers never fall back to host commands', async () =>
     assert.deepEqual(calls, []);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test('Fly account lease rechecks a private personal config with the bundled helper', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seagulled-fly-lease-'));
+  const dataDir = join(root, 'providers');
+  const helperRoot = join(root, 'helpers');
+  const flyctlPath = join(helperRoot, 'fly', process.platform === 'win32' ? 'flyctl.exe' : 'flyctl');
+  const flyConfigDir = join(dataDir, 'auth', 'fly');
+  const home = join(root, 'home');
+  mkdirSync(join(flyctlPath, '..'), { recursive: true });
+  mkdirSync(flyConfigDir, { recursive: true });
+  writeFileSync(flyctlPath, 'fixture');
+  writeFileSync(join(flyConfigDir, 'config.yml'), 'fixture-private-config');
+  const calls = [];
+  try {
+    const manager = new ProviderManager({ dataDir, helperRoot,
+      env: { [process.platform === 'win32' ? 'USERPROFILE' : 'HOME']: home,
+        FLY_API_TOKEN: 'service-token', FLY_CONFIG_DIR: join(root, 'service'), BROWSER: 'bad-browser' },
+      ptyCheck: async () => false,
+      commandRunner: async (command, args, options) => {
+        calls.push({ command, args, env: options.env });
+        return { code: 0, stdout: args.join(' ') === 'auth whoami --json'
+          ? '{"email":"human@example.com"}' : 'fixture-version' };
+      } });
+    const lease = await manager.flyAccountLease();
+    assert.deepEqual(lease, { flyctlPath, flyConfigDir, scope: 'private' });
+    assert.ok(calls.every(call => call.command === flyctlPath && call.env.FLY_API_TOKEN === undefined
+      && call.env.BROWSER === undefined));
+    assert.ok(calls.filter(call => call.args.join(' ') === 'auth whoami --json')
+      .every(call => call.env.FLY_CONFIG_DIR === flyConfigDir));
+    const publicState = JSON.stringify(await manager.authState());
+    assert.equal(publicState.includes(flyConfigDir) || publicState.includes(flyctlPath)
+      || publicState.includes('service-token'), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Fly account lease supports verified shared default config without copying credentials', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seagulled-fly-lease-'));
+  const home = join(root, 'home');
+  const flyConfigDir = join(home, '.fly');
+  const helperRoot = join(root, 'helpers');
+  const flyctlPath = join(helperRoot, 'fly', process.platform === 'win32' ? 'flyctl.exe' : 'flyctl');
+  mkdirSync(join(flyctlPath, '..'), { recursive: true });
+  mkdirSync(flyConfigDir, { recursive: true });
+  writeFileSync(flyctlPath, 'fixture');
+  writeFileSync(join(flyConfigDir, 'config.yml'), 'fixture-shared-config');
+  const calls = [];
+  try {
+    const manager = new ProviderManager({ dataDir: join(root, 'providers'), helperRoot,
+      env: { [process.platform === 'win32' ? 'USERPROFILE' : 'HOME']: home,
+        FLY_CONFIG_DIR: join(root, 'service'), FLY_API_TOKEN: 'service-token' },
+      ptyCheck: async () => false,
+      commandRunner: async (command, args, options) => {
+        calls.push({ command, args, env: options.env });
+        return { code: 0, stdout: args.join(' ') === 'auth whoami --json'
+          ? '{"email":"human@example.com"}' : 'fixture-version' };
+      } });
+    assert.deepEqual(await manager.flyAccountLease(), { flyctlPath, flyConfigDir, scope: 'shared' });
+    assert.deepEqual(await manager.flyFleetLease(), { flyctlPath, flyConfigDir, scope: 'shared' });
+    assert.ok(calls.every(call => call.env.FLY_CONFIG_DIR === flyConfigDir
+      && call.env.FLY_API_TOKEN === undefined));
+    assert.deepEqual(manager.authEnvironment('fly'), {});
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Fly account lease rejects service identity, missing account config, and unbundled helper', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seagulled-fly-lease-'));
+  const helperRoot = join(root, 'helpers');
+  const flyctlPath = join(helperRoot, 'fly', process.platform === 'win32' ? 'flyctl.exe' : 'flyctl');
+  const flyConfigDir = join(root, 'providers', 'auth', 'fly');
+  const home = join(root, 'home');
+  mkdirSync(join(flyctlPath, '..'), { recursive: true });
+  mkdirSync(flyConfigDir, { recursive: true });
+  writeFileSync(flyctlPath, 'fixture');
+  writeFileSync(join(flyConfigDir, 'config.yml'), 'fixture');
+  try {
+    const manager = new ProviderManager({ dataDir: join(root, 'providers'), helperRoot,
+      env: { [process.platform === 'win32' ? 'USERPROFILE' : 'HOME']: home,
+        FLY_API_TOKEN: 'service-token' }, ptyCheck: async () => false,
+      commandRunner: async (_command, args) => ({ code: 0,
+        stdout: args.join(' ') === 'auth whoami --json'
+          ? '{"email":"worker@tokens.fly.io"}' : 'fixture-version' }) });
+    assert.equal(await manager.flyAccountLease(), null);
+    const personal = new ProviderManager({ dataDir: join(root, 'other-providers'), helperRoot,
+      env: { [process.platform === 'win32' ? 'USERPROFILE' : 'HOME']: home }, ptyCheck: async () => false,
+      commandRunner: async (_command, args) => ({ code: 0,
+        stdout: args.join(' ') === 'auth whoami --json'
+          ? '{"email":"human@example.com"}' : 'fixture-version' }) });
+    assert.equal(await personal.flyAccountLease(), null);
+    const unbundled = new ProviderManager({ dataDir: join(root, 'providers'), commands: { fly: flyctlPath },
+      commandRunner: async () => ({ code: 0, stdout: '{"email":"human@example.com"}' }) });
+    assert.equal(await unbundled.flyAccountLease(), null);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

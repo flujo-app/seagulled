@@ -85,6 +85,14 @@
   },
   "dependencies": {
     "@huggingface/transformers": "4.3.0",
+    "kokoro-js": "1.2.1",
     "node-pty": "1.1.0"
+  },
+  "overrides": {
+    "kokoro-js": {
+      "@huggingface/transformers": {
+        "sharp": "0.35.4"
+      }
+    }
   }
 }

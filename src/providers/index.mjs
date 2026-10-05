@@ -1,8 +1,8 @@
 import { mkdir, mkdtemp, rm, readdir, lstat, readFile, writeFile, realpath } from 'node:fs/promises';
-import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir, homedir } from 'node:os';
-import { join, resolve, relative, dirname, delimiter } from 'node:path';
+import { join, resolve, relative, dirname, delimiter, isAbsolute } from 'node:path';
 import { runProcess } from './process.mjs';
 import { ptyAvailable, runPty } from './pty.mjs';
 import { resolveAccountHelpers } from './helpers.mjs';
@@ -135,6 +135,11 @@ export class ProviderManager {
     return id === 'fly' ? join(root, 'auth', 'fly') : join(root, 'auth', 'modal.toml');
   }
 
+  #sharedFlyConfigDir() {
+    const home = process.platform === 'win32' ? this.env.USERPROFILE : this.env.HOME;
+    return join(typeof home === 'string' && isAbsolute(home) ? home : homedir(), '.fly');
+  }
+
   #authEnv({ id, scope = 'shared', status = false } = {}) {
     const env = { ...this.env };
     for (const key of Object.keys(env)) if (/^(?:FLY_|MODAL_|BROWSER$)/i.test(key)) delete env[key];
@@ -147,7 +152,8 @@ export class ProviderManager {
       env.PATH = [this.authHelpers.modal.runtimeDir, inheritedPath].filter(Boolean).join(delimiter);
       env.PYTHONNOUSERSITE = '1';
     }
-    if (scope === 'private' && id === 'fly') env.FLY_CONFIG_DIR = this.#privateAuthPath('fly');
+    if (id === 'fly') env.FLY_CONFIG_DIR = scope === 'private'
+      ? this.#privateAuthPath('fly') : this.#sharedFlyConfigDir();
     if (scope === 'private' && id === 'modal') env.MODAL_CONFIG_PATH = this.#privateAuthPath('modal');
     if (status) env.CI = '1';
     else delete env.CI;
@@ -270,6 +276,27 @@ export class ProviderManager {
     return this.authScope.get(id) === 'private'
       ? (id === 'fly' ? { FLY_CONFIG_DIR: this.#privateAuthPath(id) } : { MODAL_CONFIG_PATH: this.#privateAuthPath(id) }) : {};
   }
+
+  /** Backend-only verified personal Fly identity and bundled command; no token or public path. */
+  async flyAccountLease({ signal } = {}) {
+    const helper = this.authHelpers.fly;
+    if (!helper.bundled || !helper.usable || !isAbsolute(helper.command)) return null;
+    try { if (!statSync(helper.command).isFile()) return null; }
+    catch { return null; }
+    let status;
+    try { status = await this.#accountStatus('fly', signal); }
+    catch (error) { if (error?.name === 'AbortError') throw error; return null; }
+    if (!status.connected) return null;
+    const scope = this.authScope.get('fly');
+    const flyConfigDir = scope === 'private' ? this.#privateAuthPath('fly')
+      : scope === 'shared' ? this.#sharedFlyConfigDir() : null;
+    if (!flyConfigDir) return null;
+    try { if (!statSync(join(flyConfigDir, 'config.yml')).isFile()) return null; }
+    catch { return null; }
+    return { flyctlPath: helper.command, flyConfigDir, scope };
+  }
+
+  async flyFleetLease(options) { return this.flyAccountLease(options); }
 
   async discover() {
     const [codex, codexAuth, claude, claudeAuth, antigravity] = await Promise.all([
