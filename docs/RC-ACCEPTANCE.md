@@ -8,6 +8,10 @@ A packaged Windows check exercised synthetic microphone audio through the actual
 
 Local male narration uses the packaged Kokoro Michael preset, with the installed system voice while weights warm. Actual source and Windows packaged synthesis passed, including preload IPC, renderer isolation, empty manifest disclosure and clean shutdown; this is local preset synthesis, not a Todd voice clone, synchronized footage or a live task-provider run. Advanced refreshes the actual narration source without another action. See [local narration](local-narration.md).
 
+The unreleased Windows portable checkpoint built from `67d9b48` starts through its normal launcher, exposes a verified empty goal state and shuts down gracefully with the private runtime lock removed. Playwright could not attach through that portable launcher; direct renderer and narration checks use the unpacked Electron build. The separately exported CLI archive runs status with a fresh private home and host provider CLIs absent from PATH. Package auditing matches 49 product source files and all 1,325 bundled helper hashes, with no private state or Python bytecode entries. The published RC4 portable, CLI and checksum artifacts remain byte-identical to their published hashes.
+
+The later dependency-lock correction at `004a58b` deduplicates patched Sharp 0.35.5 for both Transformer versions; isolated npm 10 and 11 clean-install dry runs pass, actual local synthesis still works, and both [Windows source CI runs](https://github.com/flujo-app/seagulled/actions/runs/37289123732) pass all 165 cases. This metadata correction is separate from the `67d9b48` portable checkpoint, and neither is a new public release.
+
 The generated avatar artwork was rejected and removed. The current ambient stage does not satisfy the requested movie/avatar experience. The private H100+Qwen path and requested 25-conversation topology remain source work under review, with live provisioning, inference, accounting, and cleanup acceptance outstanding. Earlier interruption and cleanup holds remain authoritative.
 
 ## Published RC4 baseline
