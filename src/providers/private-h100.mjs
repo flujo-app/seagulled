@@ -60,6 +60,30 @@ async function boundedJson(response, maxBytes, controller) {
     reader.releaseLock();
   }
 }
+async function modalResponse(fetchImpl, url, options, controller) {
+  const original = new URL(url);
+  let current = original.href;
+  let request = { ...options, signal: controller.signal, redirect: 'manual' };
+  for (let redirects = 0; redirects <= 20; redirects++) {
+    if (controller.signal.aborted) throw safeError();
+    const response = await fetchImpl(current, request);
+    if (response.status !== 303) return response;
+    const location = response.headers?.get('location');
+    let resultUrl;
+    try { if (typeof location !== 'string') throw new Error(); resultUrl = new URL(location, current); }
+    catch { controller.abort(); throw safeError(); }
+    if (redirects === 20 || resultUrl.origin !== original.origin || resultUrl.pathname !== original.pathname
+      || !resultUrl.search || resultUrl.hash || resultUrl.username || resultUrl.password) {
+      controller.abort(); throw safeError();
+    }
+    response.body?.cancel().catch(() => {});
+    current = resultUrl.href;
+    request = { method: 'GET', headers: { authorization: options.headers.authorization },
+      signal: controller.signal, redirect: 'manual' };
+  }
+  controller.abort();
+  throw safeError();
+}
 function ownedRecord(value) {
   return value?.version === 1 && OWNED_NAME.test(value.appName) && typeof value.attemptId === 'string'
     && /^[a-f0-9-]{36}$/.test(value.attemptId) && typeof value.phase === 'string';
@@ -179,19 +203,19 @@ export class PrivateH100Manager {
     signal?.addEventListener('abort', abort, { once: true });
     const timer = setTimeout(() => controller.abort(), MAX_REQUEST_MS + 5 * 60_000);
     try {
-      const response = await this.fetch(`${endpoint}/v1/models`, { headers: { authorization: `Bearer ${token}` },
-        signal: controller.signal, redirect: 'error' });
+      const response = await modalResponse(this.fetch, `${endpoint}/v1/models`,
+        { headers: { authorization: `Bearer ${token}` } }, controller);
       if (!response.ok) { controller.abort(); throw safeError(); }
       const models = (await boundedJson(response, 64_000, controller))?.data;
       if (!Array.isArray(models) || !models.some(item => item?.id === MODEL)) throw safeError();
       this.#save({ ...this.record, catalogVerifiedAt: new Date(this.clock()).toISOString() });
       const challenge = `SEAGULLED-${attemptId.slice(0, 8).toUpperCase()}`;
-      const completion = await this.fetch(`${endpoint}/v1/chat/completions`, { method: 'POST',
+      const completion = await modalResponse(this.fetch, `${endpoint}/v1/chat/completions`, { method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
         body: JSON.stringify({ model: MODEL, temperature: 0, max_tokens: 48, stream: false,
           chat_template_kwargs: { enable_thinking: false },
           messages: [{ role: 'user', content: `Reply with exactly this text and nothing else: ${challenge}` }] }),
-        signal: controller.signal, redirect: 'error' });
+      }, controller);
       if (!completion.ok) { controller.abort(); throw safeError(); }
       const result = await boundedJson(completion, 64_000, controller);
       if (controller.signal.aborted) throw safeError();
@@ -359,10 +383,10 @@ export class PrivateH100Manager {
     signal?.addEventListener('abort', abort, { once: true });
     const timer = setTimeout(() => controller.abort(), MAX_REQUEST_MS);
     try {
-      const response = await this.fetch(`${route.model.baseUrl}/chat/completions`, { method: 'POST',
+      const response = await modalResponse(this.fetch, `${route.model.baseUrl}/chat/completions`, { method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${this.token}` },
         body: JSON.stringify({ model: MODEL, max_tokens: 1024, messages: [{ role: 'user', content: prompt }] }),
-        signal: controller.signal, redirect: 'error' });
+      }, controller);
       if (!response.ok) { controller.abort(); throw safeError(); }
       const result = await boundedJson(response, 256_000, controller);
       if (controller.signal.aborted) throw safeError();

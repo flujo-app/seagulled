@@ -407,3 +407,69 @@ test('an older catalog-only receipt is not accepted as executable readiness', as
     assert.equal(manager.record.phase, 'unknown');
   } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });
+
+test('Modal result redirects finish cold startup without replaying the completion POST', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'seagulled-private-test-'));
+  try {
+    const { manager, requests } = fixture(dataDir, { responseOverride: (url, options) => {
+      if (url.includes('?modal_result=')) {
+        assert.equal(options.method, 'GET');
+        assert.equal(options.body, undefined);
+        assert.equal(options.redirect, 'manual');
+        if (url.includes('/v1/models?')) return new Response(JSON.stringify({ data: [{ id: 'qwen3.8-27b' }] }));
+        const attempt = manager.record.attemptId;
+        return new Response(JSON.stringify({ model: 'qwen3.8-27b', choices: [{
+          message: { role: 'assistant', content: `SEAGULLED-${attempt.slice(0, 8).toUpperCase()}` },
+          finish_reason: 'stop' }] }));
+      }
+      if (url.endsWith('/v1/models') || url.endsWith('/v1/chat/completions'))
+        return new Response(null, { status: 303, headers: { location: `${url}?modal_result=fixture` } });
+      return undefined;
+    } });
+    const result = await manager.enable({ budgetUsd: 50, accountConnected: true,
+      helperUsable: true, workerAllowed: true });
+    assert.equal(result.ready, true);
+    assert.equal(requests.filter(item => item.options.method === 'POST').length, 1);
+    assert.equal(requests.filter(item => item.url.includes('?modal_result=')).length, 2);
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('an off-origin Modal redirect keeps the startup hold unknown and never forwards its bearer', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'seagulled-private-test-'));
+  try {
+    const { manager, requests } = fixture(dataDir, { responseOverride: url =>
+      url.endsWith('/v1/models')
+        ? new Response(null, { status: 303, headers: { location: 'https://example.com/result?modal_result=fixture' } })
+        : undefined });
+    await assert.rejects(manager.enable({ budgetUsd: 50, accountConnected: true,
+      helperUsable: true, workerAllowed: true }), error => error.code === 'UNKNOWN');
+    assert.equal(requests.length, 1);
+    assert.equal(manager.safeState({ accountConnected: true, helperUsable: true }).status, 'unknown');
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('Modal result redirect completes a task without replaying its reserved POST', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'seagulled-private-test-'));
+  try {
+    const { manager, requests } = fixture(dataDir, { responseOverride: (url, options) => {
+      if (url.includes('?modal_result=task')) {
+        assert.equal(options.method, 'GET');
+        assert.equal(options.body, undefined);
+        return new Response(JSON.stringify({ model: 'qwen3.8-27b', choices: [{
+          message: { role: 'assistant', content: 'fixture result' } }] }));
+      }
+      if (url.endsWith('/v1/chat/completions') && JSON.parse(options.body).max_tokens === 1024)
+        return new Response(null, { status: 303, headers: { location: `${url}?modal_result=task` } });
+      return undefined;
+    } });
+    await manager.enable({ budgetUsd: 50, accountConnected: true, helperUsable: true, workerAllowed: true });
+    manager.leaseGoal('goal-a');
+    const result = await manager.run({ prompt: 'bounded task', maxUsd: 25,
+      goalId: 'goal-a', requestId: 'task-redirect' });
+    assert.equal(result.text, 'fixture result');
+    assert.equal(result.reservation.id, 'task-redirect');
+    assert.equal(requests.filter(item => item.options.method === 'POST'
+      && JSON.parse(item.options.body).max_tokens === 1024).length, 1);
+    assert.equal(manager.record.pendingRunId, undefined);
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
