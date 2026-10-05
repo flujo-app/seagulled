@@ -34,6 +34,25 @@ test('metadata stalls are bounded and do not announce playback',async()=>{
   }finally{if(oldLocation)Object.defineProperty(globalThis,'location',oldLocation);else delete globalThis.location;}
 });
 
+test('metadata readiness survives an event before the wait, a later readiness event, and the deadline boundary',async()=>{
+  const oldLocation=Object.getOwnPropertyDescriptor(globalThis,'location');
+  Object.defineProperty(globalThis,'location',{configurable:true,value:{href:'http://localhost/'}});
+  const short={version:1,loops:Object.fromEntries(['idle','listening','work'].map(scene=>[scene,{src:'clips/frames.mp4',frames:2,fps:30}])),transitions:[]};
+  try{
+    for(const order of ['before-wait','later-canplay','ready-before-deadline']){
+      const video=new EventTarget();Object.assign(video,{readyState:0,duration:NaN,error:null,seeking:false,dataset:{},muted:false,playsInline:false,preload:'',pause(){},removeAttribute(){}});
+      let mediaTime=0;Object.defineProperty(video,'currentTime',{get:()=>mediaTime,set(value){mediaTime=value;video.dispatchEvent(new Event('seeked'));}});
+      video.load=()=>{const ready=()=>{video.readyState=4;video.duration=2/30;if(order!=='ready-before-deadline')video.dispatchEvent(new Event(order==='before-wait'?'loadedmetadata':'canplay'));};
+        if(order==='before-wait')ready();else setTimeout(ready,10);};
+      const stage={dataset:{}};
+      const player=new MoviePlayer({video,stage,manifestUrl:'/movie-manifest.json',fetchImpl:async()=>({ok:true,json:async()=>short}),metadataTimeoutMs:40});
+      assert.equal(await player.load(),true,`${order}: ${stage.dataset.movieStatus}`);
+      assert.equal(stage.dataset.movieStatus,'playing');
+      player.destroy();
+    }
+  }finally{if(oldLocation)Object.defineProperty(globalThis,'location',oldLocation);else delete globalThis.location;}
+});
+
 test('real local video seeks through transition frames forward and backward and cancels on interruption',async t=>{
   const dir=await mkdtemp(join(tmpdir(),'seagulled-movie-'));
   await mkdir(join(dir,'clips'));

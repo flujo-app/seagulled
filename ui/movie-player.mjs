@@ -37,14 +37,16 @@ function waitForMedia(video,{event,predicate,signal,timeoutMs}){
   if(video.error)return Promise.reject(new Error('Movie video could not be decoded.'));
   if(predicate())return Promise.resolve();
   return new Promise((resolve,reject)=>{
-    let timer;
-    const cleanup=()=>{clearTimeout(timer);video.removeEventListener(event,check);video.removeEventListener('error',fail);signal.removeEventListener('abort',cancel);};
-    const done=()=>{cleanup();resolve();};
-    const fail=()=>{cleanup();reject(new Error('Movie video could not be decoded.'));};
-    const cancel=()=>{cleanup();reject(aborted());};
-    const check=()=>{if(predicate())done();};
-    video.addEventListener(event,check);video.addEventListener('error',fail);signal.addEventListener('abort',cancel,{once:true});
-    timer=setTimeout(()=>{cleanup();reject(new Error(`Movie ${event} stalled.`));},timeoutMs);
+    let timer,settled=false;
+    const wakeEvents=event==='loadedmetadata'?['loadedmetadata','loadeddata','canplay','durationchange']:[event,'loadeddata','canplay','timeupdate'];
+    const cleanup=()=>{clearTimeout(timer);for(const wake of wakeEvents)video.removeEventListener(wake,check);video.removeEventListener('error',fail);signal.removeEventListener('abort',cancel);};
+    const done=()=>{if(settled)return;settled=true;cleanup();resolve();};
+    const fail=()=>{if(settled)return;settled=true;cleanup();reject(new Error('Movie video could not be decoded.'));};
+    const cancel=()=>{if(settled)return;settled=true;cleanup();reject(aborted());};
+    const check=()=>{if(settled)return;if(signal.aborted)cancel();else if(video.error)fail();else if(predicate())done();};
+    for(const wake of wakeEvents)video.addEventListener(wake,check);
+    video.addEventListener('error',fail);signal.addEventListener('abort',cancel,{once:true});
+    timer=setTimeout(()=>{if(settled)return;if(signal.aborted)cancel();else if(video.error)fail();else if(predicate())done();else{settled=true;cleanup();reject(new Error(`Movie ${event} stalled.`));}},timeoutMs);
     check();
   });
 }
