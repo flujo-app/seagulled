@@ -8,7 +8,9 @@ import {collectFlyArtifacts,remoteCollector,collectorCommand} from '../src/artif
 
 const target={kind:'fly',app:'seagulled-fixture',machineId:'machine-123',workspace:'fixture'};
 async function setup(t){
-  const directory=await fs.mkdtemp(path.join(tmpdir(),'seagulled-artifacts-'));
+  // Windows hosted runners expose TEMP through an 8.3 alias. The collector
+  // deliberately rejects noncanonical roots, so resolve the fixture root first.
+  const directory=await fs.realpath(await fs.mkdtemp(path.join(tmpdir(),'seagulled-artifacts-')));
   t.after(()=>fs.rm(directory,{recursive:true,force:true}));
   const remote=path.join(directory,'remote');
   const output=path.join(remote,'workspaces','fixture','seagulled-output');
