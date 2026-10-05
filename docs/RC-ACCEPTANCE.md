@@ -4,7 +4,7 @@ Seagulled 0.1.0-rc.1 is a Windows Electron app and a Node CLI with a shared dura
 
 ## Qualified paths
 
-- Actual Electron 44.5.1 startup: sandboxed preload, context isolation, no renderer Node access, provider autodiscovery, shared private session and clean shutdown.
+- Actual packaged Electron 44.5.1 startup: sandboxed preload, context isolation, no renderer Node access, provider autodiscovery, shared CLI session and clean shutdown with ownership files removed.
 - Browser automation: native/key setup, composer budget, goal edits, goal and team controls, pending spend, work disclosure, authenticated artifact downloads and mobile layout.
 - Actual native Codex goal: four provider calls (Todd, developer, reviewer, Todd), a generated file saved through validated host materialization, independent reviewer inspection, and separately verified exact bytes and SHA-256. [Receipt](native-acceptance.json).
 - Durable source checks cover single authority, damaged state preservation, graceful pause boundaries, exact resume stages, unknown holds, one-time usage, allowance holds, UTF-8 requests, API authentication and artifact integrity.
