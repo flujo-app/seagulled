@@ -88,5 +88,16 @@ test('real local video seeks through transition frames forward and backward and 
   await page.evaluate(()=>window.testMovie.player.setScene('work'));
   await page.waitForFunction(()=>window.testMovie.frames.filter(frame=>frame.clipId==='work').length>=9);
   assert.deepEqual((await page.evaluate(()=>window.testMovie.frames)).filter(frame=>frame.clipId==='work').slice(0,9).map(frame=>frame.frame),[0,1,2,3,4,5,6,7,0]);
+  const reverseCancel=await page.evaluate(async()=>{
+    const {player,frames}=window.testMovie;
+    await player.setScene('idle');await player.setScene('headphones');
+    const pending=player.setScene('idle');
+    while(frames.filter(frame=>frame.clipId==='headphones-on'&&frame.direction==='reverse'&&frame.epoch===player.epoch).length<2)await new Promise(resolve=>setTimeout(resolve,10));
+    const oldEpoch=player.epoch;player.interrupt();const count=frames.filter(frame=>frame.epoch===oldEpoch).length;
+    await pending;await player.setScene('work');
+    return {count,after:frames.filter(frame=>frame.epoch===oldEpoch).length,scene:player.settledScene};
+  });
+  assert.equal(reverseCancel.after,reverseCancel.count);
+  assert.equal(reverseCancel.scene,'work');
   await page.evaluate(()=>window.testMovie.player.destroy());
 });

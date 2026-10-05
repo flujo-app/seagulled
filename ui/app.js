@@ -13,7 +13,7 @@ const terminal=new Set(['completed','stopped','failed','interrupted','cancelled'
 let state={version:1,conversation:[],goals:[],spend:{},swarm:{status:'idle'}};
 let auth={fly:{connected:false,available:false,detail:'Checking…'},modal:{connected:false,available:false,detail:'Checking…'}};
 let voice={transcribe:false,speak:false,reason:'Voice is not ready.'};
-let mode='ready',started=false,authBusy=false,goalSubmitting=false,pendingGoal=null,goTimer=null,workingSince=0,workingKey='',voiceWait=null,capturePending=false;
+let mode='ready',started=false,authBusy=false,goalSubmitting=false,goalPostStarted=false,pendingGoal=null,goTimer=null,workingSince=0,workingKey='',voiceWait=null,capturePending=false,inputEpoch=0,suppressTodd=false;
 let knownMessages=null,speechQueue=Promise.resolve(),speechEpoch=0,audioUrl=null,activeSpeechFinish=null,refreshTimer=null;
 let budgetWait=null,budgetQuote=null,budgetCustom=false,budgetEpoch=0,currencySwitch=null,selectedPreset=50,quoteExpiryTimer=null;
 let providerBusy=false,providerSetupPending=false,providerWait=null,displayedProvider='';
@@ -213,7 +213,7 @@ function applyState(next){
   const first=knownMessages===null;if(first)knownMessages=new Set(next.conversation.map(message=>message.id));
   const newTodd=first?[]:next.conversation.filter(message=>{const fresh=!knownMessages.has(message.id);knownMessages.add(message.id);return fresh&&message.role==='todd'&&message.text;});
   state=next;renderDetails();renderAuth();updateScene();
-  if(newTodd.length){announce('Todd responded.');if(voice.speak&&mode!=='listening'){const epoch=speechEpoch;for(const message of newTodd.slice(-3))speechQueue=speechQueue.then(()=>epoch===speechEpoch?speakTodd(message.text):undefined).catch(error=>{if(!/Voice stopped|aborted|canceled/i.test(errorMessage(error)))showError(errorMessage(error));});}}
+  if(newTodd.length){announce('Todd responded.');if(!suppressTodd&&voice.speak&&mode!=='listening'){const epoch=speechEpoch;for(const message of newTodd.slice(-3))speechQueue=speechQueue.then(()=>epoch===speechEpoch?speakTodd(message.text):undefined).catch(error=>{if(!/Voice stopped|aborted|canceled/i.test(errorMessage(error)))showError(errorMessage(error));});}}
 }
 async function refresh(){const data=await bridge.state();applyState(data?.state||data);}
 function normalizeAuth(raw){
@@ -260,13 +260,14 @@ async function disconnectProvider(){const id=elements['provider-choice'].value;i
 function fallbackAvailable(){return voice.transcribe!==true||!navigator.mediaDevices?.getUserMedia||!window.AudioWorkletNode;}
 function openFallback(message){elements['text-fallback'].hidden=false;if(message)showError(message);else if(!elements['advanced-dialog'].open)elements['advanced-dialog'].showModal();elements['fallback-goal'].focus();}
 async function enterExperience(){started=true;await refreshAuth();if(!authReady()||(!ordinaryInference()&&!elements['private-h100'].checked)){showSetup();return;}if(fallbackAvailable()){openFallback(voice.reason||'Voice capture is unavailable.');return;}beginListening();}
-async function ensureVoiceReady(){
+async function ensureVoiceReady(epoch){
   if(voice.ready===true)return true;
   if(voice.transcribe!==true)return false;
   if(voiceWait)return voiceWait;
   voiceWait=(async()=>{setMode('transcribing');announce('Preparing local speech recognition.');const until=Date.now()+180000;
-    while(Date.now()<until){await new Promise(resolve=>setTimeout(resolve,1200));
+    while(Date.now()<until){if(epoch!==inputEpoch)return false;await new Promise(resolve=>setTimeout(resolve,1200));if(epoch!==inputEpoch)return false;
       try{voice=await bridge.voiceCapabilities();}catch(error){voice={transcribe:false,speak:false,ready:false,reason:errorMessage(error)};}renderNarration();
+      if(epoch!==inputEpoch)return false;
       if(voice.ready===true)return true;
       if(voice.transcribe!==true||voice.status==='unavailable')return false;
     }
@@ -275,23 +276,41 @@ async function ensureVoiceReady(){
   return voiceWait;
 }
 async function beginListening(){if(goalSubmitting||mode==='listening'||voiceWait||capturePending)return;if(!authReady()){showSetup();return;}if(fallbackAvailable()){openFallback(voice.reason||'Voice capture is unavailable.');return;}
+  const epoch=++inputEpoch;suppressTodd=false;
   moviePlayer.interrupt();
   capturePending=true;
-  if(!await ensureVoiceReady()){capturePending=false;setMode('ready');openFallback(voice.reason||'Voice capture is unavailable.');return;}
+  const ready=await ensureVoiceReady(epoch);if(epoch!==inputEpoch){capturePending=false;return;}
+  if(!ready){capturePending=false;setMode('ready');openFallback(voice.reason||'Voice capture is unavailable.');return;}
   void stopTodd();setMode('preparing-listen');announce('Opening microphone.');
   capture.start().then(async audio=>{
+    if(epoch!==inputEpoch)return;
     setMode('transcribing');announce('Understanding your goal.');
     const result=await bridge.transcribeAudio({...audio,language:navigator.language||'en-US'});
+    if(epoch!==inputEpoch)return;
     const sentence=oneSentence(result?.text);
     if(!sentence){setMode('ready');openFallback('Please give Todd one sentence.');if(typeof result?.text==='string')elements['fallback-goal'].value=result.text.slice(0,4000);return;}
     pendingGoal=sentence;setMode('go');announce('Goal understood. Starting work.');
     clearTimeout(goTimer);goTimer=setTimeout(()=>void submitGoal(),350);
-  }).catch(error=>{if(errorMessage(error)==='Listening canceled.')return;setMode('ready');openFallback(errorMessage(error));}).finally(()=>{capturePending=false;});
+  }).catch(error=>{if(epoch!==inputEpoch||errorMessage(error)==='Listening canceled.')return;setMode('ready');openFallback(errorMessage(error));}).finally(()=>{if(epoch===inputEpoch)capturePending=false;});
 }
 function goalOptions(){if(!elements['budget-amount'].value.trim())throw new Error('Enter a budget amount.');return budgetOptions({amount:elements['budget-amount'].value,currency:elements['budget-currency'].value,workers:elements.workers.value,conversations:elements.conversations.value,privateH100:elements['private-h100'].checked});}
-async function submitGoal(){if(goalSubmitting||!pendingGoal)return;if(!authReady()){showSetup();return;}clearTimeout(goTimer);const text=pendingGoal;let options;
-  try{if(currencySwitch)await currencySwitch;if(budgetWait)await budgetWait;options=goalOptions();}catch(error){showError(errorMessage(error));return;}
-  goalSubmitting=true;setMode('submitting');try{await bridge.chat(text,options);pendingGoal=null;elements['fallback-goal'].value='';await refresh();announce('Todd has your goal.');elements['advanced-dialog'].close();setMode('ready');}catch(error){setMode('go');showError(errorMessage(error));}finally{goalSubmitting=false;}
+async function submitGoal(){if(goalSubmitting||!pendingGoal)return;if(!authReady()){showSetup();return;}
+  clearTimeout(goTimer);const text=pendingGoal,epoch=inputEpoch,requestedCurrency=elements['budget-currency'].value;
+  goalSubmitting=true;elements['fallback-go'].disabled=true;setMode('submitting');
+  try{
+    if(currencySwitch)await currencySwitch;if(budgetWait)await budgetWait;
+    if(epoch!==inputEpoch){setMode('go');return;}
+    if(elements['budget-currency'].value!==requestedCurrency||(requestedCurrency!=='USD'&&!validSpendQuote(budgetQuote,requestedCurrency)))throw new Error('Currency allowance is unavailable. Review the budget and press Go again.');
+    const options=goalOptions();
+    if(epoch!==inputEpoch){setMode('go');return;}
+    goalPostStarted=true;suppressTodd=false;
+    await bridge.chat(text,options);
+    if(pendingGoal===text)pendingGoal=null;
+    if(elements['fallback-goal'].value.trim()===text)elements['fallback-goal'].value='';
+    try{await refresh();elements['advanced-dialog'].close();}catch{showError('Goal was accepted, but its latest status could not load.');}
+    announce('Todd has your goal.');setMode('ready');
+  }catch(error){setMode('go');if(goalPostStarted||epoch===inputEpoch)showError(errorMessage(error));}
+  finally{goalPostStarted=false;goalSubmitting=false;elements['fallback-go'].disabled=false;}
 }
 
 function clearAudio(){const audio=elements['todd-audio'];audio.pause();audio.removeAttribute('src');audio.load();if(audioUrl){URL.revokeObjectURL(audioUrl);audioUrl=null;}audio.onplaying=audio.onended=audio.onerror=null;}
@@ -311,7 +330,13 @@ async function speakTodd(text){if(!voice.speak||!text)return;const epoch=speechE
   if(epoch===speechEpoch){setMode('ready');announce('Todd finished speaking.');}
 }
 
-async function controlTeam(action){try{await bridge.controlSwarm(action);await refresh();announce(`Team ${action} requested.`);}catch(error){showError(errorMessage(error));}}
+async function controlTeam(action){
+  const interrupt=action==='pause'||action==='stop';let movieEpoch,confirmed=false;
+  if(interrupt){suppressTodd=true;inputEpoch++;clearTimeout(goTimer);capture.cancel();void stopTodd();if(!goalPostStarted)setMode(pendingGoal?'go':'ready');moviePlayer.interrupt();movieEpoch=moviePlayer.epoch;}
+  try{await bridge.controlSwarm(action);await refresh();confirmed=true;if(action==='resume')suppressTodd=false;announce(`Team ${action} requested.`);}
+  catch(error){showError(errorMessage(error));}
+  finally{if(interrupt&&confirmed&&moviePlayer.epoch===movieEpoch)void moviePlayer.setScene(elements.movie.dataset.scene,{interrupt:true});}
+}
 function amountForUsd(usd,quote){const digits=new Intl.NumberFormat('en',{style:'currency',currency:quote.currency}).resolvedOptions().maximumFractionDigits;const scale=10**digits;return Math.max(1/scale,Math.round(usd/quote.usdPerUnit*scale)/scale);}
 function markPreset(usd){for(const button of document.querySelectorAll('[data-budget-usd]'))button.setAttribute('aria-pressed',String(Number(button.dataset.budgetUsd)===usd));}
 function budgetNote(quote,usd=selectedPreset??50){const amount=amountForUsd(usd,quote);elements['budget-note'].textContent=quote.currency==='USD'?`${usd} USD allowance selected.`:`${amount} ${quote.currency} ≈ ${usd} USD · rate ${new Date(quote.quoteAsOf).toLocaleDateString()}`;}
@@ -352,7 +377,7 @@ elements['provider-key'].addEventListener('input',renderProviderForm);
 elements['provider-worker-consent'].addEventListener('change',renderProviderForm);
 elements['provider-connect'].addEventListener('click',()=>void connectProvider());
 elements['provider-disconnect'].addEventListener('click',()=>void disconnectProvider());
-elements['fallback-go'].addEventListener('click',()=>{const sentence=oneSentence(elements['fallback-goal'].value);if(!sentence){showError('Enter one sentence for Todd.');return;}pendingGoal=sentence;void submitGoal();});
+elements['fallback-go'].addEventListener('click',()=>{if(goalSubmitting)return;const sentence=oneSentence(elements['fallback-goal'].value);if(!sentence){showError('Enter one sentence for Todd.');return;}pendingGoal=sentence;void submitGoal();});
 for(const id of ['workers','conversations'])elements[id].addEventListener('input',()=>{$(`${id}-value`).value=elements[id].value;$(`${id}-value`).textContent=elements[id].value;});
 elements['private-h100'].addEventListener('change',()=>{renderDetails();renderAuth();});
 elements['budget-amount'].addEventListener('input',()=>{budgetCustom=true;selectedPreset=null;markPreset(null);elements['budget-note'].textContent='Your chosen allowance will be checked before work starts.';});

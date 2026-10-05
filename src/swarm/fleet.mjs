@@ -14,6 +14,12 @@ const legacyProfilePath = () => path.join(process.env.SWARM_TEAMS_HOME || path.j
 const profilePath = () => process.env.SEAGULLED_FLEET_PROFILE || legacyProfilePath();
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const unknown = (message) => Object.assign(new Error(message), { code: 'UNKNOWN', unknown: true });
+const assertAdmission = (signal, deadlineAt) => {
+  if (signal?.aborted) throw Object.assign(new Error('Cancelled'), { name: 'AbortError', outcome: 'not_applied' });
+  if (deadlineAt !== undefined && Date.now() >= deadlineAt) {
+    throw Object.assign(new Error('The fleet deadline passed before submission.'), { code: 'DEADLINE', outcome: 'not_applied' });
+  }
+};
 export const flyUnavailable = 'A verified personal Fly sign-in, an unused personal organization, and the bundled Fly helper are required for isolated Workers.';
 const regularFile = (value) => {
   try { return typeof value === 'string' && path.isAbsolute(value) && statSync(value).isFile(); }
@@ -234,7 +240,8 @@ export function recordConfirmedQuotaHold({ dataDir, model, providerId, goalId, r
   return true;
 }
 
-async function modelProbe(model) {
+async function modelProbe(model, { signal, deadlineAt } = {}) {
+  assertAdmission(signal, deadlineAt);
   try {
     const anthropic = model.provider === 'anthropic' && model.adapter === 'anthropic';
     const base = model.baseUrl.endsWith('/') ? model.baseUrl : `${model.baseUrl}/`;
@@ -243,7 +250,7 @@ async function modelProbe(model) {
       method: 'GET', headers: anthropic
         ? { 'x-api-key': model.apiKey, 'anthropic-version': '2023-06-01' }
         : { Authorization: `Bearer ${model.apiKey}` },
-      signal: AbortSignal.timeout(7000), redirect: 'error',
+      signal: AbortSignal.any([AbortSignal.timeout(7000), ...(signal ? [signal] : [])]), redirect: 'error',
     });
     if (!response.ok) return { available: false, detail: `HTTP ${response.status}` };
     const catalogue = await response.json().catch(() => null);
@@ -251,8 +258,12 @@ async function modelProbe(model) {
     if (!anthropic && Array.isArray(catalogue?.data) && !catalogue.data.some((entry) => entry?.id === model.name)) {
       return { available: false, detail: 'model absent from catalog' };
     }
+    assertAdmission(signal, deadlineAt);
     return { available: true };
-  } catch { return { available: false, detail: 'endpoint did not respond' }; }
+  } catch (error) {
+    if (signal?.aborted || deadlineAt !== undefined && Date.now() >= deadlineAt) assertAdmission(signal, deadlineAt);
+    return { available: false, detail: 'endpoint did not respond' };
+  }
 }
 
 const nativeCodex = (model) => model?.provider === 'codex' && model?.adapter === 'codex-cli'
@@ -270,7 +281,7 @@ const exactProductBinding = (providerId, model, route) => {
         && (url.hostname.endsWith('.modal.run') || url.hostname.endsWith('.modal.direct'))
         && /(?:^|[.-])seagulled-qwen-[a-f0-9]{12}(?:[.-]|$)/.test(url.hostname)
         && model.baseUrl === `${url.origin}/v1` && !url.search && !url.hash
-        && (!route || route.verification === 'previously-verified'
+        && (route?.verification === 'inference-verified'
           && route.costPolicy === 'estimated-gpu-seconds'
           && /^[a-f0-9-]{36}$/.test(route.ownedAttemptId ?? ''));
     } catch { return false; }
@@ -280,7 +291,9 @@ const exactProductBinding = (providerId, model, route) => {
 };
 
 /** Read-only discovery. Product calls require the selected provider's private route. */
-async function inspectFleet({ dataDir, providerId, fleetRoute, goalId, diagnostic = false, flyAccount } = {}) {
+async function inspectFleet({ dataDir, providerId, fleetRoute, goalId, diagnostic = false,
+  flyAccount, signal, deadlineAt } = {}) {
+  assertAdmission(signal, deadlineAt);
   if (!diagnostic && (fleetRoute?.available !== true || fleetRoute.providerId !== providerId
     || typeof providerId !== 'string' || !providerId)) {
     return { available: false, detail: 'The selected provider has no Fly route. Local provider work remains available.' };
@@ -329,11 +342,14 @@ async function inspectFleet({ dataDir, providerId, fleetRoute, goalId, diagnosti
     if (sourceHold(dataDir, config.supervisor.origin)) {
       return { available: false, detail: 'Local FLUJO workspace creation is held after a confirmed failure. Native provider work remains available.' };
     }
-    const client = new FlujoClient({ origin: origin.href, workspace: null });
+    const client = new FlujoClient({ origin: origin.href, workspace: null, signal, deadlineAt });
     await client.api('GET', '/api/workspaces', undefined, { workspace: null, timeoutMs: 3000 }).then((response) => {
       if (response.status !== 200) throw new Error('source unavailable');
     });
-  } catch { return { available: false, detail: 'The local FLUJO source is unavailable.' }; }
+  } catch {
+    assertAdmission(signal, deadlineAt);
+    return { available: false, detail: 'The local FLUJO source is unavailable.' };
+  }
   if (nativeCodex(config.model)) {
     if (!diagnostic && fleetRoute.verification !== 'qualified') {
       return { available: false, detail: 'The selected keyless Codex route is not qualified for Fly. Local provider work remains available.' };
@@ -342,7 +358,7 @@ async function inspectFleet({ dataDir, providerId, fleetRoute, goalId, diagnosti
       detail: 'A keyless Codex model is configured. The isolated boot flow must confirm this login before any Fly worker is created; cloud execution is not yet qualified.',
       ...(!diagnostic ? { providerId } : {}), config };
   }
-  const original = await modelProbe(config.model);
+  const original = await modelProbe(config.model, { signal, deadlineAt });
   if (original.available) {
     return { available: true, provider: 'configured-model',
       detail: 'Local FLUJO and the selected provider model catalog are configured; live Fly execution has not been verified.',
@@ -381,13 +397,18 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
   diagnostic = false, reservationId, reserveCloud, flyAccount, onStatus = () => undefined }) {
   if (!goal || typeof goal.id !== 'string' || !/^[\w-]{1,100}$/.test(goal.id)) throw new Error('A safe goal id is required for isolated fleet work.');
   goalCapacity(goal);
+  const fleetDeadlineAt = Date.now() + 30 * 60_000;
+  assertAdmission(signal, fleetDeadlineAt);
   if (!diagnostic && !validFlyAccount(flyAccount)) return { available: false, detail: flyUnavailable };
   const discovered = await inspectFleet({ dataDir, providerId: goal.providerId, fleetRoute, goalId: goal.id,
-    diagnostic, flyAccount });
+    diagnostic, flyAccount, signal, deadlineAt: fleetDeadlineAt });
+  assertAdmission(signal, fleetDeadlineAt);
   if (!discovered.available) return { available: false, detail: discovered.detail };
   const config = discovered.config;
   const bootWorkspace = `seagulled-${goal.id.slice(-12)}-boot`;
-  const boot = new FlujoClient({ origin: config.supervisor.origin, workspace: bootWorkspace });
+  const boot = new FlujoClient({ origin: config.supervisor.origin, workspace: bootWorkspace,
+    signal, deadlineAt: fleetDeadlineAt });
+  const bootCleanup = new FlujoClient({ origin: config.supervisor.origin, workspace: bootWorkspace });
   const registryPath = path.join(dataDir, 'fleet', goal.id, 'registry.json');
   const intentPath = path.join(path.dirname(registryPath), 'intent.json');
   const relayPath = path.join(path.dirname(registryPath), 'relay.json');
@@ -395,8 +416,9 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
   if (existsSync(registryPath) || existsSync(intentPath) || existsSync(relayPath) || existsSync(cloudDirectory)) {
     throw unknown('A prior Fly fleet intent exists for this goal. Reconcile its original worker before more provisioning.');
   }
-  if (signal?.aborted) throw Object.assign(new Error('Cancelled'), { name: 'AbortError', outcome: 'not_applied' });
+  assertAdmission(signal, fleetDeadlineAt);
   if ((await boot.workspaces()).includes(bootWorkspace)) throw unknown('The isolated FLUJO boot workspace already exists. Reconcile it before cloning.');
+  assertAdmission(signal, fleetDeadlineAt);
   mkdirSync(path.dirname(intentPath), { recursive: true, mode: 0o700 });
   let intent = { version: 1, goalId: goal.id, bootWorkspace, state: 'preparing', createdAt: new Date().toISOString() };
   writeFileSync(intentPath, JSON.stringify(intent), { flag: 'wx', mode: 0o600 });
@@ -430,6 +452,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     bootCreated = true; // A partial install is still our workspace and needs cleanup.
     await installTemplate(boot, { model: config.model, bootOnly: true, browser: false });
     record({ state: 'boot-ready' });
+    assertAdmission(signal, fleetDeadlineAt);
     if (nativeCodex(config.model)) {
       onStatus('Checking the keyless Codex model in the isolated local boot flow.');
       const admission = await boot.runFlow({ flowName: 'swarm_boot', prompt: 'Reply with the single word READY.', timeoutMs: 90_000 });
@@ -443,7 +466,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
             usage: { inputTokens: 0, outputTokens: 0, costUsd: null, costKind: 'subscription', billingPending: false } });
       }
     }
-    if (signal?.aborted) throw Object.assign(new Error('Cancelled'), { name: 'AbortError', outcome: 'not_applied' });
+    assertAdmission(signal, fleetDeadlineAt);
     if (!validFlyAccount(flyAccount)) {
       throw Object.assign(new Error(flyUnavailable), { outcome: 'not_applied' });
     }
@@ -453,7 +476,6 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     cloudManaged = new ManagedCloud({ env: flyEnv, directory: cloudDirectory });
     const multiWorker = !nativeCodex(config.model);
     const { workerCap, teamLimits } = fleetExecutionLimits({ goal, config, diagnostic, native: !multiWorker });
-    const fleetDeadlineAt = Date.now() + 30 * 60_000;
     if (!diagnostic && goal.providerId === 'private-h100') {
       if (typeof reservationId !== 'string' || !/^[\w-]{1,100}$/.test(reservationId)
         || typeof reserveCloud !== 'function' || !Number.isFinite(maxUsd) || maxUsd <= 0) {
@@ -465,6 +487,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     }
     if (multiWorker) {
       const org = await cloudManaged.organization(diagnostic ? config.provisioner.org : flyAccount.orgSlug);
+      assertAdmission(signal, fleetDeadlineAt);
       if (workerCap > 1) {
         onStatus('Creating an owned relay for the bounded Fly Worker tree.');
         relayCleanupConfirmed = false;
@@ -484,6 +507,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
         record({ state: 'relay-ready', relayApp: relay.app, relayMachineId: relay.machineId });
       }
     }
+    assertAdmission(signal, fleetDeadlineAt);
     const topology = fleetTopology(goal, { workerCap, relay: Boolean(relay) });
     const provisioner = await flyProvisioner({ ...config.provisioner, templateWorkspace: bootWorkspace,
       fleetReachable: Boolean(relay), concurrency: workerCap,
@@ -539,7 +563,9 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
       } });
     const address = await controller.listen(0, '127.0.0.1');
     controller.publicUrl = `http://127.0.0.1:${address.port}`;
+    assertAdmission(signal, fleetDeadlineAt);
     await relay?.start(controller.publicUrl);
+    assertAdmission(signal, fleetDeadlineAt);
     const fleetGoal = controller.registry.createGoal({ id: goal.id, text: goal.text, limits: topology.limits });
     fleetGoal.teamLimits = teamLimits; controller.registry.save();
     const root = controller.registry.reserve({ goalId: fleetGoal.id, role: 'supervisor', name: 'Todd' }).worker;
@@ -638,7 +664,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     }
     if (!remoteAccepted && /^POST \/api\/workspaces failed \(HTTP 500\)/.test(String(error.message))) {
       try {
-        workspaceAbsent = !(await boot.workspaces()).includes(bootWorkspace);
+        workspaceAbsent = !(await bootCleanup.workspaces()).includes(bootWorkspace);
       } catch { workspaceAbsent = false; }
       if (workspaceAbsent) {
         bootCreated = false;
@@ -677,7 +703,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     // The boot workspace is ours, but retain it if remote cleanup is uncertain.
     if (bootCreated && !bootRunUnknown && (!remoteAccepted || cleanupConfirmed)) {
       for (let attempt = 0; attempt < 3 && !bootCleanupConfirmed; attempt++) {
-        try { await boot.deleteWorkspace(bootWorkspace); bootCleanupConfirmed = true; }
+        try { await bootCleanup.deleteWorkspace(bootWorkspace); bootCleanupConfirmed = true; }
         catch { if (attempt < 2) await sleep(1000); }
       }
     }

@@ -218,6 +218,77 @@ test('FLUJO HTTP deadline is absolute even while a server keeps sending bytes', 
   } finally { await new Promise((resolve) => server.close(resolve)); }
 });
 
+test('FLUJO Stop refuses new REST calls and holds an interrupted flow submission', async () => {
+  const requests = [];
+  const controller = new AbortController();
+  const server = http.createServer((request, response) => {
+    requests.push(`${request.method} ${new URL(request.url, 'http://local').pathname}`);
+    request.resume();
+    if (request.url.startsWith('/v1/chat/completions')) request.on('end', () => controller.abort());
+    else response.end('{}');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const stopped = new AbortController(); stopped.abort();
+    await assert.rejects(new FlujoClient({ origin, workspace: 'fixture', signal: stopped.signal }).workspaces(),
+      (error) => error.name === 'AbortError' && error.outcome === 'not_applied');
+    await assert.rejects(new FlujoClient({ origin, workspace: 'fixture', deadlineAt: Date.now() - 1 }).workspaces(),
+      /deadline passed before submission/);
+    assert.deepEqual(requests, []);
+    const client = new FlujoClient({ origin, workspace: 'fixture', signal: controller.signal });
+    const result = await client.runFlow({ flowName: 'swarm_boot', prompt: 'fixture', timeoutMs: 1000 });
+    assert.equal(result.status, 'unknown');
+    assert.deepEqual(requests, ['POST /v1/chat/completions']);
+    await assert.rejects(client.workspaces(), (error) => error.name === 'AbortError');
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('Stop during FLUJO reconciliation GET or poll delay returns the original unknown run promptly', async () => {
+  for (const stage of ['get', 'delay']) {
+    const requests = [];
+    const controller = new AbortController();
+    let abortTimer;
+    const server = http.createServer((request, response) => {
+      const pathname = new URL(request.url, 'http://local').pathname;
+      requests.push(`${request.method} ${pathname}`);
+      request.resume();
+      if (request.method === 'POST' && pathname === '/v1/chat/completions') {
+        response.writeHead(502); response.end('{}');
+      } else if (request.method === 'GET' && pathname.startsWith('/v1/chat/conversations/')) {
+        if (stage === 'get') request.on('end', () => controller.abort());
+        else {
+          response.writeHead(200, { 'content-type': 'application/json' });
+          response.end(JSON.stringify({ status: 'running' }));
+          abortTimer = setTimeout(() => controller.abort(), 100);
+        }
+      } else { response.writeHead(404); response.end('{}'); }
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const origin = `http://127.0.0.1:${server.address().port}`;
+      const conversationId = `fixture-${stage}`;
+      const started = Date.now();
+      const result = await new FlujoClient({ origin, workspace: 'fixture', signal: controller.signal })
+        .runFlow({ flowName: 'swarm_boot', prompt: 'fixture', conversationId, timeoutMs: 5000, pollMs: 3000 });
+      assert.equal(result.status, 'unknown', stage);
+      assert.equal(result.conversationId, conversationId, stage);
+      assert.match(result.error, /original outcome is unconfirmed/, stage);
+      assert.ok(Date.now() - started < 1000, `${stage} Stop should not wait for another poll`);
+      assert.deepEqual(requests, [
+        'POST /v1/chat/completions', `GET /v1/chat/conversations/${conversationId}`,
+      ], stage);
+    } finally {
+      clearTimeout(abortTimer);
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  }
+});
+
 test('product Fly admission requires the exact selected provider binding before any probe or intent', async () => {
   const dataDir = mkdtempSync(path.join(tmpdir(), 'seagulled-route-bound-'));
   const valid = { available: true, providerId: 'openai',
@@ -240,12 +311,15 @@ test('private H100 Fly route accepts only the verified owned endpoint identity b
   const dataDir = mkdtempSync(path.join(tmpdir(), 'seagulled-private-route-'));
   const previousProfile = process.env.SEAGULLED_FLEET_PROFILE;
   process.env.SEAGULLED_FLEET_PROFILE = path.join(dataDir, 'missing-profile.json');
-  const valid = { available: true, providerId: 'private-h100', verification: 'previously-verified',
+  const valid = { available: true, providerId: 'private-h100', verification: 'inference-verified',
     costPolicy: 'estimated-gpu-seconds', ownedAttemptId: '11111111-2222-3333-4444-555555555555',
     leaseGoalId: 'owned-goal',
     model: { name: 'qwen3.8-27b', provider: 'openai', adapter: 'openai',
       baseUrl: 'https://owner-seagulled-qwen-a1b2c3d4e5f6.modal.run/v1', apiKey: 'owned-fixture-token' } };
   try {
+    const catalogOnly = await fleetStatus({ dataDir, providerId: 'private-h100',
+      fleetRoute: { ...valid, verification: 'previously-verified' }, goalId: 'owned-goal' });
+    assert.match(catalogOnly.detail, /no usable Fly model binding/);
     const accepted = await fleetStatus({ dataDir, providerId: 'private-h100', fleetRoute: valid, goalId: 'owned-goal' });
     assert.match(accepted.detail, /profile was found/, 'binding passes to tooling discovery without fetching a model');
     assert.equal((await fleetStatus({ dataDir, providerId: 'private-h100', fleetRoute: valid,
@@ -451,6 +525,52 @@ test('keyless Codex boot refusal stops before Fly provisioning and deletes its o
     assert.ok(requests.includes('DELETE /api/workspaces'));
     assert.equal(requests.filter((entry) => entry === 'POST /v1/chat/completions').length, 1);
     assert.equal(requests.some((entry) => entry === 'GET /v1/models'), false);
+  } finally {
+    if (previous === undefined) delete process.env.SEAGULLED_FLEET_PROFILE;
+    else process.env.SEAGULLED_FLEET_PROFILE = previous;
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('Stop during local template installation cannot submit the boot model call', async () => {
+  const requests = [];
+  const controller = new AbortController();
+  const server = http.createServer(async (request, response) => {
+    for await (const _chunk of request) { /* Consume bounded fixture requests. */ }
+    const pathname = new URL(request.url, 'http://local').pathname;
+    requests.push(`${request.method} ${pathname}`);
+    const send = (status, value) => {
+      response.writeHead(status, { 'content-type': 'application/json' });
+      response.end(JSON.stringify(value));
+    };
+    if (pathname === '/api/workspaces' && request.method === 'GET') return send(200, { workspaces: [] });
+    if (pathname === '/api/workspaces' && request.method === 'POST') return send(201, {});
+    if (pathname === '/api/workspaces' && request.method === 'DELETE') return send(200, {});
+    if (pathname === '/api/init') return send(200, {});
+    if (pathname === '/api/model' && request.method === 'GET') {
+      send(200, []);
+      controller.abort();
+      return;
+    }
+    if (pathname === '/api/mcp/servers') return send(200, []);
+    return send(404, {});
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-stop-boot-'));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const profile = path.join(root, 'profile.json');
+  writeFileSync(profile, JSON.stringify({ supervisor: { origin }, provisioner: { kind: 'fly', flujoCloudPath: root },
+    model: { name: 'gpt-6-luna', provider: 'codex', adapter: 'codex-cli', apiKey: '' } }));
+  const previous = process.env.SEAGULLED_FLEET_PROFILE;
+  process.env.SEAGULLED_FLEET_PROFILE = profile;
+  try {
+    await assert.rejects(runFleetLeaf({ goal: { id: 'stopped-boot', text: 'fixture' }, task: 'fixture',
+      dataDir: root, maxUsd: 1, diagnostic: true, signal: controller.signal }),
+    (error) => error.name === 'AbortError' && error.outcome === 'not_applied');
+    assert.ok(requests.includes('DELETE /api/workspaces'));
+    assert.equal(requests.some((entry) => entry === 'POST /v1/chat/completions'), false);
+    assert.equal(requests.some((entry) => entry === 'POST /api/model'), false);
   } finally {
     if (previous === undefined) delete process.env.SEAGULLED_FLEET_PROFILE;
     else process.env.SEAGULLED_FLEET_PROFILE = previous;

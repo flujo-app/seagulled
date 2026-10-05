@@ -5,9 +5,11 @@ import {readFile} from 'node:fs/promises';
 import {join,dirname} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {chromium} from '@playwright/test';
+import {wavFromPcm} from '../ui/voice-capture.mjs';
 
 const ui=join(dirname(fileURLToPath(import.meta.url)),'..','ui');
 const token='ui-movie-test';
+const speechWav=Buffer.from(wavFromPcm([new Float32Array(16000).fill(.12)],16000)).toString('base64');
 async function readJson(request){let raw='';for await(const chunk of request)raw+=chunk;return raw?JSON.parse(raw):{};}
 
 test('fullscreen stage keeps text in dialogs and sends one bounded goal after account sign-in',async t=>{
@@ -19,7 +21,7 @@ test('fullscreen stage keeps text in dialogs and sends one bounded goal after ac
     {id:'anthropic',name:'Anthropic API',connected:false,available:false,methods:['key'],fleetSupported:true,fleetEligible:false,detail:'Requires an API key.'},
   ],spend:{usd:0,reportedUsd:0,estimatedUsd:0},swarm:{status:'idle',admissionPaused:false}};
   const auth={fly:{id:'fly',connected:false,loginAvailable:true,detail:'Fly browser sign-in is ready.'},modal:{id:'modal',connected:false,loginAvailable:true,detail:'Modal browser sign-in is ready.'}};
-  const streams=new Set();const authCalls=[],providerCalls=[];let goalCall,editCall,voiceCapabilityCalls=0,fxQuoteAsOf=new Date(Date.now()-3600000).toISOString();
+  const streams=new Set(),heldSpeech=[];const authCalls=[],providerCalls=[];let goalCall,editCall,voiceCapabilityCalls=0,voiceTranscribe=false,voiceReady=false,speechRequests=0,fxQuoteAsOf=new Date(Date.now()-3600000).toISOString();
   const publish=()=>{for(const client of streams)client.write(`data: ${JSON.stringify({type:'state',state})}\n\n`);};
   const server=createServer(async(req,res)=>{
     const route=new URL(req.url,'http://localhost').pathname;
@@ -29,9 +31,13 @@ test('fullscreen stage keeps text in dialogs and sends one bounded goal after ac
     if(route==='/api/events'){res.writeHead(200,{'Content-Type':'text/event-stream'});res.write(': ready\n\n');streams.add(res);req.on('close',()=>streams.delete(res));return;}
     if(route==='/api/state'){send(200,state);return;}
     if(route==='/api/budget/default'){const currency=new URL(req.url,'http://localhost').searchParams.get('currency');send(200,currency==='COP'?{amount:200000,currency:'COP',allowanceUsd:50,usdPerUnit:0.00025,quoteAsOf:fxQuoteAsOf,quoteSource:'https://www.exchangerate-api.com'}:{amount:50,currency:'USD',allowanceUsd:50,usdPerUnit:1,quoteAsOf:null,quoteSource:null});return;}
-    if(route==='/api/test/state'&&req.method==='POST'){const next=await readJson(req);if(next.spend)state.spend=next.spend;if(next.quoteAsOf)fxQuoteAsOf=next.quoteAsOf;publish();send(200,{ok:true});return;}
+    if(route==='/api/test/state'&&req.method==='POST'){const next=await readJson(req);if(next.spend)state.spend=next.spend;if(next.quoteAsOf)fxQuoteAsOf=next.quoteAsOf;if(next.voice){voiceTranscribe=next.voice.transcribe;voiceReady=next.voice.ready;}if(next.todd)state.conversation.push({id:`t${state.conversation.length}`,role:'todd',text:next.todd,at:new Date().toISOString()});publish();send(200,{ok:true});return;}
+    if(route==='/api/test/speech-state'){send(200,{requests:speechRequests,voiceCapabilityCalls});return;}
+    if(route==='/api/test/release-speech'&&req.method==='POST'){const held=heldSpeech.shift();if(!held){send(409,{error:'No speech request is pending.'});return;}held.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify({mimeType:'audio/wav',dataBase64:speechWav}));send(200,{released:true});return;}
     if(route==='/api/auth/state'){send(200,auth);return;}
-    if(route==='/api/voice/capabilities'){voiceCapabilityCalls++;send(200,{transcribe:false,speak:true,ready:false,status:'unavailable',narration:voiceCapabilityCalls>1?'kokoro':'system',narrationStatus:voiceCapabilityCalls>1?'ready':'preparing',voiceName:voiceCapabilityCalls>1?'Michael (preset)':'Installed system voice',reason:'Voice capture is unavailable in this test browser.'});return;}
+    if(route==='/api/voice/capabilities'){voiceCapabilityCalls++;send(200,{transcribe:voiceTranscribe,speak:true,ready:voiceReady,status:voiceTranscribe?(voiceReady?'ready':'preparing'):'unavailable',narration:voiceCapabilityCalls>1?'kokoro':'system',narrationStatus:voiceCapabilityCalls>1?'ready':'preparing',voiceName:voiceCapabilityCalls>1?'Michael (preset)':'Installed system voice',reason:'Voice capture is unavailable in this test browser.'});return;}
+    if(route==='/api/voice/speak'){speechRequests++;heldSpeech.push(res);return;}
+    if(route==='/api/voice/stop'){send(200,{stopped:true});return;}
     if(route==='/api/auth/connect'){const {id}=await readJson(req);authCalls.push(id);auth[id].connected=true;auth[id].detail=`${id} account sign-in verified; inference remains separate.`;send(200,auth[id]);return;}
     if(route==='/api/auth/cancel'){send(200,{cancelled:true});return;}
     if(route==='/api/providers/discover'){send(200,state.providers);return;}
@@ -45,6 +51,7 @@ test('fullscreen stage keeps text in dialogs and sends one bounded goal after ac
     if(route==='/api/goals/g1'&&req.method==='PATCH'){editCall=await readJson(req);Object.assign(state.goals[0],editCall);publish();send(200,state.goals[0]);return;}
     if(route==='/api/swarm/pause'){state.goals[0].status='paused';state.swarm={status:'paused',admissionPaused:true};publish();send(200,state);return;}
     if(route==='/api/swarm/resume'){state.goals[0].status='running';state.swarm={status:'working',admissionPaused:false};publish();send(200,state);return;}
+    if(route==='/api/swarm/stop'){state.goals[0].status='stopped';state.swarm={status:'idle',admissionPaused:false};publish();send(200,state);return;}
     const file={'/':'index.html','/index.html':'index.html','/app.js':'app.js','/styles.css':'styles.css','/stage.mjs':'stage.mjs','/movie-player.mjs':'movie-player.mjs','/movie-manifest.json':'movie-manifest.json','/goal-input.mjs':'goal-input.mjs','/voice-capture.mjs':'voice-capture.mjs'}[route];
     if(file){const type=file.endsWith('.css')?'text/css':file.endsWith('.html')?'text/html':file.endsWith('.json')?'application/json':'text/javascript';res.writeHead(200,{'Content-Type':type}).end(await readFile(join(ui,file)));return;}
     res.writeHead(404).end();
@@ -53,6 +60,7 @@ test('fullscreen stage keeps text in dialogs and sends one bounded goal after ac
   t.after(()=>{for(const stream of streams)stream.end();server.close();});
   const browser=await chromium.launch({channel:'chrome',headless:true});t.after(()=>browser.close());
   const page=await browser.newPage({viewport:{width:1280,height:800},locale:'es-CO'});
+  await page.addInitScript(()=>{window.fixtureMicrophoneRequests=0;Object.defineProperty(navigator,'mediaDevices',{configurable:true,value:{getUserMedia:async()=>{window.fixtureMicrophoneRequests++;throw new Error('Fixture microphone must stay unused.');}}});});
   await page.goto(`http://127.0.0.1:${server.address().port}/#token=${token}`);
   assert.equal(new URL(page.url()).hash,'');
   await page.locator('#movie[data-scene="idle"]').waitFor();
@@ -154,4 +162,46 @@ test('fullscreen stage keeps text in dialogs and sends one bounded goal after ac
   await page.getByText('Estimated COP equivalents:',{exact:false}).waitFor();
   await page.getByText('COP conversion unavailable: a current dated quote is required. Available spend remains shown in USD.').waitFor();
   await page.getByText('2.50 USD provider-reported · 0.50 USD estimated · 0.75 USD pending.',{exact:false}).waitFor();
+  const fixtureUrl=`http://127.0.0.1:${server.address().port}`;
+  const fixturePost=data=>page.request.post(`${fixtureUrl}/api/test/state`,{headers:{Authorization:`Bearer ${token}`},data});
+  const speechState=async()=>{const response=await page.request.get(`${fixtureUrl}/api/test/speech-state`,{headers:{Authorization:`Bearer ${token}`}});return response.json();};
+  const waitForSpeech=count=>page.waitForFunction(async expected=>{const response=await fetch('/api/test/speech-state',{headers:{Authorization:'Bearer ui-movie-test'}});return (await response.json()).requests>=expected;},count);
+  const releaseSpeech=()=>page.request.post(`${fixtureUrl}/api/test/release-speech`,{headers:{Authorization:`Bearer ${token}`},data:{}});
+  await fixturePost({todd:'The team is working.'});await waitForSpeech(1);
+  await page.getByRole('button',{name:'Pause'}).click();
+  await page.locator('#movie[data-scene="idle"]').waitFor();
+  await releaseSpeech();
+  await page.waitForTimeout(200);
+  assert.equal(await page.locator('#todd-audio').getAttribute('src'),null);
+  assert.equal(await page.locator('#movie').getAttribute('data-mode'),'ready');
+  await fixturePost({todd:'A late note while paused.'});
+  await page.waitForFunction(()=>document.getElementById('live-status').textContent==='Todd responded.');
+  assert.equal((await speechState()).requests,1);
+  await page.getByRole('button',{name:'Resume'}).click();
+  await page.locator('#movie[data-scene="work"]').waitFor();
+  await fixturePost({voice:{transcribe:true,ready:false}});
+  const priorCapabilities=(await speechState()).voiceCapabilityCalls;
+  await page.getByRole('button',{name:'Close advanced controls'}).click();
+  await page.getByRole('button',{name:'Open advanced controls'}).click();
+  await page.waitForFunction(async prior=>{const response=await fetch('/api/test/speech-state',{headers:{Authorization:'Bearer ui-movie-test'}});return (await response.json()).voiceCapabilityCalls>prior;},priorCapabilities);
+  await page.getByRole('button',{name:'Close advanced controls'}).click();
+  await page.getByRole('button',{name:'Speak a goal'}).click();
+  await page.locator('#movie[data-mode="transcribing"]').waitFor();
+  await page.getByRole('button',{name:'Open advanced controls'}).click();
+  await page.getByRole('button',{name:'Pause'}).click();
+  await fixturePost({voice:{transcribe:true,ready:true}});
+  await page.locator('#movie[data-scene="idle"]').waitFor();
+  await page.waitForTimeout(1400);
+  assert.equal(await page.evaluate(()=>window.fixtureMicrophoneRequests),0);
+  assert.equal(await page.locator('#movie').getAttribute('data-mode'),'ready');
+  await page.getByRole('button',{name:'Resume'}).click();
+  await page.locator('#movie[data-scene="work"]').waitFor();
+  await fixturePost({todd:'Another update before stop.'});await waitForSpeech(2);
+  await page.getByRole('button',{name:'Stop'}).click();
+  await page.locator('#movie[data-scene="idle"]').waitFor();
+  await releaseSpeech();
+  await page.waitForTimeout(200);
+  assert.equal(await page.locator('#todd-audio').getAttribute('src'),null);
+  const visibleStageText=await page.locator('#movie').evaluate(stage=>{const walker=document.createTreeWalker(stage,NodeFilter.SHOW_TEXT),visible=[];while(walker.nextNode()){const text=walker.currentNode.textContent.trim(),parent=walker.currentNode.parentElement;if(!text||!parent||parent.closest('.sr-only,[hidden]'))continue;const style=getComputedStyle(parent);if(style.display!=='none'&&style.visibility!=='hidden')visible.push(text);}return visible;});
+  assert.deepEqual(visibleStageText,[]);
 });

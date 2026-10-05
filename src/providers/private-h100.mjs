@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const MODEL = 'qwen3.8-27b';
+const VERIFICATION_VERSION = 2;
 const RATE_USD_PER_SECOND = 0.001097 + 8 * 0.0000131 + 64 * 0.00000222;
 const MAX_REQUEST_MS = 30 * 60_000;
 const IDLE_RESERVE_SECONDS = 60;
@@ -30,6 +31,35 @@ function ownedEndpoint(raw, appName) {
 }
 
 function json(raw) { try { return JSON.parse(raw); } catch { return null; } }
+function verifiedRecord(record) {
+  return record?.verificationVersion === VERIFICATION_VERSION && record?.verifiedModel === MODEL
+    && typeof record?.catalogVerifiedAt === 'string' && typeof record?.completionVerifiedAt === 'string';
+}
+async function boundedJson(response, maxBytes, controller) {
+  if (!response?.body || typeof response.body.getReader !== 'function') throw safeError();
+  const reader = response.body.getReader();
+  const chunks = [];
+  let bytes = 0, complete = false;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) { complete = true; break; }
+      if (!(value instanceof Uint8Array)) throw safeError();
+      bytes += value.byteLength;
+      if (bytes > maxBytes) throw safeError();
+      chunks.push(value);
+    }
+    return json(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, bytes)));
+  } catch {
+    controller.abort();
+    throw safeError();
+  } finally {
+    if (!complete) {
+      try { reader.cancel().catch(() => {}); } catch { /* The controller has already aborted. */ }
+    }
+    reader.releaseLock();
+  }
+}
 function ownedRecord(value) {
   return value?.version === 1 && OWNED_NAME.test(value.appName) && typeof value.attemptId === 'string'
     && /^[a-f0-9-]{36}$/.test(value.attemptId) && typeof value.phase === 'string';
@@ -75,24 +105,27 @@ export class PrivateH100Manager {
     if (this.record?.phase === 'ready') {
       try { this.token = await this.credentialStore?.get?.('private_h100') ?? null; }
       catch { this.token = null; }
-      if (!this.token || !ownedEndpoint(this.record.endpoint, this.record.appName)) this.#save({ ...this.record, phase: 'unknown' });
+      if (!this.token || !ownedEndpoint(this.record.endpoint, this.record.appName)
+        || !verifiedRecord(this.record)) this.#save({ ...this.record, phase: 'unknown' });
     }
     return this.safeState();
   }
 
   safeState({ accountConnected = false, helperUsable = false } = {}) {
-    const phase = this.record?.pendingRunId ? 'unknown' : this.record?.phase ?? 'off';
+    const phase = this.record?.pendingRunId || this.record?.phase === 'ready' && !verifiedRecord(this.record)
+      ? 'unknown' : this.record?.phase ?? 'off';
     const connected = phase === 'ready' && Boolean(this.token);
     const available = Boolean(this.path && accountConnected && helperUsable && this.credentialStore?.set && this.credentialStore?.get);
     const ready = connected && available && !this.busy && !this.activeRun && !this.record?.pendingRunId;
     const provisionable = available && (phase === 'off' || phase === 'retired');
     const detail = !['off', 'ready', 'retired'].includes(phase)
       ? 'An owned private H100 attempt needs reconciliation before further paid work.'
-      : connected ? 'Owned Qwen H100 endpoint was verified; GPU availability and charges are checked per request.'
+      : connected ? 'A bounded Qwen completion succeeded; requests recheck availability and spend remains estimated.'
         : !accountConnected ? 'Sign in to a personal Modal account to offer private H100 compute.'
           : !helperUsable ? 'The packaged Modal helper is unavailable.'
             : 'Private H100 compute is off. Enabling it creates isolated paid resources.';
     return { id: 'private-h100', available, connected, ready, provisionable, status: phase,
+      verificationVersion: connected ? VERIFICATION_VERSION : null,
       cleanupVerified: this.record?.cleanupVerified === true, detail,
       admission: { enableUsd: MIN_ADMISSION_USD, requestUsd: REQUEST_RESERVE_USD,
         kind: 'estimated', excludes: ['storage', 'egress', 'credits', 'invoice adjustments'] },
@@ -139,7 +172,7 @@ export class PrivateH100Manager {
     return { profileName: active[0].name, workspaceName: active[0].workspace };
   }
 
-  async #modelProbe(endpoint, token, signal) {
+  async #modelProbe(endpoint, token, attemptId, signal) {
     const controller = new AbortController();
     const abort = () => controller.abort();
     if (signal?.aborted) controller.abort();
@@ -148,11 +181,27 @@ export class PrivateH100Manager {
     try {
       const response = await this.fetch(`${endpoint}/v1/models`, { headers: { authorization: `Bearer ${token}` },
         signal: controller.signal, redirect: 'error' });
-      if (!response.ok) throw safeError();
-      const raw = await response.text();
-      if (raw.length > 64_000) throw safeError();
-      const models = json(raw)?.data;
+      if (!response.ok) { controller.abort(); throw safeError(); }
+      const models = (await boundedJson(response, 64_000, controller))?.data;
       if (!Array.isArray(models) || !models.some(item => item?.id === MODEL)) throw safeError();
+      this.#save({ ...this.record, catalogVerifiedAt: new Date(this.clock()).toISOString() });
+      const challenge = `SEAGULLED-${attemptId.slice(0, 8).toUpperCase()}`;
+      const completion = await this.fetch(`${endpoint}/v1/chat/completions`, { method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+        body: JSON.stringify({ model: MODEL, temperature: 0, max_tokens: 48, stream: false,
+          chat_template_kwargs: { enable_thinking: false },
+          messages: [{ role: 'user', content: `Reply with exactly this text and nothing else: ${challenge}` }] }),
+        signal: controller.signal, redirect: 'error' });
+      if (!completion.ok) { controller.abort(); throw safeError(); }
+      const result = await boundedJson(completion, 64_000, controller);
+      if (controller.signal.aborted) throw safeError();
+      const choice = result?.choices?.[0];
+      if (result?.model !== MODEL || !Array.isArray(result?.choices) || result.choices.length !== 1
+        || choice?.message?.role !== 'assistant' || typeof choice.message.content !== 'string'
+        || choice.message.content.trim() !== challenge
+        || choice.finish_reason !== 'stop') throw safeError();
+      return { verificationVersion: VERIFICATION_VERSION, verifiedModel: MODEL,
+        completionVerifiedAt: new Date(this.clock()).toISOString() };
     } finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
   }
 
@@ -190,8 +239,9 @@ export class PrivateH100Manager {
       const endpoint = result?.code === 0 && ownedEndpoint(json(result.stdout)?.endpoint, appName);
       if (!endpoint) throw safeError();
       this.#save({ ...this.record, endpoint, phase: 'unverified' });
-      await this.#modelProbe(endpoint, token, signal);
-      this.#save({ ...this.record, phase: 'ready', verifiedAt: new Date(this.clock()).toISOString() });
+      const verification = await this.#modelProbe(endpoint, token, attemptId, signal);
+      this.#save({ ...this.record, ...verification, phase: 'ready',
+        verifiedAt: new Date(this.clock()).toISOString() });
       return { ...this.safeState({ accountConnected, helperUsable }), ready: true, reservation, usage: {
         reservationId: reservation.id,
         costUsd: Math.round(((this.clock() - started) / 1000 + IDLE_RESERVE_SECONDS) * RATE_USD_PER_SECOND * 1e6) / 1e6,
@@ -257,7 +307,8 @@ export class PrivateH100Manager {
 
   leaseGoal(goalId) {
     if (!validGoalId(goalId)) throw notApplied('Private H100 goal ID is invalid.');
-    if (this.busy || this.activeRun || this.record?.phase !== 'ready' || this.record?.pendingRunId || !this.token)
+    if (this.busy || this.activeRun || this.record?.phase !== 'ready' || !verifiedRecord(this.record)
+      || this.record?.pendingRunId || !this.token)
       throw notApplied('Private H100 is not ready for a goal lease.');
     if (this.record.leaseGoalId && this.record.leaseGoalId !== goalId)
       throw notApplied('Private H100 is already leased to another goal.');
@@ -275,7 +326,8 @@ export class PrivateH100Manager {
   }
 
   fleetRoute(goalId) {
-    if (this.busy || this.activeRun || this.record?.phase !== 'ready' || this.record?.pendingRunId
+    if (this.busy || this.activeRun || this.record?.phase !== 'ready' || !verifiedRecord(this.record)
+      || this.record?.pendingRunId
       || this.record.workerAllowed !== true || !this.token)
       return { available: false, detail: 'Enable and verify the isolated private H100 endpoint first.' };
     if (!validGoalId(goalId) || this.record.leaseGoalId !== goalId)
@@ -283,8 +335,9 @@ export class PrivateH100Manager {
     const endpoint = ownedEndpoint(this.record.endpoint, this.record.appName);
     if (!endpoint) return { available: false, detail: 'The owned private H100 endpoint needs reconciliation.' };
     return { available: true, providerId: 'private-h100', model: { name: MODEL, baseUrl: `${endpoint}/v1`,
-      apiKey: this.token, provider: 'openai', adapter: 'openai' }, verification: 'previously-verified',
-      costPolicy: 'estimated-gpu-seconds', ownedAttemptId: this.record.attemptId, leaseGoalId: goalId };
+      apiKey: this.token, provider: 'openai', adapter: 'openai' }, verification: 'inference-verified',
+      costPolicy: 'estimated-gpu-seconds', verificationVersion: VERIFICATION_VERSION,
+      ownedAttemptId: this.record.attemptId, leaseGoalId: goalId };
   }
 
   async run({ prompt, signal, maxUsd, goalId, requestId } = {}) {
@@ -310,11 +363,12 @@ export class PrivateH100Manager {
         headers: { 'content-type': 'application/json', authorization: `Bearer ${this.token}` },
         body: JSON.stringify({ model: MODEL, max_tokens: 1024, messages: [{ role: 'user', content: prompt }] }),
         signal: controller.signal, redirect: 'error' });
-      const raw = await response.text();
-      if (!response.ok || raw.length > 256_000) throw safeError();
-      const result = json(raw);
+      if (!response.ok) { controller.abort(); throw safeError(); }
+      const result = await boundedJson(response, 256_000, controller);
+      if (controller.signal.aborted) throw safeError();
       const text = result?.choices?.[0]?.message?.content;
-      if (typeof text !== 'string' || !text.trim()) throw safeError();
+      if (result?.model !== MODEL || result?.choices?.[0]?.message?.role !== 'assistant'
+        || typeof text !== 'string' || !text.trim()) throw safeError();
       this.#save({ ...this.record, pendingRunId: undefined, pendingRunAt: undefined,
         pendingReservation: undefined, lastRunId: runId });
       return { text: text.slice(0, 80_000), reservation, usage: { inputTokens: result?.usage?.prompt_tokens ?? null,

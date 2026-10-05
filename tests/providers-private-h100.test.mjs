@@ -7,8 +7,9 @@ import { PrivateH100Manager } from '../src/providers/private-h100.mjs';
 import { ProviderManager } from '../src/providers/index.mjs';
 
 function fixture(dataDir, { failProvision = false, holdProvision = false,
-  holdRun = false, missingApp = false, onCredentialSet } = {}) {
+  holdRun = false, missingApp = false, onCredentialSet, responseOverride } = {}) {
   const calls = [];
+  const requests = [];
   const secrets = new Map();
   let appName, token;
   let workspace = 'fixture-workspace';
@@ -45,29 +46,56 @@ function fixture(dataDir, { failProvision = false, holdProvision = false,
       throw new Error('Unexpected fixture command');
     },
     fetchImpl: async (url, options) => {
+      requests.push({ url, options });
       assert.match(url, new RegExp(appName));
       assert.equal(options.headers.authorization, `Bearer ${token}`);
-      if (url.endsWith('/v1/models')) return { ok: true, text: async () => JSON.stringify({ data: [{ id: 'qwen3.8-27b' }] }) };
+      const override = await responseOverride?.(url, options);
+      if (override !== undefined) return override;
+      if (url.endsWith('/v1/models')) return new Response(JSON.stringify({ data: [{ id: 'qwen3.8-27b' }] }));
+      const request = JSON.parse(options.body);
+      if (request.max_tokens === 48) {
+        assert.equal(request.model, 'qwen3.8-27b');
+        assert.equal(request.temperature, 0);
+        assert.equal(request.chat_template_kwargs.enable_thinking, false);
+        const challenge = request.messages[0].content.match(/SEAGULLED-[A-F0-9]{8}/)?.[0];
+        assert.ok(challenge);
+        return new Response(JSON.stringify({ model: 'qwen3.8-27b', choices: [{
+          message: { role: 'assistant', content: challenge }, finish_reason: 'stop' }] }));
+      }
       if (holdRun && url.endsWith('/v1/chat/completions')) return new Promise((resolve, reject) => {
         options.signal.addEventListener('abort', () => reject(new Error('fixture request aborted')), { once: true });
       });
-      if (url.endsWith('/v1/chat/completions')) return { ok: true,
-        text: async () => JSON.stringify({ choices: [{ message: { content: 'fixture answer' } }], usage: { prompt_tokens: 12, completion_tokens: 3 } }) };
+      if (url.endsWith('/v1/chat/completions')) return new Response(JSON.stringify({ model: 'qwen3.8-27b',
+        choices: [{ message: { role: 'assistant', content: 'fixture answer' } }],
+        usage: { prompt_tokens: 12, completion_tokens: 3 } }));
       throw new Error('Unexpected fixture URL');
     },
   });
-  return { manager, calls, secrets, setWorkspace: value => { workspace = value; } };
+  return { manager, calls, requests, secrets, setWorkspace: value => { workspace = value; } };
+}
+
+function oversizedResponse(counter) {
+  const response = new Response(new ReadableStream({
+    pull(controller) {
+      counter.pulls++;
+      if (counter.pulls > 1000) { controller.close(); return; }
+      controller.enqueue(new Uint8Array(8192).fill(32));
+    },
+  }));
+  response.text = () => { throw new Error('Unbounded response.text() was called.'); };
+  return response;
 }
 
 test('isolated H100 enable, run, and retirement use only owned resources', async () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'seagulled-private-test-'));
   try {
-    const { manager, calls, secrets } = fixture(dataDir);
+    const { manager, calls, requests, secrets } = fixture(dataDir);
     await assert.rejects(manager.enable({ budgetUsd: 25, accountConnected: true, helperUsable: true }),
       error => error.outcome === 'not_applied');
     const state = await manager.enable({ budgetUsd: 25, accountConnected: true, helperUsable: true, workerAllowed: true });
     assert.equal(state.connected, true);
     assert.equal(state.ready, true);
+    assert.equal(state.verificationVersion, 2);
     assert.equal(state.admission.enableUsd, 6);
     assert.equal(state.admission.kind, 'estimated');
     assert.equal(state.estimate.enableUsd, 6);
@@ -78,8 +106,15 @@ test('isolated H100 enable, run, and retirement use only owned resources', async
     assert.doesNotMatch(JSON.stringify(state), /modal\.run|Bearer|seagulled-qwen-/);
     const journal = readFileSync(join(dataDir, 'private-h100', 'attempt.json'), 'utf8');
     assert.doesNotMatch(journal, new RegExp(secrets.get('private_h100')));
+    assert.equal(JSON.parse(journal).verificationVersion, 2);
+    assert.equal(JSON.parse(journal).verifiedModel, 'qwen3.8-27b');
+    assert.ok(JSON.parse(journal).catalogVerifiedAt);
+    assert.ok(JSON.parse(journal).completionVerifiedAt);
+    assert.equal(requests.filter(request => request.url.endsWith('/v1/chat/completions')
+      && JSON.parse(request.options.body).max_tokens === 48).length, 1);
     assert.equal(manager.fleetRoute('goal-a').available, false);
     manager.leaseGoal('goal-a');
+    assert.equal(manager.fleetRoute('goal-a').verification, 'inference-verified');
     assert.throws(() => manager.leaseGoal('goal-b'), error => error.outcome === 'not_applied');
     const route = manager.fleetRoute('goal-a');
     assert.equal(route.available, true);
@@ -259,4 +294,116 @@ test('provider facade forwards private goal and request IDs into the usage recei
   assert.equal(received.requestId, 'request-a');
   assert.equal(result.usage.reservationId, 'request-a');
   assert.equal(events.find(event => event.type === 'usage').usage.reservationId, 'request-a');
+});
+
+test('a catalog match without the expected executable Qwen completion never becomes ready', async () => {
+  for (const failure of ['catalog', 'model', 'answer', 'finish']) {
+    const dataDir = mkdtempSync(join(tmpdir(), 'seagulled-private-test-'));
+    try {
+      const { manager, requests } = fixture(dataDir, { responseOverride: (url, options) => {
+        if (failure === 'catalog' && url.endsWith('/v1/models'))
+          return new Response(JSON.stringify({ data: [{ id: 'different-model' }] }));
+        if (!url.endsWith('/v1/chat/completions')) return undefined;
+        const request = JSON.parse(options.body);
+        const challenge = request.messages[0].content.match(/SEAGULLED-[A-F0-9]{8}/)?.[0];
+        return new Response(JSON.stringify({ model: failure === 'model' ? 'different-model' : 'qwen3.8-27b',
+          choices: [{ message: { role: 'assistant', content: failure === 'answer' ? 'wrong' : challenge },
+            finish_reason: failure === 'finish' ? 'length' : 'stop' }] }));
+      } });
+      await assert.rejects(manager.enable({ budgetUsd: 50, accountConnected: true,
+        helperUsable: true, workerAllowed: true }), error => error.code === 'UNKNOWN');
+      const record = JSON.parse(readFileSync(join(dataDir, 'private-h100', 'attempt.json'), 'utf8'));
+      assert.equal(record.phase, 'unknown', failure);
+      assert.equal(record.verificationVersion, undefined, failure);
+      assert.equal(manager.safeState({ accountConnected: true, helperUsable: true }).ready, false);
+      assert.equal(manager.fleetRoute('goal-a').available, false);
+      const probes = requests.filter(item => item.url.endsWith('/v1/chat/completions'));
+      assert.equal(probes.length, failure === 'catalog' ? 0 : 1, failure);
+    } finally { rmSync(dataDir, { recursive: true, force: true }); }
+  }
+});
+
+test('aborting the single startup completion stream retains the original admission hold', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'seagulled-private-test-'));
+  try {
+    let started;
+    const probeStarted = new Promise(resolve => { started = resolve; });
+    const controller = new AbortController();
+    const { manager, requests } = fixture(dataDir, { responseOverride: (url, options) => {
+      if (!url.endsWith('/v1/chat/completions')) return undefined;
+      started();
+      return new Response(new ReadableStream({
+        start(stream) {
+          stream.enqueue(new TextEncoder().encode('{"model":'));
+          options.signal.addEventListener('abort', () => stream.error(new Error('fixture stream aborted')),
+            { once: true });
+        },
+      }));
+    } });
+    const enable = manager.enable({ budgetUsd: 50, accountConnected: true, helperUsable: true,
+      workerAllowed: true, admissionId: 'startup-probe', signal: controller.signal });
+    await probeStarted;
+    controller.abort();
+    await assert.rejects(enable, error => error.code === 'UNKNOWN'
+      && error.reservation.id === 'startup-probe');
+    const record = JSON.parse(readFileSync(join(dataDir, 'private-h100', 'attempt.json'), 'utf8'));
+    assert.equal(record.phase, 'unknown');
+    assert.equal(record.reservation.id, 'startup-probe');
+    assert.equal(requests.filter(item => item.url.endsWith('/v1/chat/completions')).length, 1);
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('startup catalog and completion responses stop reading at the byte limit', async () => {
+  for (const phase of ['catalog', 'completion']) {
+    const dataDir = mkdtempSync(join(tmpdir(), 'seagulled-private-test-'));
+    const counter = { pulls: 0 };
+    try {
+      const { manager, requests } = fixture(dataDir, { responseOverride: (url) => {
+        if (phase === 'catalog' && url.endsWith('/v1/models')
+          || phase === 'completion' && url.endsWith('/v1/chat/completions'))
+          return oversizedResponse(counter);
+        return undefined;
+      } });
+      await assert.rejects(manager.enable({ budgetUsd: 50, accountConnected: true,
+        helperUsable: true, workerAllowed: true }), error => error.code === 'UNKNOWN');
+      assert.ok(counter.pulls > 0 && counter.pulls < 40, phase);
+      assert.equal(manager.safeState({ accountConnected: true, helperUsable: true }).status, 'unknown');
+      assert.equal(requests.filter(item => item.url.endsWith('/v1/chat/completions')).length,
+        phase === 'catalog' ? 0 : 1);
+    } finally { rmSync(dataDir, { recursive: true, force: true }); }
+  }
+});
+
+test('oversized ordinary completion retains its exact pending request and blocks replay', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'seagulled-private-test-'));
+  const counter = { pulls: 0 };
+  try {
+    const { manager } = fixture(dataDir, { responseOverride: (url, options) => {
+      if (url.endsWith('/v1/chat/completions') && JSON.parse(options.body).max_tokens === 1024)
+        return oversizedResponse(counter);
+      return undefined;
+    } });
+    await manager.enable({ budgetUsd: 50, accountConnected: true, helperUsable: true, workerAllowed: true });
+    manager.leaseGoal('goal-a');
+    await assert.rejects(manager.run({ prompt: 'bounded task', maxUsd: 25,
+      goalId: 'goal-a', requestId: 'oversized-run' }),
+    error => error.code === 'UNKNOWN' && error.reservation.id === 'oversized-run');
+    assert.ok(counter.pulls > 0 && counter.pulls < 80);
+    const record = JSON.parse(readFileSync(join(dataDir, 'private-h100', 'attempt.json'), 'utf8'));
+    assert.equal(record.pendingRunId, 'oversized-run');
+    assert.equal(manager.fleetRoute('goal-a').available, false);
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('an older catalog-only receipt is not accepted as executable readiness', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'seagulled-private-test-'));
+  try {
+    const { manager } = fixture(dataDir);
+    await manager.enable({ budgetUsd: 50, accountConnected: true, helperUsable: true, workerAllowed: true });
+    manager.record = { ...manager.record, verificationVersion: 1 };
+    assert.equal(manager.safeState({ accountConnected: true, helperUsable: true }).status, 'unknown');
+    assert.equal(manager.fleetRoute('goal-a').available, false);
+    await manager.restore();
+    assert.equal(manager.record.phase, 'unknown');
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });

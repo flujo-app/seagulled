@@ -13,7 +13,7 @@ test('real runtime, provider and coordinator contracts settle fixture GPU reques
     const target = path.join(helperRoot, name + (process.platform === 'win32' && !name.endsWith('.py') ? '.exe' : ''));
     mkdirSync(path.dirname(target), { recursive: true }); writeFileSync(target, 'fixture helper; never executed');
   }
-  const secrets = new Map(); let appName, token, requests = 0;
+  const secrets = new Map(); let appName, token, requests = 0, startupChecks = 0;
   const responses = [JSON.stringify({ done: false, tasks: [{ task: 'Prepare a fixture plan.' }] }),
     'Fixture plan prepared.', 'Fixture review checked the plan.', JSON.stringify({ done: true, response: 'Fixture plan reviewed.' })];
   const providers = new ProviderManager({ dataDir: providerDir, helperRoot,
@@ -42,11 +42,30 @@ test('real runtime, provider and coordinator contracts settle fixture GPU reques
       const savedBytes = readFileSync(path.join(dataDir, 'state.json'), 'utf8');
       assert.equal(savedBytes.includes(token), false);
       const saved = JSON.parse(savedBytes), attempt = JSON.parse(readFileSync(path.join(providerDir, 'private-h100/attempt.json')));
+      const payload = JSON.parse(options.body);
+      assert.equal(payload.model, 'qwen3.8-27b');
+      if (payload.max_tokens === 48) {
+        assert.equal(payload.chat_template_kwargs.enable_thinking, false);
+        assert.equal(saved.goals[0].privateCompute.admissionId, attempt.reservation.id);
+        assert.equal(saved.goals[0].pendingUsd, 6);
+        assert.equal(attempt.phase, 'unverified');
+        assert.equal(attempt.pendingRunId, undefined);
+        assert.equal(attempt.leaseGoalId, undefined);
+        assert.equal(typeof attempt.catalogVerifiedAt, 'string');
+        const challenge = `SEAGULLED-${attempt.attemptId.slice(0, 8).toUpperCase()}`;
+        assert.equal(payload.messages[0].content, `Reply with exactly this text and nothing else: ${challenge}`);
+        startupChecks++;
+        return new Response(JSON.stringify({ model: 'qwen3.8-27b', choices: [{
+          message: { role: 'assistant', content: challenge }, finish_reason: 'stop',
+        }] }));
+      }
       assert.equal(attempt.leaseGoalId, saved.goals[0].id);
       assert.equal(saved.goals[0].reservations[attempt.pendingRunId].amountUsd, 2.5);
       assert.equal(saved.goals[0].pendingUsd, 2.5);
       requests++;
-      return new Response(JSON.stringify({ choices: [{ message: { content: responses.shift() } }], usage: { prompt_tokens: 8, completion_tokens: 4 } }));
+      return new Response(JSON.stringify({ model: 'qwen3.8-27b', choices: [{ message: {
+        role: 'assistant', content: responses.shift(),
+      } }], usage: { prompt_tokens: 8, completion_tokens: 4 } }));
     },
   });
   const previous = process.env.SEAGULLED_DISABLE_FLEET; process.env.SEAGULLED_DISABLE_FLEET = '1';
@@ -59,6 +78,11 @@ test('real runtime, provider and coordinator contracts settle fixture GPU reques
   const goal = await runtime.chat('Prepare a clearly labelled fixture plan.', { privateH100: true });
   const result = await runtime.wait(goal.id);
   assert.equal(result.status, 'completed', result.error); assert.equal(requests, 4);
+  assert.equal(startupChecks, 1);
+  const attempt = JSON.parse(readFileSync(path.join(providerDir, 'private-h100/attempt.json')));
+  assert.equal(attempt.verificationVersion, 2);
+  assert.equal(attempt.verifiedModel, 'qwen3.8-27b');
+  assert.equal(typeof attempt.completionVerifiedAt, 'string');
   assert.equal(result.pendingUsd, 0); assert.equal(result.privateCompute.cleanupStatus, 'verified');
   assert.equal(Object.values(result.reservations).filter(entry => entry.status === 'settled').length, 4);
   assert.equal(runtime.snapshot().spend.reportedUsd, 0); assert.equal(secrets.size, 0);
