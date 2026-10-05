@@ -5,6 +5,7 @@ import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { startRelayAgent } from '../../upstream/swarm-teams/fleet/relay.mjs';
+import { assertAppNetwork, assertNetworkVacant, assertProductNetwork, readFlyOrgApps } from './fly-network.mjs';
 
 const RELAY_SOURCE = fileURLToPath(new URL('../../upstream/swarm-teams/fleet/relay.mjs', import.meta.url));
 const API = 'https://api.machines.dev/v1';
@@ -17,10 +18,17 @@ const flyArray = (output, label) => {
   return value;
 };
 
-export async function createOwnedRelay({ journalPath, flujoCloudPath, org, region = 'iad', fetchImpl = fetch,
-  spawnImpl = spawn, flyRunner, flyEnv, flyctlPath, portAllocator, agentFactory = startRelayAgent } = {}) {
+export async function createOwnedRelay({ journalPath, flujoCloudPath, org, network, accountRef,
+  region = 'iad', fetchImpl = fetch,
+  spawnImpl = spawn, flyRunner, flyEnv, flyctlPath, portAllocator,
+  onPlannedApp, verifyNetwork, agentFactory = startRelayAgent } = {}) {
   if (!journalPath || existsSync(journalPath)) throw new Error('Relay intent already exists; reconcile the original resource before creating another.');
   if (!/^[a-z0-9-]{1,64}$/.test(org ?? '') || !/^[a-z]{3}$/.test(region)) throw new Error('A valid Fly organization and region are required.');
+  assertProductNetwork(network);
+  if (onPlannedApp && (typeof accountRef !== 'string'
+    || !/^fly-account-sha256:[a-f0-9]{64}$/.test(accountRef))) {
+    throw new Error('A pinned private Fly account reference is required for the product relay.');
+  }
   let fly = flyRunner;
   let allocate = portAllocator;
   if (!fly || !allocate) {
@@ -35,7 +43,8 @@ export async function createOwnedRelay({ journalPath, flujoCloudPath, org, regio
   const app = `seagulled-relay-${randomBytes(6).toString('hex')}`;
   const secret = randomBytes(32).toString('base64url');
   const owner = randomBytes(16).toString('hex');
-  let state = { version: 1, kind: 'seagulled-owned-relay', app, org, region, secret,
+  let state = { version: 1, kind: 'seagulled-owned-relay', app, org, network, accountRef,
+    region, secret,
     owner, appCreated: false, appId: null, ownershipConfirmed: false, machineId: null,
     state: 'planned', createdAt: new Date().toISOString() };
   writeFileSync(journalPath, JSON.stringify(state), { flag: 'wx', mode: 0o600 });
@@ -63,6 +72,7 @@ export async function createOwnedRelay({ journalPath, flujoCloudPath, org, regio
     if (details.id !== state.appId || details.name !== app || details.organization?.slug !== org) {
       throw new Error('Relay app identity changed; preserve the journal without deleting this app.');
     }
+    assertAppNetwork(await readFlyOrgApps({ org, token, fetchImpl }), { app, appId: state.appId, network });
     if (!state.ownershipConfirmed) throw new Error('Relay app ownership marker was not confirmed.');
     const secrets = flyArray(await fly.run(['secrets', 'list', '--app', app, '--json']), 'secret');
     if (!secrets.some((entry) => (entry?.Name ?? entry?.name) === ownerMarker(owner))) {
@@ -99,6 +109,7 @@ export async function createOwnedRelay({ journalPath, flujoCloudPath, org, regio
         record({ state: 'retired', cleanupConfirmed: true });
         return true;
       }
+      await verifyNetwork?.({ allowPending: true });
       await ownedMachines();
       await noVolumes();
     } catch (error) {
@@ -112,10 +123,13 @@ export async function createOwnedRelay({ journalPath, flujoCloudPath, org, regio
     return confirmed;
   };
   try {
+    await onPlannedApp?.({ app, org, network, accountRef, kind: 'relay' });
     token = (await fly.run(['auth', 'token'])).trim();
     if (!token) throw new Error('Fly authentication is unavailable.');
+    assertNetworkVacant(await readFlyOrgApps({ org, token, fetchImpl }), network);
+    await verifyNetwork?.({ allowPending: true });
     record({ state: 'creating-app' });
-    await fly.run(['apps', 'create', app, '--org', org, '--json', '--yes']);
+    await fly.run(['apps', 'create', app, '--org', org, '--network', network, '--json', '--yes']);
     record({ appCreated: true, state: 'verifying-app' });
     // Capture the new app's stable ID before any Machine mutation.
     const details = await request('GET', `/apps/${app}`);
@@ -125,6 +139,8 @@ export async function createOwnedRelay({ journalPath, flujoCloudPath, org, regio
       throw new Error('New relay app identity could not be confirmed.');
     }
     record({ appId: value.id, state: 'marking-app' });
+    assertAppNetwork(await readFlyOrgApps({ org, token, fetchImpl }), { app, appId: value.id, network });
+    await verifyNetwork?.({ allowPending: true });
     await fly.run(['secrets', 'import', '--app', app, '--stage'], { input: `${ownerMarker(owner)}=1\n` });
     const secrets = flyArray(await fly.run(['secrets', 'list', '--app', app, '--json']), 'secret');
     if (!secrets.some((entry) => (entry?.Name ?? entry?.name) === ownerMarker(owner))) {
@@ -143,9 +159,11 @@ export async function createOwnedRelay({ journalPath, flujoCloudPath, org, regio
     if (typeof machine.id !== 'string' || !/^[a-zA-Z0-9]+$/.test(machine.id)) throw new Error('Fly returned an invalid relay Machine identity.');
     record({ machineId: machine.id, state: 'ready' });
     return {
-      app, machineId: machine.id, remoteUrl: `http://${app}.internal:4300`,
+      app, appId: value.id, machineId: machine.id, remoteUrl: `http://${app}.internal:4300`,
       async start(controllerOrigin) {
         if (proxy) throw new Error('Relay transport is already running.');
+        await verifyNetwork?.({ allowPending: true });
+        if (!(await ownedApp())) throw new Error('Owned relay app disappeared before proxy connection.');
         const port = await allocate();
         const binary = flyctlPath ?? flyEnv?.FLYCTL_PATH ?? process.env.FLYCTL_PATH ?? 'flyctl';
         proxy = spawnImpl(binary, ['proxy', `${port}:4300`, `${machine.id}.vm.${app}.internal`,

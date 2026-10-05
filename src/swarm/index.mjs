@@ -26,7 +26,8 @@ const companyStamp = (goal) => JSON.stringify({ id: goal.id, text: goal.text,
   agentsPerWorker: goal.agentsPerWorker, privateH100: goal.privateH100,
   executionMode: goal.executionMode, workerTopologyVersion: goal.workerTopologyVersion });
 const sameFlyAccount = (left, right) => left?.orgSlug === right?.orgSlug
-  && left?.flyctlPath === right?.flyctlPath && left?.flyConfigDir === right?.flyConfigDir;
+  && left?.flyctlPath === right?.flyctlPath && left?.flyConfigDir === right?.flyConfigDir
+  && left?.scope === right?.scope && left?.accountRef === right?.accountRef;
 const sourceFields = Object.freeze(['cloudSdkRoot', 'sourceOrigin', 'sourceInstanceDir', 'sourceDataRoot', 'sourceAppRoot']);
 const completeSourceBinding = (binding) => Boolean(binding
   && sourceFields.every((key) => typeof binding[key] === 'string' && binding[key]));
@@ -374,6 +375,13 @@ export class SwarmCoordinator {
             const remote = await this.fleetRunner({ goal: remoteGoal, task: `ASSIGNMENT:\n${task}\n\nWork in your isolated sandbox. Report what was actually run and checked, plus paths and limits.`,
               dataDir: this.dataDir, signal, maxUsd: remaining, fleetRoute: route,
               flyAccount: admission.flyAccount,
+              assertFlyAccountCurrent: (lease, { signal: currentSignal } = {}) => {
+                if (typeof this.providers.assertFlyAccountLeaseCurrent !== 'function') {
+                  throw companyUnavailable('account');
+                }
+                return this.providers.assertFlyAccountLeaseCurrent(
+                  { available: true, ...lease }, { signal: currentSignal });
+              },
               sourceBinding: admission.sourceBinding,
               reservationId: `${run.id}-fly`,
               reserveCloud: (reservation) => this.emit({ type: 'reservation', goalId: goal.id, reservation }),

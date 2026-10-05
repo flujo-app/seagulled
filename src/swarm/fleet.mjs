@@ -9,6 +9,7 @@ import { FlujoClient } from '../../upstream/swarm-teams/lib/flujo-client.mjs';
 import { installTemplate } from '../../upstream/swarm-teams/install.mjs';
 import { collectFlyArtifacts } from '../artifacts/fly.mjs';
 import { createOwnedRelay } from './relay.mjs';
+import { assertNetworkVacant, assertPlannedNetworkMembers, readFlyOrgApps } from './fly-network.mjs';
 
 const legacyProfilePath = () => path.join(process.env.SWARM_TEAMS_HOME || path.join(homedir(), '.swarm-teams'), 'config.json');
 const profilePath = () => process.env.SEAGULLED_FLEET_PROFILE || legacyProfilePath();
@@ -28,7 +29,10 @@ const regularFile = (value) => {
 const validFlyAccount = (account) => Boolean(account
   && typeof account.flyConfigDir === 'string' && path.isAbsolute(account.flyConfigDir)
   && regularFile(account.flyctlPath) && regularFile(path.join(account.flyConfigDir, 'config.yml'))
-  && typeof account.orgSlug === 'string' && /^[a-z0-9][a-z0-9-]{0,62}$/.test(account.orgSlug));
+  && typeof account.orgSlug === 'string' && /^[a-z0-9][a-z0-9-]{0,62}$/.test(account.orgSlug)
+  && ['private', 'shared'].includes(account.scope)
+  && typeof account.accountRef === 'string'
+  && /^fly-account-sha256:[a-f0-9]{64}$/.test(account.accountRef));
 /** Backend-only, read-only account lease. It never returns a Fly token or public path. */
 export async function flyAccountLease(providers, signal) {
   if (typeof providers?.flyFleetLease !== 'function') return null;
@@ -37,7 +41,8 @@ export async function flyAccountLease(providers, signal) {
     return null;
   });
   return lease?.available === true && validFlyAccount(lease)
-    ? { flyctlPath: lease.flyctlPath, flyConfigDir: lease.flyConfigDir, orgSlug: lease.orgSlug } : null;
+    ? { flyctlPath: lease.flyctlPath, flyConfigDir: lease.flyConfigDir,
+      orgSlug: lease.orgSlug, scope: lease.scope, accountRef: lease.accountRef } : null;
 }
 /** The cloud SDK and all Fly CLI children receive only this selected personal account. */
 export function isolatedFlyEnvironment(account, sourceEnv = process.env, sourceInstanceDir) {
@@ -485,6 +490,7 @@ export async function fleetDiagnosticStatus({ dataDir } = {}) {
 /** One owned Fly leaf, with no existing fleet writer or Machine adoption. */
 export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetRoute,
   diagnostic = false, reservationId, reserveCloud, flyAccount, sourceBinding,
+  assertFlyAccountCurrent,
   onStatus = () => undefined, onCompany = () => undefined }) {
   if (!goal || typeof goal.id !== 'string' || !/^[\w-]{1,100}$/.test(goal.id)) throw new Error('A safe goal id is required for isolated fleet work.');
   goalCapacity(goal);
@@ -511,13 +517,50 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
   if ((await boot.workspaces()).includes(bootWorkspace)) throw unknown('The isolated FLUJO boot workspace already exists. Reconcile it before cloning.');
   assertAdmission(signal, fleetDeadlineAt);
   mkdirSync(path.dirname(intentPath), { recursive: true, mode: 0o700 });
-  let intent = { version: 1, goalId: goal.id, bootWorkspace, state: 'preparing', createdAt: new Date().toISOString() };
+  let intent = { version: 1, goalId: goal.id, bootWorkspace,
+    network: `seagulled-g-${randomBytes(16).toString('hex')}`,
+    org: diagnostic ? config.provisioner.org : flyAccount.orgSlug,
+    accountRef: diagnostic ? null : flyAccount.accountRef,
+    apps: {}, state: 'preparing', createdAt: new Date().toISOString() };
   writeFileSync(intentPath, JSON.stringify(intent), { flag: 'wx', mode: 0o600 });
   const record = (patch) => {
     intent = { ...intent, ...patch, updatedAt: new Date().toISOString() };
     const temporary = `${intentPath}.${process.pid}.tmp`;
     writeFileSync(temporary, JSON.stringify(intent), { mode: 0o600 });
     renameSync(temporary, intentPath);
+  };
+  const planApp = ({ app, org, network, accountRef, kind }) => {
+    if (!/^[a-z][a-z0-9-]{2,62}$/.test(app ?? '')
+      || !['relay', 'worker'].includes(kind) || org !== intent.org || network !== intent.network
+      || accountRef !== intent.accountRef
+      || intent.apps[app]) throw unknown('The goal Fly app plan changed before creation.');
+    record({ apps: { ...intent.apps, [app]: { kind, state: 'planned' } } });
+  };
+  const confirmApp = ({ app, appId, ownerMarker, kind }) => {
+    const prior = intent.apps[app];
+    if (!prior || prior.kind !== kind || prior.state !== 'planned'
+      || typeof appId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(appId)
+      || typeof ownerMarker !== 'string'
+      || !/^(SEAGULLED_RELAY_OWNER|FLUJO_CLOUD_OWNER)_[A-F0-9]{16,64}$/.test(ownerMarker)) {
+      throw unknown('The goal Fly app confirmation does not match its private plan.');
+    }
+    record({ apps: { ...intent.apps, [app]: { kind, state: 'confirmed', appId, ownerMarker } } });
+  };
+  const retireApp = (app) => {
+    const prior = intent.apps[app];
+    if (!prior || !['planned', 'confirmed'].includes(prior.state)) {
+      throw unknown('The goal Fly app retirement does not match its private plan.');
+    }
+    record({ apps: { ...intent.apps, [app]: { ...prior, state: 'retired' } } });
+  };
+  const assertAccountCurrent = async () => {
+    if (diagnostic) return;
+    if (typeof assertFlyAccountCurrent !== 'function'
+      || flyAccount.accountRef !== intent.accountRef
+      || flyAccount.orgSlug !== intent.org
+      || await assertFlyAccountCurrent(flyAccount, { signal }) !== true) {
+      throw unknown('The selected Fly account continuation could not be verified.');
+    }
   };
   let controller;
   let cloudManaged;
@@ -565,7 +608,31 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
       diagnostic ? undefined : config.sourceInstanceDir);
     mkdirSync(cloudDirectory, { recursive: true, mode: 0o700 });
     const { ManagedCloud } = await import(pathToFileURL(path.join(config.provisioner.flujoCloudPath, 'lib', 'managed.mjs')).href);
+    if (ManagedCloud.privateNetworkContractVersion !== 1) {
+      throw Object.assign(new Error('The pinned cloud SDK has no verified private network contract.'),
+        { outcome: 'not_applied' });
+    }
+    await assertAccountCurrent();
     cloudManaged = new ManagedCloud({ env: flyEnv, directory: cloudDirectory });
+    const { createFlyRunner } = await import(pathToFileURL(path.join(config.provisioner.flujoCloudPath, 'lib', 'process.mjs')).href);
+    const selectedFly = createFlyRunner({ env: flyEnv, binary: flyAccount.flyctlPath });
+    const flyToken = (await selectedFly.run(['auth', 'token'])).trim();
+    const org = await cloudManaged.organization(diagnostic ? config.provisioner.org : flyAccount.orgSlug);
+    if (!flyToken || org !== intent.org || flyAccount.accountRef !== intent.accountRef) {
+      throw unknown('The selected Fly account or goal organization changed.');
+    }
+    assertNetworkVacant(await readFlyOrgApps({ org, token: flyToken }), intent.network);
+    const verifyNetwork = async ({ allowPending = true } = {}) => {
+      try {
+        await assertAccountCurrent();
+        return assertPlannedNetworkMembers(await readFlyOrgApps({ org, token: flyToken }),
+          intent.network, intent.apps, { allowPending });
+      } catch (error) {
+        if (error.name === 'AbortError') throw error;
+        throw Object.assign(error, { code: error.code === 'NETWORK_PENDING'
+          ? 'NETWORK_PENDING' : 'NETWORK_MEMBERSHIP' });
+      }
+    };
     const multiWorker = !nativeCodex(config.model);
     const { workerCap, teamLimits } = fleetExecutionLimits({ goal, config, diagnostic, native: !multiWorker });
     if (!diagnostic && goal.providerId === 'private-h100') {
@@ -578,14 +645,16 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
       record({ state: 'budget-reserved', reservationId, reservedUsd: maxUsd });
     }
     if (multiWorker) {
-      const org = await cloudManaged.organization(diagnostic ? config.provisioner.org : flyAccount.orgSlug);
       assertAdmission(signal, fleetDeadlineAt);
       if (workerCap > 1) {
         onStatus('Creating an owned relay for the bounded Fly Worker tree.');
         relayCleanupConfirmed = false;
         try {
           relay = await createOwnedRelay({ journalPath: relayPath, flujoCloudPath: config.provisioner.flujoCloudPath,
-            org, region: config.provisioner.region ?? 'iad', flyEnv, flyctlPath: flyAccount.flyctlPath });
+            org, network: intent.network, accountRef: intent.accountRef,
+            region: config.provisioner.region ?? 'iad',
+            flyEnv, flyctlPath: flyAccount.flyctlPath, onPlannedApp: planApp,
+            verifyNetwork });
         } catch (error) {
           // The relay factory journals before the first Fly mutation. A failed
           // creation is safe to dismiss only when its journal confirms no app
@@ -593,9 +662,20 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
           let relayState;
           try { relayState = JSON.parse(readFileSync(relayPath, 'utf8')); } catch { /* Keep the hold. */ }
           relayCleanupConfirmed = relayState?.state === 'retired' || relayState?.state === 'not-applied';
+          if (relayState?.state === 'retired' && intent.apps[relayState.app]?.state === 'planned') {
+            retireApp(relayState.app);
+          }
           if (!relayCleanupConfirmed) error.outcome = 'unknown';
           throw error;
         }
+        const relayState = JSON.parse(readFileSync(relayPath, 'utf8'));
+        if (relayState.app !== relay.app || relayState.appId !== relay.appId
+          || relayState.network !== intent.network || relayState.ownershipConfirmed !== true) {
+          throw unknown('The owned relay app receipt does not match the goal network intent.');
+        }
+        confirmApp({ app: relay.app, appId: relay.appId,
+          ownerMarker: `SEAGULLED_RELAY_OWNER_${relayState.owner.toUpperCase()}`, kind: 'relay' });
+        await verifyNetwork();
         record({ state: 'relay-ready', relayApp: relay.app, relayMachineId: relay.machineId });
       }
     }
@@ -603,7 +683,11 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     const topology = fleetTopology(goal, { workerCap, relay: Boolean(relay) });
     const provisioner = await flyProvisioner({ ...config.provisioner, templateWorkspace: bootWorkspace,
       fleetReachable: Boolean(relay), concurrency: workerCap,
-      teamLimits, flyEnv, cloudDirectory });
+      initialWorkers: topology.initialWorkers,
+      teamLimits, flyEnv, cloudDirectory, network: intent.network,
+      accountRef: intent.accountRef,
+      onPlannedApp: planApp, onConfirmedApp: confirmApp, onRetiredApp: retireApp,
+      verifyNetwork });
     const observeWorkerConversations = async (worker) => {
       if (localConversations.some((entry) => entry.workerId === worker.id)) return;
       const runs = Object.values(controller.registry.state.runs).filter((run) => run.workerId === worker.id);
@@ -794,7 +878,10 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
         await relay.close().catch(() => undefined);
         relayCleanupConfirmed = false; // Keep the exact relay app journal for held Worker reconciliation.
       } else {
-        try { relayCleanupConfirmed = await relay.retire(); }
+        try {
+          relayCleanupConfirmed = await relay.retire();
+          if (relayCleanupConfirmed) { retireApp(relay.app); await verifyNetwork(); }
+        }
         catch { relayCleanupConfirmed = false; }
       }
     }

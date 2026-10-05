@@ -6,6 +6,7 @@ import path from 'node:path';
 import { SwarmCoordinator } from '../src/swarm/index.mjs';
 
 const directory = () => mkdtempSync(path.join(tmpdir(), 'seagulled-swarm-'));
+const accountRef = `fly-account-sha256:${'a'.repeat(64)}`;
 const goal = (patch = {}) => ({ id: 'goal-one', text: 'Ship a small feature', budgetUsd: 5, spentUsd: 0,
   providerId: 'fictional', maxWorkers: 1, ...patch });
 const manager = (responses) => ({
@@ -26,7 +27,11 @@ const offlineCompany = (providers, options = {}) => {
   writeFileSync(flyctlPath, 'offline fixture');
   writeFileSync(path.join(accountDir, 'config.yml'), 'offline fixture');
   providers.flyFleetLease = async () => ({ available: true, flyctlPath,
-    flyConfigDir: accountDir, orgSlug: 'personal-fixture' });
+    flyConfigDir: accountDir, orgSlug: 'personal-fixture', scope: 'private', accountRef });
+  providers.assertFlyAccountLeaseCurrent = async (lease) => lease.available === true
+    && lease.flyctlPath === flyctlPath && lease.flyConfigDir === accountDir
+    && lease.orgSlug === 'personal-fixture' && lease.scope === 'private'
+    && lease.accountRef === accountRef;
   const sourceBinding = options.sourceBinding ?? { cloudSdkRoot: '/fixture/sdk', sourceOrigin: 'http://127.0.0.1:1',
     sourceInstanceDir: '/fixture/instances', sourceDataRoot: '/fixture/data', sourceAppRoot: '/fixture/app' };
   const swarm = new SwarmCoordinator({ providers, dataDir, fleet: 'auto', ...options,
@@ -198,6 +203,7 @@ test('one isolated Fly developer receipt holds further paid review while cloud a
   const { swarm, admit, dataDir } = offlineCompany(providers, { sourceBinding,
     fleetRunner: async (input) => {
       fleetCalls.push(input);
+      assert.equal(await input.assertFlyAccountCurrent(input.flyAccount), true);
       input.onCompany({ verifiedWorkers: 6, verifiedChildConversations: 24 });
       return { available: true, text: 'Fly worker ran Node 22 and reported its output.',
         usage: { costUsd: null, costKind: 'unknown', reservedUsd: input.maxUsd, billingPending: true },
@@ -330,6 +336,20 @@ test('ready stage rejects a replaced source proof and another goal’s source le
     (error) => error.reasonCode === 'source');
   await assert.rejects(swarm.prepareCompany(input, { stage: 'ready', priorAdmission: source }),
     (error) => error.reasonCode === 'source');
+  assert.equal(providers.calls.length, 0);
+  assert.equal(swarm.registry.state.goals[input.id], undefined);
+});
+
+test('ready stage rejects a changed verified Fly account reference before lead work', async () => {
+  const providers = manager([]);
+  const { swarm } = offlineCompany(providers);
+  const input = goal({ executionMode: 'company', workerTopologyVersion: 2 });
+  const source = await swarm.prepareCompany(input, { stage: 'source' });
+  const originalLease = providers.flyFleetLease;
+  providers.flyFleetLease = async () => ({ ...await originalLease(),
+    accountRef: `fly-account-sha256:${'b'.repeat(64)}` });
+  await assert.rejects(swarm.prepareCompany(input, { stage: 'ready', priorAdmission: source }),
+    (error) => error.reasonCode === 'account');
   assert.equal(providers.calls.length, 0);
   assert.equal(swarm.registry.state.goals[input.id], undefined);
 });

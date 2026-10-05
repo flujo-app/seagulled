@@ -13,14 +13,18 @@ export function attemptError(error, cleanup) {
   return Object.assign(new Error(`${error.message} (${cleanup.app}: ${cleanup.confirmed ? 'retired' : `cleanup unconfirmed: ${cleanup.error}`})`), { cleanup });
 }
 
-export async function provisionWithCleanup({ managed, worker, options, turn, retries = 8,
+export async function provisionWithCleanup({ managed, worker, options, turn,
+  beforeUp, beforeCleanup, onCleanup, retries = 8,
   appName = () => `swarm-${worker.id}-${Date.now().toString(36)}` }) {
   for (let attempt = 0; ; attempt++) {
     const app = appName();
     await turn();
+    await beforeUp?.(app);
     try { return await managed.up({ ...options, app }); }
     catch (error) {
+      await beforeCleanup?.(app);
       const cleanup = await cleanupAttempt(managed, app);
+      if (cleanup.confirmed) await onCleanup?.(app);
       if (!cleanup.confirmed || attempt >= retries || !/busy|unavailable|snapshot begin failed|HTTP 409/i.test(error.message)) {
         throw attemptError(error, cleanup);
       }

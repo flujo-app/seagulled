@@ -16,6 +16,13 @@ import { Controller } from '../upstream/swarm-teams/fleet/controller.mjs';
 import { flyProvisioner } from '../upstream/swarm-teams/fleet/provisioners.mjs';
 import { FlujoClient } from '../upstream/swarm-teams/lib/flujo-client.mjs';
 
+const relayNetwork = 'seagulled-g-0123456789abcdef0123456789abcdef';
+const accountRef = `fly-account-sha256:${'a'.repeat(64)}`;
+const relayInventory = (journal, created, network = relayNetwork) => {
+  const apps = created ? [{ id: 'fixture-app-id', name: journal.app, network }] : [];
+  return new Response(JSON.stringify({ total_apps: apps.length, apps }), { status: 200 });
+};
+
 test('goal capacity maps selected worker and agent counts to bounded Fly execution limits', async () => {
   assert.deepEqual(goalCapacity({}), { maxWorkers: 5, conversationsPerWorker: 5, agentsPerWorker: 4 });
   assert.deepEqual(fleetExecutionLimits({ goal: { maxWorkers: 6, conversationsPerWorker: 5 }, config: { maxWorkers: 2 } }), {
@@ -53,10 +60,11 @@ test('Fly account lease selects one verified personal config and drops inherited
   mkdirSync(flyConfigDir);
   writeFileSync(flyctlPath, 'fixture executable');
   writeFileSync(path.join(flyConfigDir, 'config.yml'), 'fixture personal config');
-  const providers = { async flyFleetLease() { return { available: true, flyctlPath, flyConfigDir, orgSlug: 'personal-test',
+  const providers = { async flyFleetLease() { return { available: true, flyctlPath, flyConfigDir,
+    orgSlug: 'personal-test', scope: 'private', accountRef,
     token: 'provider-internal-token-must-not-cross-the-lease' }; } };
   const lease = await flyAccountLease(providers);
-  assert.deepEqual(lease, { flyctlPath, flyConfigDir, orgSlug: 'personal-test' });
+  assert.deepEqual(lease, { flyctlPath, flyConfigDir, orgSlug: 'personal-test', scope: 'private', accountRef });
   const env = isolatedFlyEnvironment(lease, { PATH: 'fixture-path', FLY_API_TOKEN: 'inherited-service-token',
     FLY_ACCESS_TOKEN: 'inherited-access-token', FLY_CONFIG_DIR: 'foreign-config',
     FLYCTL_PATH: 'foreign-helper', FLUJO_CLOUD_HOME: 'foreign-cloud-records',
@@ -79,7 +87,7 @@ test('a legacy profile cannot supply the product source or redirect its verified
   writeFileSync(path.join(flyConfigDir, 'config.yml'), 'fixture');
   const flyctlPath = path.join(root, 'flyctl');
   writeFileSync(flyctlPath, 'fixture');
-  const flyAccount = { flyctlPath, flyConfigDir, orgSlug: 'personal-test' };
+  const flyAccount = { flyctlPath, flyConfigDir, orgSlug: 'personal-test', scope: 'private', accountRef };
   const legacy = { provisioner: { kind: 'fly', org: 'production-org', region: 'iad' } };
   const bound = bindVerifiedFlyOrganization(legacy, flyAccount);
   assert.equal(bound.provisioner.org, 'personal-test');
@@ -174,7 +182,7 @@ test('product fleet requires one bound private source and checks the SDK proof b
   const flyctlPath = path.join(root, 'flyctl');
   writeFileSync(flyctlPath, 'fixture');
   writeFileSync(path.join(flyConfigDir, 'config.yml'), 'fixture');
-  const flyAccount = { flyctlPath, flyConfigDir, orgSlug: 'personal-test' };
+  const flyAccount = { flyctlPath, flyConfigDir, orgSlug: 'personal-test', scope: 'private', accountRef };
   const requests = [];
   const server = http.createServer((request, response) => {
     requests.push(new URL(request.url, 'http://local').pathname);
@@ -277,7 +285,7 @@ test('Fly provisioner gives ManagedCloud only the selected account and owned rec
     assert.deepEqual(globalThis.__seagulledManagedLeaseFixture, { env: flyEnv, directory: cloudDirectory });
     const relayJournal = path.join(root, 'relay.json');
     await assert.rejects(createOwnedRelay({ journalPath: relayJournal, flujoCloudPath: root,
-      org: 'personal' }), /isolated personal Fly account/);
+      org: 'personal', network: relayNetwork }), /isolated personal Fly account/);
     assert.equal(existsSync(relayJournal), false);
   } finally { delete globalThis.__seagulledManagedLeaseFixture; }
 });
@@ -661,7 +669,11 @@ test('owned relay journals before Fly mutation, forwards through its own proxy, 
   const flyRunner = { run: async (args, { input } = {}) => {
     calls.push(args.slice(0, 2).join(' '));
     if (args[0] === 'apps' && args[1] === 'create') {
-      assert.equal(JSON.parse(readFileSync(journalPath, 'utf8')).state, 'creating-app');
+      const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
+      assert.equal(journal.state, 'creating-app');
+      assert.equal(journal.network, relayNetwork);
+      assert.deepEqual(args.slice(2), [journal.app, '--org', journal.org,
+        '--network', relayNetwork, '--json', '--yes']);
     }
     if (args[0] === 'secrets' && args[1] === 'import') {
       const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
@@ -680,7 +692,8 @@ test('owned relay journals before Fly mutation, forwards through its own proxy, 
   const fakeProxy = new EventEmitter();
   fakeProxy.stdin = { end: () => undefined };
   fakeProxy.kill = () => { proxyStopped = true; };
-  const relay = await createOwnedRelay({ journalPath, org: 'personal', flyRunner, flyEnv, flyctlPath,
+  const relay = await createOwnedRelay({ journalPath, org: 'personal', network: relayNetwork,
+    flyRunner, flyEnv, flyctlPath,
     portAllocator: async () => 48121,
     spawnImpl: (binary, args, options) => {
       assert.equal(binary, flyctlPath);
@@ -694,6 +707,7 @@ test('owned relay journals before Fly mutation, forwards through its own proxy, 
     },
     fetchImpl: async (url, options) => {
       const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
+      if (url.includes('/apps?org_slug=')) return relayInventory(journal, calls.includes('apps create'));
       if (url.endsWith('/machines') && options.method === 'POST') {
         const machine = JSON.parse(options.body);
         assert.equal(machine.config.services.length, 0);
@@ -722,7 +736,7 @@ test('owned relay journals before Fly mutation, forwards through its own proxy, 
   assert.equal(agentStopped, true);
   assert.equal(proxyStopped, true);
   assert.deepEqual(calls, ['auth token', 'apps create', 'secrets import', 'secrets list',
-    'secrets list', 'volumes list', 'apps destroy']);
+    'secrets list', 'secrets list', 'volumes list', 'apps destroy']);
   assert.equal(JSON.parse(readFileSync(journalPath, 'utf8')).state, 'retired');
 });
 
@@ -730,7 +744,7 @@ test('owned relay Machine rejection destroys only its newly created app', async 
   const root = mkdtempSync(path.join(tmpdir(), 'seagulled-relay-failure-'));
   const journalPath = path.join(root, 'relay.json');
   const calls = [];
-  await assert.rejects(() => createOwnedRelay({ journalPath, org: 'personal',
+  await assert.rejects(() => createOwnedRelay({ journalPath, org: 'personal', network: relayNetwork,
     flyRunner: { run: async (args) => {
       calls.push(args.slice(0, 2).join(' '));
       if (args[0] === 'secrets' && args[1] === 'list') {
@@ -743,6 +757,7 @@ test('owned relay Machine rejection destroys only its newly created app', async 
     portAllocator: async () => 48123,
     fetchImpl: async (url, options) => {
       const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
+      if (url.includes('/apps?org_slug=')) return relayInventory(journal, calls.includes('apps create'));
       if (url.endsWith('/machines') && options.method === 'POST') return new Response('{}', { status: 500 });
       if (url.endsWith('/machines') && options.method === 'GET') return new Response('[]', { status: 200 });
       if (url.includes('/apps/seagulled-relay-') && options.method === 'GET') {
@@ -758,16 +773,65 @@ test('owned relay Machine rejection destroys only its newly created app', async 
   assert.equal(JSON.parse(readFileSync(journalPath, 'utf8')).cleanupConfirmed, true);
 });
 
+test('relay rechecks account and network immediately before app creation', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-relay-precreate-'));
+  const journalPath = path.join(root, 'relay.json');
+  const calls = [];
+  await assert.rejects(createOwnedRelay({ journalPath, org: 'personal', network: relayNetwork,
+    flyRunner: { run: async (args) => {
+      calls.push(args.slice(0, 2).join(' '));
+      return args[0] === 'auth' ? 'fixture-token' : '{}';
+    } }, portAllocator: async () => 48124,
+    fetchImpl: async (url) => {
+      if (url.includes('/apps?org_slug=')) return relayInventory(
+        JSON.parse(readFileSync(journalPath, 'utf8')), false);
+      throw new Error(`Unexpected relay fixture URL: ${url}`);
+    },
+    verifyNetwork: async () => { throw new Error('Selected Fly account changed.'); },
+  }), /Selected Fly account changed/);
+  assert.deepEqual(calls, ['auth token']);
+  assert.equal(JSON.parse(readFileSync(journalPath, 'utf8')).state, 'not-applied');
+});
+
+test('relay refuses a mismatched network readback before owner secret or Machine mutation', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-relay-network-mismatch-'));
+  const journalPath = path.join(root, 'relay.json');
+  const calls = [];
+  await assert.rejects(createOwnedRelay({ journalPath, org: 'personal', network: relayNetwork,
+    portAllocator: async () => 48125,
+    flyRunner: { run: async (args) => {
+      calls.push(args.slice(0, 2).join(' '));
+      return args[0] === 'auth' ? 'fixture-token' : '{}';
+    } },
+    fetchImpl: async (url) => {
+      const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
+      if (url.includes('/apps?org_slug=')) return relayInventory(journal,
+        calls.includes('apps create'), 'default');
+      if (url.includes('/apps/seagulled-relay-')) return new Response(JSON.stringify({
+        id: 'fixture-app-id', name: journal.app, organization: { slug: journal.org },
+      }), { status: 200 });
+      throw new Error(`Unexpected relay fixture URL: ${url}`);
+    },
+  }), (error) => error.code === 'UNKNOWN');
+  assert.deepEqual(calls, ['auth token', 'apps create']);
+  assert.equal(JSON.parse(readFileSync(journalPath, 'utf8')).state, 'cleanup-unknown');
+});
+
 test('ambiguous relay app creation retains its intent and never destroys an unconfirmed app', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'seagulled-relay-unknown-'));
   const journalPath = path.join(root, 'relay.json');
   const calls = [];
-  await assert.rejects(() => createOwnedRelay({ journalPath, org: 'personal',
+  await assert.rejects(() => createOwnedRelay({ journalPath, org: 'personal', network: relayNetwork,
     flyRunner: { run: async (args) => {
       calls.push(args.slice(0, 2).join(' '));
       if (args[0] === 'apps') throw new Error('fixture connection lost');
       return 'fixture-token';
     } }, portAllocator: async () => 48123,
+    fetchImpl: async (url) => {
+      if (url.includes('/apps?org_slug=')) return relayInventory(
+        JSON.parse(readFileSync(journalPath, 'utf8')), calls.includes('apps create'));
+      throw new Error(`Unexpected relay fixture URL: ${url}`);
+    },
   }), (error) => error.code === 'UNKNOWN');
   assert.deepEqual(calls, ['auth token', 'apps create']);
   assert.equal(JSON.parse(readFileSync(journalPath, 'utf8')).state, 'creation-unknown');
@@ -777,7 +841,7 @@ test('relay creation holds an app when its staged owner marker cannot be confirm
   const root = mkdtempSync(path.join(tmpdir(), 'seagulled-relay-unmarked-'));
   const journalPath = path.join(root, 'relay.json');
   const calls = [];
-  await assert.rejects(() => createOwnedRelay({ journalPath, org: 'personal',
+  await assert.rejects(() => createOwnedRelay({ journalPath, org: 'personal', network: relayNetwork,
     flyRunner: { run: async (args) => {
       calls.push(args.slice(0, 2).join(' '));
       if (args[0] === 'secrets' && args[1] === 'list') return '[]';
@@ -785,6 +849,7 @@ test('relay creation holds an app when its staged owner marker cannot be confirm
     } }, portAllocator: async () => 48123,
     fetchImpl: async (url) => {
       const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
+      if (url.includes('/apps?org_slug=')) return relayInventory(journal, calls.includes('apps create'));
       if (url.includes('/apps/seagulled-relay-')) return new Response(JSON.stringify({
         id: 'fixture-app-id', name: journal.app, organization: { slug: journal.org },
       }), { status: 200 });
@@ -797,13 +862,14 @@ test('relay creation holds an app when its staged owner marker cannot be confirm
   assert.equal(journal.state, 'cleanup-unknown');
 });
 
-test('relay retirement refuses changed app identity, app marker, Machine markers, or foreign volumes', async () => {
-  for (const changed of ['app-id', 'app-marker', 'machine-owner', 'machine-type', 'foreign-volume']) {
+test('relay retirement refuses changed app identity, network, app marker, Machine markers, or foreign volumes', async () => {
+  for (const changed of ['app-id', 'network', 'app-marker', 'machine-owner', 'machine-type', 'foreign-volume']) {
     const root = mkdtempSync(path.join(tmpdir(), 'seagulled-relay-foreign-'));
     const journalPath = path.join(root, 'relay.json');
     const calls = [];
     let retired = false;
-    const relay = await createOwnedRelay({ journalPath, org: 'personal', portAllocator: async () => 48124,
+    const relay = await createOwnedRelay({ journalPath, org: 'personal', network: relayNetwork,
+      portAllocator: async () => 48124,
       flyRunner: { run: async (args) => {
         calls.push(args.slice(0, 2).join(' '));
         if (args[0] === 'secrets' && args[1] === 'list') {
@@ -818,6 +884,8 @@ test('relay retirement refuses changed app identity, app marker, Machine markers
       } },
       fetchImpl: async (url, options) => {
         const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
+        if (url.includes('/apps?org_slug=')) return relayInventory(journal, calls.includes('apps create'),
+          retired && changed === 'network' ? 'default' : relayNetwork);
         if (url.endsWith('/machines') && options.method === 'POST') return new Response('{"id":"fixturemachine"}', { status: 201 });
         if (url.endsWith('/machines') && options.method === 'GET') return new Response('[{"id":"fixturemachine"}]', { status: 200 });
         if (url.endsWith('/machines/fixturemachine/metadata')) return new Response(JSON.stringify({
