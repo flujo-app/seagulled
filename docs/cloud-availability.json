@@ -62,6 +62,14 @@
       "observedHostLoginCacheUnchanged": true,
       "exclusiveSubscriptionStreamEstablished": false,
       "replayed": false
+    },
+    {
+      "path": "local-only-tool-enabled-team-diagnostic",
+      "sourceStartup": "blocked-by-automatic-review",
+      "modelCallSubmitted": false,
+      "workspaceCreated": false,
+      "flyProvisioningAttempted": false,
+      "toolCompatibility": "unqualified"
     }
   ],
   "billing": {
