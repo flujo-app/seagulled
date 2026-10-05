@@ -1,0 +1,11 @@
+node_modules/
+dist/
+release/
+.env*
+*.pem
+*.key
+*.log
+.seagulled/
+*.local.json
+.private/
+coverage/

@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "sourceCommit": "f9d372a66dd2cb09f4bcfed34967404cf12d9007",
+  "extraction": "source-only",
+  "privateUpstream": "flujo-app/swarm-teams",
+  "files": [
+    {
+      "path": "upstream/swarm-teams/fleet/attempt.mjs",
+      "sha256": "417e01ea12c9cfc011277faf83ec6ee0e926fdc1c41cac9b8e0beeb62c247b0c"
+    },
+    {
+      "path": "upstream/swarm-teams/fleet/controller.mjs",
+      "sha256": "21ae0ffe0f3ef726bb95811aae78c998f4a90ef3314384ce75a9951d6a93827e"
+    },
+    {
+      "path": "upstream/swarm-teams/fleet/owner.mjs",
+      "sha256": "1938c01be16e52f6f182623f8c22278c53205c939420a3b391685ca6b790ba46"
+    },
+    {
+      "path": "upstream/swarm-teams/fleet/provisioners.mjs",
+      "sha256": "eede10a2b41ec7b8f5ffb0dafe1070241cc49f845bde0ec16a6a86f60b6381f5"
+    },
+    {
+      "path": "upstream/swarm-teams/fleet/registry.mjs",
+      "sha256": "b2ec23c957a20b316300191b4d2fca2a3bd4f328988f80debddb9b991e2e54f6"
+    },
+    {
+      "path": "upstream/swarm-teams/fleet/relay.mjs",
+      "sha256": "08b4572c81fd8d4684d3ffe07ba4596f7a8727265e80ab05d3bf959f7d74d2bc"
+    },
+    {
+      "path": "upstream/swarm-teams/install.mjs",
+      "sha256": "f9edb7fafaea2442926d73bfe9404a7cb8c50d7f426931a1c491d72469408b8e"
+    },
+    {
+      "path": "upstream/swarm-teams/lib/flujo-client.mjs",
+      "sha256": "3e1d7f3e733d8b5a1180c347c42d895cda4b6134d2108080a80e3b8a0afcaa01"
+    },
+    {
+      "path": "upstream/swarm-teams/swarm.mjs",
+      "sha256": "55fcf414a27ba6cd8847ba7c9ea5117d63022c7da9218f8974924a96173bdb96"
+    },
+    {
+      "path": "upstream/swarm-teams/template/flows.mjs",
+      "sha256": "bd38b40c79c2bf134fe88880470aaaba85db673ec5203b03e38e4d6bd441faf9"
+    },
+    {
+      "path": "upstream/swarm-teams/test/fleet.test.mjs",
+      "sha256": "897b98cbf39f715bc5ca04bafcd52429f4fd0063e06e6ab6e07edabb0641f8ae"
+    },
+    {
+      "path": "upstream/swarm-teams/test/recovery.test.mjs",
+      "sha256": "3d0c96f8eadcd081019c5801e07b39c954ee499b4e4d0b719afcefc712a13407"
+    }
+  ],
+  "diagnosticSuccessor": {
+    "upstreamCommit": "c09bce13b2e80270d255fe3fed923b7238f9f2dd",
+    "pullRequest": "https://github.com/flujo-app/iambrokeplshlp/pull/55",
+    "scope": "source-only opt-in diagnostic isolation",
+    "merged": false
+  },
+  "productExtensions": [
+    "external goal identities",
+    "durable usage receipts",
+    "bounded run timeout"
+  ]
+}

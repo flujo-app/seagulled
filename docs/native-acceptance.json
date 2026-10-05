@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "kind": "live-provider-run",
+  "provider": "codex-native-subscription",
+  "goalStatus": "completed",
+  "calls": 4,
+  "roles": [
+    "lead",
+    "developer",
+    "reviewer",
+    "lead"
+  ],
+  "artifact": {
+    "name": "proof.txt",
+    "bytes": 16,
+    "sha256": "2ad31e79c0d84755b2a372ef373cf6f99905622733f6a3e11e5cad3178f21e04",
+    "contentMatches": true
+  },
+  "billing": {
+    "kind": "subscription",
+    "calls": 4,
+    "invoiceCostKnown": false
+  },
+  "hostWrites": "validated-provider-output-materialization",
+  "review": "independent-native-read-only-review"
+}

@@ -1,0 +1,13 @@
+.git/
+.private/
+release/
+dist/
+node_modules/
+.env*
+AGENTS.md
+COORDINATION.md
+tests/
+upstream/swarm-teams/test/
+upstream/swarm-teams/diagnostics/
+*.log
+*.local.json

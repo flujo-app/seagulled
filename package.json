@@ -1,0 +1,71 @@
+{
+  "name": "seagulled",
+  "version": "0.1.0-rc.1",
+  "description": "Talk to Todd. He puts a company of agents on your goal, then comes back to judge the work.",
+  "type": "module",
+  "main": "electron/main.mjs",
+  "bin": {
+    "seagulled": "bin/seagulled.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "electron .",
+    "cli": "node bin/seagulled.mjs",
+    "dev": "node bin/seagulled.mjs serve",
+    "test": "node --test tests/*.test.mjs upstream/swarm-teams/test/fleet.test.mjs upstream/swarm-teams/test/recovery.test.mjs upstream/swarm-teams/test/diagnostics-guard.test.mjs",
+    "package": "electron-builder --dir",
+    "dist": "electron-builder --win portable --publish never",
+    "check": "node scripts/check-release.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.0",
+    "electron": "^44.5.1",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "app.flujo.seagulled",
+    "productName": "Seagulled",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "ui/**/*",
+      "src/**/*",
+      "bin/**/*",
+      "upstream/swarm-teams/{fleet,lib,template}/**/*",
+      "package.json",
+      "LICENSE",
+      "THIRD_PARTY_NOTICES.md",
+      "upstream/swarm-teams/install.mjs",
+      "upstream/swarm-teams/swarm.mjs",
+      "docs/provenance.json"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        "portable"
+      ],
+      "artifactName": "Seagulled-${version}-${arch}.${ext}"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ]
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.productivity"
+    }
+  },
+  "license": "MIT",
+  "author": "flujo-app",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/flujo-app/seagulled.git"
+  }
+}
