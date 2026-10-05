@@ -77,7 +77,7 @@ test('Worker app is privately planned before SDK up and exact ID/network are che
     const provisioner = await flyProvisioner({ flujoCloudPath: f.root, templateWorkspace: 'boot',
       source: 'http://127.0.0.1:4200', org: 'personal', network, accountRef,
       captureSpacingMs: 1, concurrency: 1,
-      onPlannedApp: ({ app, kind, network: bound }) => {
+      verifyFreshApp: async () => undefined, onPlannedApp: ({ app, kind, network: bound }) => {
         assert.equal(kind, 'worker'); assert.equal(bound, network);
         plans.set(app, { state: 'planned' }); calls.push('plan');
       },
@@ -99,12 +99,42 @@ test('Worker app is privately planned before SDK up and exact ID/network are che
   } finally { delete globalThis.__networkSdkFixture; f.close(); }
 });
 
+test('Worker awaits fresh app verification before durable plan and SDK effects', async () => {
+  const f = setup();
+  let release;
+  let entered;
+  const started = new Promise((resolve) => { entered = resolve; });
+  const held = new Promise((resolve) => { release = resolve; });
+  const calls = [];
+  globalThis.__networkSdkFixture = {
+    up: async () => { calls.push('up'); throw new Error('No SDK creation.'); },
+    down: async () => { calls.push('down'); throw new Error('No cleanup of an unplanned app.'); },
+  };
+  try {
+    const provisioner = await flyProvisioner({ flujoCloudPath: f.root,
+      templateWorkspace: 'boot', org: 'personal', network, accountRef,
+      captureSpacingMs: 1, concurrency: 1,
+      verifyFreshApp: async () => { calls.push('verify'); entered(); await held;
+        throw new Error('Org inventory is incomplete.'); },
+      onPlannedApp: () => { calls.push('plan'); },
+      onConfirmedApp: () => undefined, onRetiredApp: () => undefined,
+      verifyNetwork: async () => { calls.push('membership'); },
+    });
+    const provisioning = provisioner.provision({ id: 'worker-held' }, {});
+    await started;
+    assert.deepEqual(calls, ['verify']);
+    release();
+    await assert.rejects(provisioning, /inventory is incomplete/);
+    assert.deepEqual(calls, ['verify']);
+  } finally { delete globalThis.__networkSdkFixture; f.close(); }
+});
+
 test('unpatched SDK refuses requested network before any Worker app plan', async () => {
   const f = setup(null);
   let planned = false;
   try {
     await assert.rejects(flyProvisioner({ flujoCloudPath: f.root, templateWorkspace: 'boot',
-      org: 'personal', network, accountRef, onPlannedApp: () => { planned = true; },
+      org: 'personal', network, accountRef, verifyFreshApp: async () => undefined, onPlannedApp: () => { planned = true; },
       onConfirmedApp: () => undefined, onRetiredApp: () => undefined,
       verifyNetwork: async () => undefined }), /pinned cloud SDK/);
     assert.equal(planned, false);
@@ -116,7 +146,7 @@ test('network-capable SDK without an owned proxy API refuses before any Worker a
   let planned = false;
   try {
     await assert.rejects(flyProvisioner({ flujoCloudPath: f.root, templateWorkspace: 'boot',
-      org: 'personal', network, accountRef, onPlannedApp: () => { planned = true; },
+      org: 'personal', network, accountRef, verifyFreshApp: async () => undefined, onPlannedApp: () => { planned = true; },
       onConfirmedApp: () => undefined, onRetiredApp: () => undefined,
       verifyNetwork: async () => undefined }), /pinned cloud SDK/);
     assert.equal(planned, false);
@@ -158,7 +188,7 @@ test('both initial Workers must confirm group membership before either starts it
     const provisioner = await flyProvisioner({ flujoCloudPath: f.root, templateWorkspace: 'boot',
       source: 'http://127.0.0.1:4200', org: 'personal', network, accountRef,
       initialWorkers: 2, concurrency: 2, captureSpacingMs: 1,
-      onPlannedApp: ({ app }) => { plans.set(app, 'planned'); order.push(`plan:${app}`); },
+      verifyFreshApp: async () => undefined, onPlannedApp: ({ app }) => { plans.set(app, 'planned'); order.push(`plan:${app}`); },
       onConfirmedApp: ({ app }) => { plans.set(app, 'confirmed'); order.push(`confirmed:${app}`); },
       onRetiredApp: () => undefined,
       verifyNetwork: async ({ allowPending }) => {
@@ -205,7 +235,7 @@ test('Stop after confirmed creation retires only the exact Worker under the same
       const provisioner = await flyProvisioner({ flujoCloudPath: f.root, templateWorkspace: 'boot',
         source: 'http://127.0.0.1:4200', org: 'personal', network, accountRef,
         captureSpacingMs: 1, concurrency: 1,
-        onPlannedApp: ({ app }) => { planned = app; calls.push(`plan:${app}`); },
+        verifyFreshApp: async () => undefined, onPlannedApp: ({ app }) => { planned = app; calls.push(`plan:${app}`); },
         onConfirmedApp: ({ app, appId }) => {
           assert.equal(app, planned); assert.equal(appId, 'exact-app-id');
           confirmed = app; calls.push(`confirm:${app}`);
@@ -250,7 +280,7 @@ test('a mismatched SDK result can retire only the privately planned app', async 
     const provisioner = await flyProvisioner({ flujoCloudPath: f.root, templateWorkspace: 'boot',
       source: 'http://127.0.0.1:4200', org: 'personal', network, accountRef,
       captureSpacingMs: 1, concurrency: 1,
-      onPlannedApp: ({ app }) => { planned = app; },
+      verifyFreshApp: async () => undefined, onPlannedApp: ({ app }) => { planned = app; },
       onConfirmedApp: () => { throw new Error('No mismatched app can be confirmed.'); },
       onRetiredApp: (app) => { assert.equal(app, planned); },
       verifyNetwork: async () => undefined,
@@ -282,7 +312,7 @@ test('a created Machine differing from the SDK journal is retired before confirm
     const provisioner = await flyProvisioner({ flujoCloudPath: f.root, templateWorkspace: 'boot',
       source: 'http://127.0.0.1:4200', org: 'personal', network, accountRef,
       captureSpacingMs: 1, concurrency: 1,
-      onPlannedApp: ({ app }) => { planned = app; },
+      verifyFreshApp: async () => undefined, onPlannedApp: ({ app }) => { planned = app; },
       onConfirmedApp: () => { confirmed = true; },
       onRetiredApp: (app) => { assert.equal(app, planned); },
       verifyNetwork: async () => undefined,
@@ -316,7 +346,7 @@ test('tampered target and changed current Machine fail before bearer or proxy ef
   try {
     const provisioner = await flyProvisioner({ flujoCloudPath: f.root, templateWorkspace: 'boot',
       org: 'personal', network, accountRef, initialWorkers: 0,
-      onPlannedApp: () => undefined, onConfirmedApp: () => undefined,
+      verifyFreshApp: async () => undefined, onPlannedApp: () => undefined, onConfirmedApp: () => undefined,
       onRetiredApp: () => undefined, verifyNetwork: async () => undefined });
     const target = { kind: 'fly', app: 'swarm-worker-fixture', appId: 'appabc',
       org: 'personal', network, accountRef, machineId: 'machineabc', workspace: 'boot' };
@@ -366,7 +396,7 @@ test('the proposed SDK owned-proxy API supplies the only product Worker connecti
   try {
     const provisioner = await flyProvisioner({ flujoCloudPath: f.root, templateWorkspace: 'boot',
       org: 'personal', network, accountRef, initialWorkers: 0,
-      onPlannedApp: () => undefined, onConfirmedApp: () => undefined,
+      verifyFreshApp: async () => undefined, onPlannedApp: () => undefined, onConfirmedApp: () => undefined,
       onRetiredApp: () => undefined, verifyNetwork: async () => { calls.push('membership'); } });
     const target = { kind: 'fly', app: 'swarm-worker-fixture', appId: 'appabc',
       org: 'personal', network, accountRef, machineId: 'machineabc', workspace: 'boot' };
@@ -402,7 +432,7 @@ test('an owned proxy without observed child-close leaves an explicit cleanup hol
   try {
     const provisioner = await flyProvisioner({ flujoCloudPath: f.root, templateWorkspace: 'boot',
       org: 'personal', network, accountRef, initialWorkers: 0,
-      onPlannedApp: () => undefined, onConfirmedApp: () => undefined,
+      verifyFreshApp: async () => undefined, onPlannedApp: () => undefined, onConfirmedApp: () => undefined,
       onRetiredApp: () => undefined, verifyNetwork: async () => undefined });
     const connection = await provisioner.connect({ kind: 'fly', app: 'swarm-worker-fixture',
       appId: 'appabc', org: 'personal', network, accountRef,
@@ -436,7 +466,7 @@ test('goal-private Worker rejects an unrelated attempt bearer before any HTTP ef
   try {
     const provisioner = await flyProvisioner({ flujoCloudPath: f.root, templateWorkspace: 'boot',
       org: 'personal', network, accountRef, initialWorkers: 0,
-      onPlannedApp: () => undefined, onConfirmedApp: () => undefined,
+      verifyFreshApp: async () => undefined, onPlannedApp: () => undefined, onConfirmedApp: () => undefined,
       onRetiredApp: () => undefined, verifyNetwork: async () => undefined });
     await assert.rejects(provisioner.connect({ kind: 'fly', app: 'swarm-worker-fixture',
       appId: 'appabc', org: 'personal', network, accountRef, machineId: 'machineabc',

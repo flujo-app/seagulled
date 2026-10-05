@@ -318,7 +318,7 @@ export class ProviderManager {
     const env = this.#authEnv({ id: 'fly', scope, status: true });
     const accountEmail = await this.#flyIdentity(scope, signal);
     if (!accountEmail) return unavailable('Fly account sign-in could not be verified.');
-    const organizationUnavailable = () => unavailable('No single unused personal Fly organization could be verified for isolated Workers.');
+    const organizationUnavailable = () => unavailable('No single personal Fly organization could be verified for isolated Workers.');
     const read = async (args) => {
       if (signal?.aborted) throw cancelled('not_applied');
       const result = await this.commandRunner(helper.command, args,
@@ -339,8 +339,7 @@ export class ProviderManager {
           || !['PERSONAL', 'SHARED'].includes(details.Type)) return organizationUnavailable();
         if (details.Type === 'PERSONAL') personal.push(details);
       }
-      if (personal.length !== 1 || !Array.isArray(personal[0].Apps?.Nodes)
-        || personal[0].Apps.Nodes.length !== 0) return organizationUnavailable();
+      if (personal.length !== 1 || !Array.isArray(personal[0].Apps?.Nodes)) return organizationUnavailable();
       if (await this.#flyIdentity(scope, signal) !== accountEmail) {
         return unavailable('Fly account changed while verifying its organization.');
       }

@@ -5,12 +5,18 @@ import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { startRelayAgent } from '../../upstream/swarm-teams/fleet/relay.mjs';
-import { assertAppNetwork, assertNetworkVacant, assertProductNetwork, readFlyOrgApps } from './fly-network.mjs';
+import { assertAppNetwork, assertFreshAppName, assertProductNetwork, readFlyOrgApps } from './fly-network.mjs';
 
 const RELAY_SOURCE = fileURLToPath(new URL('../../upstream/swarm-teams/fleet/relay.mjs', import.meta.url));
 const API = 'https://api.machines.dev/v1';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const ownerMarker = (owner) => `SEAGULLED_RELAY_OWNER_${owner.toUpperCase()}`;
+const preCreationRefusals = new WeakMap();
+export const isRelayPreCreationFailure = (error, journalPath) =>
+  typeof journalPath === 'string' && preCreationRefusals.get(error) === path.resolve(journalPath);
+export const relayFailureCleanupConfirmed = (error, journal, journalExists, journalPath) =>
+  (isRelayPreCreationFailure(error, journalPath) && !journalExists)
+  || journal?.state === 'retired' || journal?.state === 'not-applied';
 const flyArray = (output, label) => {
   let value;
   try { value = JSON.parse(output); } catch { throw new Error(`Relay ${label} inventory is unconfirmed.`); }
@@ -21,13 +27,25 @@ const flyArray = (output, label) => {
 export async function createOwnedRelay({ journalPath, flujoCloudPath, org, network, accountRef,
   region = 'iad', fetchImpl = fetch,
   spawnImpl = spawn, flyRunner, flyEnv, flyctlPath, portAllocator,
-  onPlannedApp, verifyNetwork, agentFactory = startRelayAgent } = {}) {
+  verifyFreshApp, onPlannedApp, verifyNetwork, agentFactory = startRelayAgent } = {}) {
   if (!journalPath || existsSync(journalPath)) throw new Error('Relay intent already exists; reconcile the original resource before creating another.');
   if (!/^[a-z0-9-]{1,64}$/.test(org ?? '') || !/^[a-z]{3}$/.test(region)) throw new Error('A valid Fly organization and region are required.');
   assertProductNetwork(network);
   if (onPlannedApp && (typeof accountRef !== 'string'
-    || !/^fly-account-sha256:[a-f0-9]{64}$/.test(accountRef))) {
+    || !/^fly-account-sha256:[a-f0-9]{64}$/.test(accountRef)
+    || typeof verifyFreshApp !== 'function')) {
     throw new Error('A pinned private Fly account reference is required for the product relay.');
+  }
+  const app = `seagulled-relay-${randomBytes(6).toString('hex')}`;
+  try { await verifyFreshApp?.({ app, kind: 'relay', org, network, accountRef }); }
+  catch (error) {
+    const original = error instanceof Error ? error : new Error('Fresh relay app verification failed.');
+    const refusal = new Error(original.message, { cause: error });
+    refusal.name = original.name;
+    if (typeof original.code === 'string') refusal.code = original.code;
+    if (typeof original.outcome === 'string') refusal.outcome = original.outcome;
+    preCreationRefusals.set(refusal, path.resolve(journalPath));
+    throw refusal;
   }
   let fly = flyRunner;
   let allocate = portAllocator;
@@ -40,7 +58,6 @@ export async function createOwnedRelay({ journalPath, flujoCloudPath, org, netwo
     fly ??= createFlyRunner({ env: flyEnv, binary: flyctlPath });
     allocate ??= unusedLoopbackPort;
   }
-  const app = `seagulled-relay-${randomBytes(6).toString('hex')}`;
   const secret = randomBytes(32).toString('base64url');
   const owner = randomBytes(16).toString('hex');
   let state = { version: 1, kind: 'seagulled-owned-relay', app, org, network, accountRef,
@@ -126,7 +143,7 @@ export async function createOwnedRelay({ journalPath, flujoCloudPath, org, netwo
     await onPlannedApp?.({ app, org, network, accountRef, kind: 'relay' });
     token = (await fly.run(['auth', 'token'])).trim();
     if (!token) throw new Error('Fly authentication is unavailable.');
-    assertNetworkVacant(await readFlyOrgApps({ org, token, fetchImpl }), network);
+    assertFreshAppName(await readFlyOrgApps({ org, token, fetchImpl }), app, network);
     await verifyNetwork?.({ allowPending: true });
     record({ state: 'creating-app' });
     await fly.run(['apps', 'create', app, '--org', org, '--network', network, '--json', '--yes']);

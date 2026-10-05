@@ -56,16 +56,21 @@ async function boundedJson(response) {
   return value;
 }
 
-export async function readFlyOrgApps({ org, token, fetchImpl = fetch }) {
+export async function readFlyOrgApps({ org, token, fetchImpl = fetch, signal, deadlineAt }) {
   if (typeof org !== 'string' || !ORG.test(org) || typeof token !== 'string'
     || token.length < 20 || token.length > 16_384 || /[\x00-\x1F\x7F]/.test(token)) {
     throw new Error('The selected Fly organization and token are required for network readback.');
   }
+  if (signal?.aborted) throw signal.reason ?? new DOMException('Aborted', 'AbortError');
+  const remaining = deadlineAt === undefined ? 30_000 : Math.min(30_000, deadlineAt - Date.now());
+  if (remaining <= 0) throw new DOMException('Fly inventory deadline expired.', 'TimeoutError');
+  const requestSignal = AbortSignal.any([AbortSignal.timeout(remaining), ...(signal ? [signal] : [])]);
   const response = await fetchImpl(`${API}/apps?org_slug=${encodeURIComponent(org)}`, {
     method: 'GET', headers: { Authorization: `Bearer ${token}`, 'Accept-Encoding': 'identity' },
-    redirect: 'error', signal: AbortSignal.timeout(30_000),
+    redirect: 'error', signal: requestSignal,
   });
   const inventory = await boundedJson(response);
+  if (requestSignal.aborted) throw requestSignal.reason ?? new DOMException('Aborted', 'AbortError');
   if (!Number.isSafeInteger(inventory?.total_apps) || inventory.total_apps < 0
     || inventory.total_apps > MAX_APPS || !Array.isArray(inventory.apps)
     || inventory.apps.length !== inventory.total_apps) {
@@ -85,6 +90,34 @@ export async function readFlyOrgApps({ org, token, fetchImpl = fetch }) {
     ids.add(app.id);
   }
   return inventory.apps;
+}
+
+export function assertFreshAppName(apps, app, network, plans = {}) {
+  assertProductNetwork(network);
+  if (typeof app !== 'string' || !APP.test(app) || !Array.isArray(apps)
+    || apps.some((entry) => entry.name === app)) {
+    throw membershipError('The proposed Fly app name already exists or its inventory is unavailable.');
+  }
+  assertPlannedNetworkMembers(apps, network, plans, { allowPending: true });
+}
+
+export async function verifyFreshAppPlan({ app, kind, org, network, accountRef,
+  expectedOrg, expectedNetwork, expectedAccountRef, getPlans, token, assertCurrent,
+  signal, deadlineAt, fetchImpl }) {
+  if (!['relay', 'worker'].includes(kind) || org !== expectedOrg
+    || network !== expectedNetwork || accountRef !== expectedAccountRef
+    || typeof getPlans !== 'function' || typeof assertCurrent !== 'function'
+    || Object.hasOwn(getPlans(), app)) {
+    throw membershipError('The goal Fly app plan changed before creation.');
+  }
+  await assertCurrent();
+  const apps = await readFlyOrgApps({ org, token, signal, deadlineAt, fetchImpl });
+  await assertCurrent();
+  if (signal?.aborted) throw signal.reason ?? new DOMException('Aborted', 'AbortError');
+  if (deadlineAt !== undefined && Date.now() >= deadlineAt) {
+    throw new DOMException('Fly inventory deadline expired.', 'TimeoutError');
+  }
+  assertFreshAppName(apps, app, network, getPlans());
 }
 
 export function assertNetworkVacant(apps, network) {

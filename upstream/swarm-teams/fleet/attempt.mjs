@@ -17,8 +17,8 @@ export async function provisionWithCleanup({ managed, worker, options, turn,
   beforeUp, beforeCleanup, onCleanup, retries = 8,
   appName = () => `swarm-${worker.id}-${Date.now().toString(36)}` }) {
   for (let attempt = 0; ; attempt++) {
-    const app = appName();
     await turn();
+    const app = await appName();
     await beforeUp?.(app);
     try {
       const result = await managed.up({ ...options, app });

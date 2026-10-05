@@ -253,11 +253,11 @@ test('Fly account lease rechecks a private personal config with the bundled help
     assert.equal((await manager.flyAccountLease()).available, false);
     changeDuringOrgList = false;
     email = 'human@example.com';
-    personalApps = [{ Name: 'goal-owned-worker' }];
-    assert.equal((await manager.flyAccountLease()).available, false);
+    personalApps = [{ Name: 'unrelated-existing-app' }];
+    assert.deepEqual(await manager.flyAccountLease(), lease);
     assert.equal(await manager.assertFlyAccountLeaseCurrent(lease), true);
-    assert.ok(calls.every(call => !['create', 'deploy', 'destroy', 'delete']
-      .some(verb => call.args.includes(verb))));
+    assert.ok(calls.every(call => ['--version', 'auth whoami --json', 'orgs list --json',
+      'orgs show production --json', 'orgs show personal --json'].includes(call.args.join(' '))));
     email = 'different@example.com';
     await assert.rejects(manager.assertFlyAccountLeaseCurrent(lease), /account or personal organization changed/);
     email = 'human@example.com';
@@ -354,19 +354,19 @@ test('Fly account lease rejects service identity, missing account config, and un
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('Fly organization lease refuses ambiguous, shared-only, occupied, and malformed metadata', async () => {
+test('Fly organization lease refuses ambiguous, shared-only, and malformed metadata', async () => {
   const cases = [
     { name: 'shared-only', list: { production: 'Private production' },
       show: { production: { Slug: 'production', Type: 'SHARED', Apps: { Nodes: [] } } } },
     { name: 'two-personal', list: { personal: 'One', 'other-personal': 'Two' },
       show: { personal: { Slug: 'personal', Type: 'PERSONAL', Apps: { Nodes: [] } },
         'other-personal': { Slug: 'other-personal', Type: 'PERSONAL', Apps: { Nodes: [] } } } },
-    { name: 'occupied-personal', list: { personal: 'Private production' },
-      show: { personal: { Slug: 'personal', Type: 'PERSONAL', Apps: { Nodes: [{ Name: 'production-app' }] } } } },
     { name: 'unknown-type', list: { personal: 'Private' },
       show: { personal: { Slug: 'personal', Type: 'UNKNOWN', Apps: { Nodes: [] } } } },
     { name: 'missing-app-evidence', list: { personal: 'Private' },
       show: { personal: { Slug: 'personal', Type: 'PERSONAL' } } },
+    { name: 'invalid-app-evidence', list: { personal: 'Private' },
+      show: { personal: { Slug: 'personal', Type: 'PERSONAL', Apps: { Nodes: {} } } } },
   ];
   for (const scenario of cases) {
     const root = mkdtempSync(join(tmpdir(), 'seagulled-fly-org-'));
@@ -397,7 +397,9 @@ test('Fly organization lease refuses ambiguous, shared-only, occupied, and malfo
       assert.match(result.detail, /personal Fly organization/i);
       assert.equal(JSON.stringify(result).includes('production') || JSON.stringify(result).includes(root), false);
       assert.ok(calls.every(call => call.env.FLY_API_TOKEN === undefined
-        && !call.args.includes('create') && !call.args.includes('deploy')));
+        && ['--version', 'auth whoami --json', 'orgs list --json',
+          'orgs show production --json', 'orgs show personal --json',
+          'orgs show other-personal --json'].includes(call.args.join(' '))));
     } finally { rmSync(root, { recursive: true, force: true }); }
   }
 });

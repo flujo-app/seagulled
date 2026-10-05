@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -10,7 +10,9 @@ import { assertFleetAccountCurrent, conversationFailure, fleetStatus, fleetDiagn
   fleetTopology, flyAccountLease, isolatedFlyEnvironment, bindVerifiedFlyOrganization,
   recordConfirmedQuotaHold, runFleetLeaf, staffOwnedTeam,
   verifiedLocalConversations } from '../src/swarm/fleet.mjs';
-import { createOwnedRelay } from '../src/swarm/relay.mjs';
+import { createOwnedRelay, isRelayPreCreationFailure,
+  relayFailureCleanupConfirmed } from '../src/swarm/relay.mjs';
+import { assertFreshAppName, readFlyOrgApps, verifyFreshAppPlan } from '../src/swarm/fly-network.mjs';
 import { buildSpecs } from '../upstream/swarm-teams/template/flows.mjs';
 import { Controller } from '../upstream/swarm-teams/fleet/controller.mjs';
 import { flyProvisioner } from '../upstream/swarm-teams/fleet/provisioners.mjs';
@@ -19,9 +21,101 @@ import { FlujoClient } from '../upstream/swarm-teams/lib/flujo-client.mjs';
 const relayNetwork = 'seagulled-g-0123456789abcdef0123456789abcdef';
 const accountRef = `fly-account-sha256:${'a'.repeat(64)}`;
 const relayInventory = (journal, created, network = relayNetwork) => {
-  const apps = created ? [{ id: 'fixture-app-id', name: journal.app, network }] : [];
+  const apps = [{ id: 'unrelated-default-id', name: 'unrelated-default-app', network: 'default' },
+    { id: 'unrelated-private-id', name: 'unrelated-private-app', network: 'other-private' },
+    ...(created ? [{ id: 'fixture-app-id', name: journal.app, network }] : [])];
   return new Response(JSON.stringify({ total_apps: apps.length, apps }), { status: 200 });
 };
+
+test('complete org inventory admits unrelated default and other-network apps but rejects reused names and foreign goal members', async () => {
+  const outside = [{ id: 'default-id', name: 'another-owner-default', network: 'default' },
+    { id: 'other-id', name: 'another-owner-private', network: 'other-private' }];
+  const fetchImpl = async () => new Response(JSON.stringify({ total_apps: outside.length, apps: outside }));
+  const apps = await readFlyOrgApps({ org: 'personal', token: 'fixture-token-at-least-twenty', fetchImpl });
+  assert.doesNotThrow(() => assertFreshAppName(apps, 'swarm-worker-fresh123', relayNetwork));
+  assert.throws(() => assertFreshAppName(apps, 'another-owner-default', relayNetwork), /already exists/);
+  assert.throws(() => assertFreshAppName([...apps,
+    { id: 'foreign-id', name: 'unplanned-goal-app', network: relayNetwork }],
+  'swarm-worker-fresh123', relayNetwork), /unverified app/);
+  assert.doesNotThrow(() => assertFreshAppName([...apps,
+    { id: 'owned-id', name: 'confirmed-original', network: relayNetwork }],
+  'swarm-worker-next123', relayNetwork,
+  { 'confirmed-original': { kind: 'worker', state: 'confirmed', appId: 'owned-id',
+    ownerMarker: `FLUJO_CLOUD_OWNER_${'A'.repeat(32)}` } }));
+  await assert.rejects(readFlyOrgApps({ org: 'personal', token: 'fixture-token-at-least-twenty',
+    fetchImpl: async () => new Response(JSON.stringify({ total_apps: 3, apps: outside })) }), /incomplete/);
+});
+
+test('Stop during held org inventory aborts before a new app plan', async () => {
+  const stop = new AbortController();
+  let entered;
+  const held = new Promise((resolve) => { entered = resolve; });
+  const inventory = readFlyOrgApps({ org: 'personal', token: 'fixture-token-at-least-twenty',
+    signal: stop.signal, fetchImpl: async (_url, { signal }) => {
+      entered(signal);
+      await new Promise((resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+      return relayInventory({}, false);
+    } });
+  const requestSignal = await held;
+  assert.equal(requestSignal.aborted, false);
+  stop.abort(new DOMException('Stopped', 'AbortError'));
+  await assert.rejects(inventory, { name: 'AbortError' });
+});
+
+test('account drift during held inventory refuses a fresh app before its plan', async () => {
+  let current = true;
+  let release;
+  let entered;
+  const started = new Promise((resolve) => { entered = resolve; });
+  const held = new Promise((resolve) => { release = resolve; });
+  const plans = {};
+  let checks = 0;
+  const verification = verifyFreshAppPlan({ app: 'swarm-worker-fresh123', kind: 'worker',
+    org: 'personal', expectedOrg: 'personal', network: relayNetwork,
+    expectedNetwork: relayNetwork, accountRef, expectedAccountRef: accountRef,
+    getPlans: () => plans, token: 'fixture-token-at-least-twenty',
+    assertCurrent: async () => { checks++; if (!current) throw new Error('Selected account changed.'); },
+    fetchImpl: async () => { entered(); await held;
+      return new Response(JSON.stringify({ total_apps: 0, apps: [] })); },
+  });
+  await started;
+  assert.equal(checks, 1);
+  current = false;
+  release();
+  await assert.rejects(verification, /Selected account changed/);
+  assert.equal(checks, 2);
+  assert.deepEqual(plans, {});
+});
+
+test('fresh app verification reads sibling plans after held inventory and final account authority', async () => {
+  let plans = {};
+  let release;
+  let entered;
+  const started = new Promise((resolve) => { entered = resolve; });
+  const held = new Promise((resolve) => { release = resolve; });
+  const sibling = { id: 'sibling-id', name: 'swarm-worker-sibling', network: relayNetwork };
+  let checks = 0;
+  const options = { app: 'swarm-worker-fresh123', kind: 'worker', org: 'personal',
+    expectedOrg: 'personal', network: relayNetwork, expectedNetwork: relayNetwork,
+    accountRef, expectedAccountRef: accountRef, getPlans: () => plans,
+    token: 'fixture-token-at-least-twenty', assertCurrent: async () => { checks++; },
+    fetchImpl: async () => { entered(); await held;
+      return new Response(JSON.stringify({ total_apps: 1, apps: [sibling] })); },
+  };
+  const verified = verifyFreshAppPlan(options);
+  await started;
+  plans = { [sibling.name]: { kind: 'worker', state: 'confirmed', appId: sibling.id,
+    ownerMarker: `FLUJO_CLOUD_OWNER_${'A'.repeat(32)}` } };
+  release();
+  await verified;
+  assert.equal(checks, 2);
+  assert.deepEqual(Object.keys(plans), [sibling.name]);
+  await assert.rejects(verifyFreshAppPlan({ ...options,
+    fetchImpl: async () => new Response(JSON.stringify({ total_apps: 1, apps: [
+      { id: 'foreign-id', name: 'unplanned-goal-app', network: relayNetwork }] })) }), /unverified app/);
+});
 
 test('Stop blocks dispatch but permits a fresh same-account fence for exact cleanup', async () => {
   const stop = new AbortController();
@@ -97,7 +191,7 @@ test('Fly account lease selects one verified personal config and drops inherited
     flyConfigDir: path.join(root, 'missing') }; } }), null);
   const dataDir = mkdtempSync(path.join(tmpdir(), 'seagulled-fly-no-account-'));
   assert.deepEqual(await runFleetLeaf({ goal: { id: 'no-account', providerId: 'openai' }, dataDir }),
-    { available: false, detail: 'A verified personal Fly sign-in, an unused personal organization, and the bundled Fly helper are required for isolated Workers.' });
+    { available: false, detail: 'A verified personal Fly sign-in, one selected personal organization, and the bundled Fly helper are required for isolated Workers.' });
   assert.equal(existsSync(path.join(dataDir, 'fleet')), false);
 });
 
@@ -884,6 +978,58 @@ test('owned relay Machine rejection destroys only its newly created app', async 
   assert.equal(JSON.parse(readFileSync(journalPath, 'utf8')).cleanupConfirmed, true);
 });
 
+test('a colliding or incomplete org inventory rejects relay before journal and Fly effects', async () => {
+  for (const inventory of [
+    (app) => ({ total_apps: 1, apps: [{ id: 'foreign-id', name: app, network: 'default' }] }),
+    () => ({ total_apps: 2, apps: [] }),
+  ]) {
+    const root = mkdtempSync(path.join(tmpdir(), 'seagulled-relay-fresh-'));
+    const journalPath = path.join(root, 'relay.json');
+    let flyCalls = 0;
+    await assert.rejects(createOwnedRelay({ journalPath, org: 'personal', network: relayNetwork,
+      accountRef, flyRunner: { run: async () => { flyCalls++; throw new Error('Fly must remain untouched.'); } },
+      portAllocator: async () => { throw new Error('No port allocation.'); },
+      verifyFreshApp: async ({ app }) => {
+        const apps = await readFlyOrgApps({ org: 'personal', token: 'fixture-token-at-least-twenty',
+          fetchImpl: async () => new Response(JSON.stringify(inventory(app))) });
+        assertFreshAppName(apps, app, relayNetwork);
+      },
+      onPlannedApp: () => { throw new Error('No plan may be persisted.'); },
+    }), (error) => {
+      assert.match(error.message, /already exists|incomplete/);
+      assert.equal(isRelayPreCreationFailure(error, journalPath), true);
+      assert.equal(relayFailureCleanupConfirmed(error, undefined, false, journalPath), true);
+      return true;
+    });
+    assert.equal(existsSync(journalPath), false);
+    assert.equal(flyCalls, 0);
+  }
+});
+
+test('pre-creation proof is fresh and bound to one relay journal', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-relay-capability-'));
+  const journalPath = path.join(root, 'relay.json');
+  const foreignPath = path.join(root, 'another-relay.json');
+  const original = new Error('Original verification refusal.');
+  let refusal;
+  await assert.rejects(createOwnedRelay({ journalPath, org: 'personal', network: relayNetwork,
+    accountRef, verifyFreshApp: async () => { throw original; },
+    onPlannedApp: () => { throw new Error('No plan is permitted.'); },
+    flyRunner: { run: async () => { throw new Error('No Fly call is permitted.'); } },
+    portAllocator: async () => { throw new Error('No port allocation is permitted.'); },
+  }), (error) => { refusal = error; return error.message === original.message; });
+  assert.notEqual(refusal, original);
+  assert.equal(refusal.cause, original);
+  assert.equal(existsSync(journalPath), false);
+  assert.equal(isRelayPreCreationFailure(refusal, journalPath), true);
+  assert.equal(relayFailureCleanupConfirmed(refusal, undefined, false, journalPath), true);
+  assert.equal(isRelayPreCreationFailure(refusal, foreignPath), false);
+  assert.equal(relayFailureCleanupConfirmed(refusal, undefined, false, foreignPath), false);
+  assert.equal(isRelayPreCreationFailure(original, journalPath), false);
+  assert.equal(relayFailureCleanupConfirmed(original, undefined, false, journalPath), false,
+    'a reused original error cannot clear a later unknown cleanup hold');
+});
+
 test('relay rechecks account and network immediately before app creation', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'seagulled-relay-precreate-'));
   const journalPath = path.join(root, 'relay.json');
@@ -932,6 +1078,7 @@ test('ambiguous relay app creation retains its intent and never destroys an unco
   const root = mkdtempSync(path.join(tmpdir(), 'seagulled-relay-unknown-'));
   const journalPath = path.join(root, 'relay.json');
   const calls = [];
+  let postCreationFailure;
   await assert.rejects(() => createOwnedRelay({ journalPath, org: 'personal', network: relayNetwork,
     flyRunner: { run: async (args) => {
       calls.push(args.slice(0, 2).join(' '));
@@ -943,9 +1090,13 @@ test('ambiguous relay app creation retains its intent and never destroys an unco
         JSON.parse(readFileSync(journalPath, 'utf8')), calls.includes('apps create'));
       throw new Error(`Unexpected relay fixture URL: ${url}`);
     },
-  }), (error) => error.code === 'UNKNOWN');
+  }), (error) => { postCreationFailure = error; return error.code === 'UNKNOWN'; });
   assert.deepEqual(calls, ['auth token', 'apps create']);
   assert.equal(JSON.parse(readFileSync(journalPath, 'utf8')).state, 'creation-unknown');
+  rmSync(journalPath);
+  assert.equal(isRelayPreCreationFailure(postCreationFailure, journalPath), false);
+  assert.equal(relayFailureCleanupConfirmed(postCreationFailure, undefined, existsSync(journalPath), journalPath),
+    false, 'a lost journal after possible app creation must retain the cleanup hold');
 });
 
 test('relay creation holds an app when its staged owner marker cannot be confirmed', async () => {

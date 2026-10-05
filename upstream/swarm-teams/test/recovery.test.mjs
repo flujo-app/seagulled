@@ -188,6 +188,36 @@ test('stopping the relay agent aborts its outstanding long poll promptly', async
   }
 });
 
+test('capture spacing completes before fresh app verification, with Stop refusing a late plan', async () => {
+  for (const stopAfterTurn of [false, true]) {
+    let release;
+    let entered;
+    const started = new Promise((resolve) => { entered = resolve; });
+    const held = new Promise((resolve) => { release = resolve; });
+    const calls = [];
+    const provisioning = provisionWithCleanup({ managed: {
+      up: async ({ app }) => { calls.push('up'); return { worker: app }; },
+      down: async () => { calls.push('down'); return { state: 'destroyed' }; },
+    }, worker: { id: 'held-turn' }, options: {},
+    turn: async () => { calls.push('turn'); entered(); await held; },
+    appName: async () => { calls.push('verify');
+      if (stopAfterTurn) throw Object.assign(new Error('Stopped'), { name: 'AbortError' });
+      calls.push('plan'); return 'swarm-worker-heldturn'; },
+    beforeUp: async () => { calls.push('membership'); },
+    });
+    await started;
+    assert.deepEqual(calls, ['turn']);
+    release();
+    if (stopAfterTurn) {
+      await assert.rejects(provisioning, { name: 'AbortError' });
+      assert.deepEqual(calls, ['turn', 'verify']);
+    } else {
+      assert.equal((await provisioning).worker, 'swarm-worker-heldturn');
+      assert.deepEqual(calls, ['turn', 'verify', 'plan', 'membership', 'up']);
+    }
+  }
+});
+
 test('a busy provisioning attempt is never replaced when cleanup throws or is not terminal', async () => {
   for (const down of [async () => { throw new Error('lost cleanup response'); }, async () => ({ state: 'unknown' })]) {
     let starts = 0;

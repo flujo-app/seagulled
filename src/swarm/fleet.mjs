@@ -9,8 +9,9 @@ import { FlujoClient } from '../../upstream/swarm-teams/lib/flujo-client.mjs';
 import { installTemplate } from '../../upstream/swarm-teams/install.mjs';
 import { BOOT_FLOW } from '../../upstream/swarm-teams/template/flows.mjs';
 import { collectFlyArtifacts } from '../artifacts/fly.mjs';
-import { createOwnedRelay } from './relay.mjs';
-import { assertNetworkVacant, assertPlannedNetworkMembers, readFlyOrgApps } from './fly-network.mjs';
+import { createOwnedRelay, relayFailureCleanupConfirmed } from './relay.mjs';
+import { assertNetworkVacant, assertPlannedNetworkMembers, readFlyOrgApps,
+  verifyFreshAppPlan } from './fly-network.mjs';
 
 const legacyProfilePath = () => path.join(process.env.SWARM_TEAMS_HOME || path.join(homedir(), '.swarm-teams'), 'config.json');
 const profilePath = () => process.env.SEAGULLED_FLEET_PROFILE || legacyProfilePath();
@@ -22,7 +23,7 @@ const assertAdmission = (signal, deadlineAt) => {
     throw Object.assign(new Error('The fleet deadline passed before submission.'), { code: 'DEADLINE', outcome: 'not_applied' });
   }
 };
-export const flyUnavailable = 'A verified personal Fly sign-in, an unused personal organization, and the bundled Fly helper are required for isolated Workers.';
+export const flyUnavailable = 'A verified personal Fly sign-in, one selected personal organization, and the bundled Fly helper are required for isolated Workers.';
 const regularFile = (value) => {
   try { return typeof value === 'string' && path.isAbsolute(value) && statSync(value).isFile(); }
   catch { return false; }
@@ -542,6 +543,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     renameSync(temporary, intentPath);
   };
   const planApp = ({ app, org, network, accountRef, kind }) => {
+    assertAdmission(signal, fleetDeadlineAt);
     if (!/^[a-z][a-z0-9-]{2,62}$/.test(app ?? '')
       || !['relay', 'worker'].includes(kind) || org !== intent.org || network !== intent.network
       || accountRef !== intent.accountRef
@@ -652,11 +654,19 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     if (!flyToken || org !== intent.org || flyAccount.accountRef !== intent.accountRef) {
       throw unknown('The selected Fly account or goal organization changed.');
     }
-    assertNetworkVacant(await readFlyOrgApps({ org, token: flyToken }), intent.network);
+    assertNetworkVacant(await readFlyOrgApps({ org, token: flyToken, signal,
+      deadlineAt: fleetDeadlineAt }), intent.network);
+    const verifyFreshApp = async ({ app, kind, org: plannedOrg, network, accountRef }) => {
+      await verifyFreshAppPlan({ app, kind, org: plannedOrg, network, accountRef,
+        expectedOrg: org, expectedNetwork: intent.network, expectedAccountRef: intent.accountRef,
+        getPlans: () => intent.apps, token: flyToken, assertCurrent: assertAccountCurrent,
+        signal, deadlineAt: fleetDeadlineAt });
+    };
     const verifyNetwork = async ({ allowPending = true, operation = 'dispatch' } = {}) => {
       try {
         await assertAccountCurrent({ operation });
-        return assertPlannedNetworkMembers(await readFlyOrgApps({ org, token: flyToken }),
+        return assertPlannedNetworkMembers(await readFlyOrgApps({ org, token: flyToken,
+          ...(operation === 'dispatch' ? { signal, deadlineAt: fleetDeadlineAt } : {}) }),
           intent.network, intent.apps, { allowPending });
       } catch (error) {
         if (error.name === 'AbortError') throw error;
@@ -684,7 +694,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
           relay = await createOwnedRelay({ journalPath: relayPath, flujoCloudPath: config.provisioner.flujoCloudPath,
             org, network: intent.network, accountRef: intent.accountRef,
             region: config.provisioner.region ?? 'iad',
-            flyEnv, flyctlPath: flyAccount.flyctlPath, onPlannedApp: planApp,
+            flyEnv, flyctlPath: flyAccount.flyctlPath, verifyFreshApp, onPlannedApp: planApp,
             verifyNetwork });
         } catch (error) {
           // The relay factory journals before the first Fly mutation. A failed
@@ -692,7 +702,8 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
           // remains; an ambiguous app must retain its exact intent.
           let relayState;
           try { relayState = JSON.parse(readFileSync(relayPath, 'utf8')); } catch { /* Keep the hold. */ }
-          relayCleanupConfirmed = relayState?.state === 'retired' || relayState?.state === 'not-applied';
+          relayCleanupConfirmed = relayFailureCleanupConfirmed(error, relayState,
+            existsSync(relayPath), relayPath);
           if (relayState?.state === 'retired' && intent.apps[relayState.app]?.state === 'planned') {
             retireApp(relayState.app);
           }
@@ -718,7 +729,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
       initialWorkers: topology.initialWorkers,
       teamLimits, flyEnv, cloudDirectory, network: intent.network,
       accountRef: intent.accountRef,
-      onPlannedApp: planApp, onConfirmedApp: confirmApp, onRetiredApp: retireApp,
+      verifyFreshApp, onPlannedApp: planApp, onConfirmedApp: confirmApp, onRetiredApp: retireApp,
       verifyNetwork });
     const observeWorkerConversations = async (worker, { operation = 'dispatch' } = {}) => {
       if (localConversations.some((entry) => entry.workerId === worker.id)) return;

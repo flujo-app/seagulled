@@ -37,7 +37,7 @@ export function workspaceProvisioner({ origin, token, model, browser = true, tea
 export async function flyProvisioner({ flujoCloudPath, templateWorkspace, source, org, network, accountRef,
   region = 'iad', memoryMb = 4096, fleetReachable = false, concurrency = 8, initialWorkers = 0,
   captureSpacingMs = 8000, teamLimits, specialists, flyEnv, cloudDirectory,
-  onPlannedApp, onConfirmedApp, onRetiredApp, verifyNetwork,
+  verifyFreshApp, onPlannedApp, onConfirmedApp, onRetiredApp, verifyNetwork,
   installTemplateImpl = installTemplate }) {
   const lib = (name) => import(pathToFileURL(path.join(flujoCloudPath, 'lib', name)).href);
   const { ManagedCloud } = await lib('managed.mjs');
@@ -50,7 +50,7 @@ export async function flyProvisioner({ flujoCloudPath, templateWorkspace, source
     || typeof managed.openOwnedProxy !== 'function'
     || typeof managed.credential !== 'function' || typeof controlToken !== 'function'
     || typeof accountRef !== 'string' || !/^fly-account-sha256:[a-f0-9]{64}$/.test(accountRef)
-    || typeof onPlannedApp !== 'function' || typeof onConfirmedApp !== 'function'
+    || typeof verifyFreshApp !== 'function' || typeof onPlannedApp !== 'function' || typeof onConfirmedApp !== 'function'
     || typeof onRetiredApp !== 'function' || typeof verifyNetwork !== 'function')) {
     throw new Error('The pinned cloud SDK and goal network journal are not ready for private Worker creation.');
   }
@@ -101,8 +101,9 @@ export async function flyProvisioner({ flujoCloudPath, templateWorkspace, source
   // still collide, clear the failed attempt and try again under a fresh app name.
   let gate = Promise.resolve();
   const turn = () => { const mine = gate; gate = gate.then(() => new Promise((resolve) => setTimeout(resolve, captureSpacingMs))); return mine; };
-  const appName = () => {
+  const appName = async () => {
     const app = `swarm-worker-${randomBytes(8).toString('hex')}`;
+    await verifyFreshApp({ app, kind: 'worker', org, network, accountRef });
     const written = onPlannedApp({ app, kind: 'worker', org, network, accountRef });
     if (written && typeof written.then === 'function') {
       throw new Error('The goal Worker app plan must be durable before creation.');
