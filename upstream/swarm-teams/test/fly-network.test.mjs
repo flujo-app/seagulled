@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { flyProvisioner } from '../upstream/swarm-teams/fleet/provisioners.mjs';
+import { flyProvisioner } from '../fleet/provisioners.mjs';
 
-const network = 'seagulled-g-0123456789abcdef0123456789abcdef';
+const network = 'swarm-g-0123456789abcdef0123456789abcdef';
 const accountRef = `fly-account-sha256:${'a'.repeat(64)}`;
 const owner = '11111111-2222-4333-8444-555555555555';
 const setup = (version = 1) => {
@@ -70,7 +70,7 @@ test('Worker app is privately planned before SDK up and exact ID/network are che
   } finally { delete globalThis.__networkSdkFixture; f.close(); }
 });
 
-test('unpatched SDK refuses product network before any Worker app plan', async () => {
+test('unpatched SDK refuses requested network before any Worker app plan', async () => {
   const f = setup(null);
   let planned = false;
   try {

@@ -92,7 +92,7 @@ export async function flyProvisioner({ flujoCloudPath, templateWorkspace, source
   let gate = Promise.resolve();
   const turn = () => { const mine = gate; gate = gate.then(() => new Promise((resolve) => setTimeout(resolve, captureSpacingMs))); return mine; };
   const appName = () => {
-    const app = `seagulled-worker-${randomBytes(8).toString('hex')}`;
+    const app = `swarm-worker-${randomBytes(8).toString('hex')}`;
     const written = onPlannedApp({ app, kind: 'worker', org, network, accountRef });
     if (written && typeof written.then === 'function') {
       throw new Error('The goal Worker app plan must be durable before creation.');
