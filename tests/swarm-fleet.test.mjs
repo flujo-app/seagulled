@@ -658,11 +658,21 @@ test('owned relay journals before Fly mutation, forwards through its own proxy, 
   const flyctlPath = path.join(root, 'flyctl-fixture');
   const flyEnv = { FLYCTL_PATH: flyctlPath, FLY_CONFIG_DIR: path.join(root, 'personal-config') };
   const calls = [];
-  const flyRunner = { run: async (args) => {
+  const flyRunner = { run: async (args, { input } = {}) => {
     calls.push(args.slice(0, 2).join(' '));
     if (args[0] === 'apps' && args[1] === 'create') {
       assert.equal(JSON.parse(readFileSync(journalPath, 'utf8')).state, 'creating-app');
     }
+    if (args[0] === 'secrets' && args[1] === 'import') {
+      const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
+      assert.deepEqual(args.slice(2), ['--app', journal.app, '--stage']);
+      assert.equal(input, `SEAGULLED_RELAY_OWNER_${journal.owner.toUpperCase()}=1\n`);
+    }
+    if (args[0] === 'secrets' && args[1] === 'list') {
+      const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
+      return JSON.stringify([{ Name: `SEAGULLED_RELAY_OWNER_${journal.owner.toUpperCase()}` }]);
+    }
+    if (args[0] === 'volumes' && args[1] === 'list') return '[]';
     return args[0] === 'auth' ? 'fixture-token' : '{}';
   } };
   let agentStopped = false;
@@ -695,7 +705,7 @@ test('owned relay journals before Fly mutation, forwards through its own proxy, 
         return new Response(JSON.stringify([{ id: 'fixturemachine' }]), { status: 200 });
       }
       if (url.endsWith('/machines/fixturemachine/metadata')) {
-        return new Response(JSON.stringify({ seagulled_owner: journal.owner }), { status: 200 });
+        return new Response(JSON.stringify({ seagulled: 'owned-relay', seagulled_owner: journal.owner }), { status: 200 });
       }
       if (url.endsWith('/health')) return new Response('{}', { status: 200 });
       if (url.includes('/apps/seagulled-relay-') && options.method === 'GET') {
@@ -711,7 +721,8 @@ test('owned relay journals before Fly mutation, forwards through its own proxy, 
   assert.equal(await relay.retire(), true);
   assert.equal(agentStopped, true);
   assert.equal(proxyStopped, true);
-  assert.deepEqual(calls, ['auth token', 'apps create', 'apps destroy']);
+  assert.deepEqual(calls, ['auth token', 'apps create', 'secrets import', 'secrets list',
+    'secrets list', 'volumes list', 'apps destroy']);
   assert.equal(JSON.parse(readFileSync(journalPath, 'utf8')).state, 'retired');
 });
 
@@ -720,7 +731,15 @@ test('owned relay Machine rejection destroys only its newly created app', async 
   const journalPath = path.join(root, 'relay.json');
   const calls = [];
   await assert.rejects(() => createOwnedRelay({ journalPath, org: 'personal',
-    flyRunner: { run: async (args) => { calls.push(args.slice(0, 2).join(' ')); return args[0] === 'auth' ? 'fixture-token' : '{}'; } },
+    flyRunner: { run: async (args) => {
+      calls.push(args.slice(0, 2).join(' '));
+      if (args[0] === 'secrets' && args[1] === 'list') {
+        const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
+        return JSON.stringify([{ name: `SEAGULLED_RELAY_OWNER_${journal.owner.toUpperCase()}` }]);
+      }
+      if (args[0] === 'volumes' && args[1] === 'list') return '[]';
+      return args[0] === 'auth' ? 'fixture-token' : '{}';
+    } },
     portAllocator: async () => 48123,
     fetchImpl: async (url, options) => {
       const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
@@ -734,7 +753,8 @@ test('owned relay Machine rejection destroys only its newly created app', async 
       throw new Error(`Unexpected relay fixture URL: ${url}`);
     },
   }), /Machine creation returned HTTP 500/);
-  assert.deepEqual(calls, ['auth token', 'apps create', 'apps destroy']);
+  assert.deepEqual(calls, ['auth token', 'apps create', 'secrets import', 'secrets list',
+    'secrets list', 'volumes list', 'apps destroy']);
   assert.equal(JSON.parse(readFileSync(journalPath, 'utf8')).cleanupConfirmed, true);
 });
 
@@ -753,8 +773,32 @@ test('ambiguous relay app creation retains its intent and never destroys an unco
   assert.equal(JSON.parse(readFileSync(journalPath, 'utf8')).state, 'creation-unknown');
 });
 
-test('relay retirement refuses a replaced app or a Machine without its unique owner marker', async () => {
-  for (const changed of ['app-id', 'machine-owner']) {
+test('relay creation holds an app when its staged owner marker cannot be confirmed', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-relay-unmarked-'));
+  const journalPath = path.join(root, 'relay.json');
+  const calls = [];
+  await assert.rejects(() => createOwnedRelay({ journalPath, org: 'personal',
+    flyRunner: { run: async (args) => {
+      calls.push(args.slice(0, 2).join(' '));
+      if (args[0] === 'secrets' && args[1] === 'list') return '[]';
+      return args[0] === 'auth' ? 'fixture-token' : '{}';
+    } }, portAllocator: async () => 48123,
+    fetchImpl: async (url) => {
+      const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
+      if (url.includes('/apps/seagulled-relay-')) return new Response(JSON.stringify({
+        id: 'fixture-app-id', name: journal.app, organization: { slug: journal.org },
+      }), { status: 200 });
+      throw new Error(`Unexpected relay fixture URL: ${url}`);
+    },
+  }), (error) => error.code === 'UNKNOWN');
+  assert.deepEqual(calls, ['auth token', 'apps create', 'secrets import', 'secrets list']);
+  const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
+  assert.equal(journal.ownershipConfirmed, false);
+  assert.equal(journal.state, 'cleanup-unknown');
+});
+
+test('relay retirement refuses changed app identity, app marker, Machine markers, or foreign volumes', async () => {
+  for (const changed of ['app-id', 'app-marker', 'machine-owner', 'machine-type', 'foreign-volume']) {
     const root = mkdtempSync(path.join(tmpdir(), 'seagulled-relay-foreign-'));
     const journalPath = path.join(root, 'relay.json');
     const calls = [];
@@ -762,6 +806,14 @@ test('relay retirement refuses a replaced app or a Machine without its unique ow
     const relay = await createOwnedRelay({ journalPath, org: 'personal', portAllocator: async () => 48124,
       flyRunner: { run: async (args) => {
         calls.push(args.slice(0, 2).join(' '));
+        if (args[0] === 'secrets' && args[1] === 'list') {
+          const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
+          return JSON.stringify([{ Name: retired && changed === 'app-marker' ? 'FOREIGN_OWNER'
+            : `SEAGULLED_RELAY_OWNER_${journal.owner.toUpperCase()}` }]);
+        }
+        if (args[0] === 'volumes' && args[1] === 'list') {
+          return retired && changed === 'foreign-volume' ? '[{"id":"foreign-volume"}]' : '[]';
+        }
         return args[0] === 'auth' ? 'fixture-token' : '{}';
       } },
       fetchImpl: async (url, options) => {
@@ -769,6 +821,7 @@ test('relay retirement refuses a replaced app or a Machine without its unique ow
         if (url.endsWith('/machines') && options.method === 'POST') return new Response('{"id":"fixturemachine"}', { status: 201 });
         if (url.endsWith('/machines') && options.method === 'GET') return new Response('[{"id":"fixturemachine"}]', { status: 200 });
         if (url.endsWith('/machines/fixturemachine/metadata')) return new Response(JSON.stringify({
+          seagulled: retired && changed === 'machine-type' ? 'foreign' : 'owned-relay',
           seagulled_owner: retired && changed === 'machine-owner' ? 'foreign-owner' : journal.owner,
         }), { status: 200 });
         if (url.includes('/apps/seagulled-relay-') && options.method === 'GET') return new Response(JSON.stringify({

@@ -9,6 +9,13 @@ import { startRelayAgent } from '../../upstream/swarm-teams/fleet/relay.mjs';
 const RELAY_SOURCE = fileURLToPath(new URL('../../upstream/swarm-teams/fleet/relay.mjs', import.meta.url));
 const API = 'https://api.machines.dev/v1';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const ownerMarker = (owner) => `SEAGULLED_RELAY_OWNER_${owner.toUpperCase()}`;
+const flyArray = (output, label) => {
+  let value;
+  try { value = JSON.parse(output); } catch { throw new Error(`Relay ${label} inventory is unconfirmed.`); }
+  if (!Array.isArray(value)) throw new Error(`Relay ${label} inventory is unconfirmed.`);
+  return value;
+};
 
 export async function createOwnedRelay({ journalPath, flujoCloudPath, org, region = 'iad', fetchImpl = fetch,
   spawnImpl = spawn, flyRunner, flyEnv, flyctlPath, portAllocator, agentFactory = startRelayAgent } = {}) {
@@ -29,7 +36,8 @@ export async function createOwnedRelay({ journalPath, flujoCloudPath, org, regio
   const secret = randomBytes(32).toString('base64url');
   const owner = randomBytes(16).toString('hex');
   let state = { version: 1, kind: 'seagulled-owned-relay', app, org, region, secret,
-    owner, appCreated: false, appId: null, machineId: null, state: 'planned', createdAt: new Date().toISOString() };
+    owner, appCreated: false, appId: null, ownershipConfirmed: false, machineId: null,
+    state: 'planned', createdAt: new Date().toISOString() };
   writeFileSync(journalPath, JSON.stringify(state), { flag: 'wx', mode: 0o600 });
   const record = (patch) => {
     state = { ...state, ...patch, updatedAt: new Date().toISOString() };
@@ -55,6 +63,11 @@ export async function createOwnedRelay({ journalPath, flujoCloudPath, org, regio
     if (details.id !== state.appId || details.name !== app || details.organization?.slug !== org) {
       throw new Error('Relay app identity changed; preserve the journal without deleting this app.');
     }
+    if (!state.ownershipConfirmed) throw new Error('Relay app ownership marker was not confirmed.');
+    const secrets = flyArray(await fly.run(['secrets', 'list', '--app', app, '--json']), 'secret');
+    if (!secrets.some((entry) => (entry?.Name ?? entry?.name) === ownerMarker(owner))) {
+      throw new Error('Relay app ownership marker is missing; preserve the app.');
+    }
     return true;
   };
   const ownedMachines = async () => {
@@ -67,10 +80,15 @@ export async function createOwnedRelay({ journalPath, flujoCloudPath, org, regio
     }
     for (const machine of machines) {
       const metadata = await request('GET', `/apps/${app}/machines/${machine.id}/metadata`);
-      if (metadata.status !== 200 || (await metadata.json()).seagulled_owner !== owner) {
+      const marker = metadata.status === 200 ? await metadata.json() : null;
+      if (marker?.seagulled !== 'owned-relay' || marker?.seagulled_owner !== owner) {
         throw new Error('Relay Machine ownership marker is unconfirmed.');
       }
     }
+  };
+  const noVolumes = async () => {
+    const volumes = flyArray(await fly.run(['volumes', 'list', '--app', app, '--json']), 'volume');
+    if (volumes.length !== 0) throw new Error('A volume exists in the relay app; preserve the app.');
   };
   const retire = async () => {
     await stopTransport();
@@ -82,6 +100,7 @@ export async function createOwnedRelay({ journalPath, flujoCloudPath, org, regio
         return true;
       }
       await ownedMachines();
+      await noVolumes();
     } catch (error) {
       record({ state: 'cleanup-unknown', cleanupConfirmed: false, error: String(error.message).slice(0, 200) });
       return false;
@@ -105,7 +124,13 @@ export async function createOwnedRelay({ journalPath, flujoCloudPath, org, regio
     if (typeof value.id !== 'string' || !value.id || value.name !== app || value.organization?.slug !== org) {
       throw new Error('New relay app identity could not be confirmed.');
     }
-    record({ appId: value.id, state: 'creating-machine' });
+    record({ appId: value.id, state: 'marking-app' });
+    await fly.run(['secrets', 'import', '--app', app, '--stage'], { input: `${ownerMarker(owner)}=1\n` });
+    const secrets = flyArray(await fly.run(['secrets', 'list', '--app', app, '--json']), 'secret');
+    if (!secrets.some((entry) => (entry?.Name ?? entry?.name) === ownerMarker(owner))) {
+      throw new Error('New relay app ownership marker could not be confirmed.');
+    }
+    record({ ownershipConfirmed: true, state: 'creating-machine' });
     const source = readFileSync(RELAY_SOURCE);
     const response = await request('POST', `/apps/${app}/machines`, { name: 'relay', region, config: {
       image: 'registry-1.docker.io/library/node:22-alpine', init: { cmd: ['node', '/relay/relay.mjs'] },
