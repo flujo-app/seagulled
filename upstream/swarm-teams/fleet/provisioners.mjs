@@ -63,9 +63,9 @@ export async function flyProvisioner({ flujoCloudPath, templateWorkspace, source
   });
   initialReady.catch(() => undefined);
   if (!initialOutstanding) releaseInitial();
-  const waitNetworkReady = async () => {
+  const waitNetworkReady = async (operation = 'dispatch') => {
     for (let attempt = 0; attempt < 40; attempt++) {
-      try { await verifyNetwork({ allowPending: false }); return; }
+      try { await verifyNetwork({ allowPending: false, operation }); return; }
       catch (error) {
         if (error.code !== 'NETWORK_PENDING' || attempt === 39) throw error;
         await new Promise((resolve) => setTimeout(resolve, 500));
@@ -102,8 +102,20 @@ export async function flyProvisioner({ flujoCloudPath, templateWorkspace, source
   const up = (worker, options) => provisionWithCleanup({ managed, worker, options, turn,
     ...(network ? { appName,
       beforeUp: () => verifyNetwork({ allowPending: true }),
-      beforeCleanup: () => verifyNetwork({ allowPending: true }),
+      beforeCleanup: () => verifyNetwork({ allowPending: true, operation: 'cleanup' }),
       onCleanup: onRetiredApp } : {}) });
+  const cleanupProvisioned = async (app) => {
+    if (network) {
+      try { await verifyNetwork({ allowPending: true, operation: 'cleanup' }); }
+      catch (error) { return { confirmed: false, app, error: error.message }; }
+    }
+    const cleanup = await cleanupAttempt(managed, app);
+    if (cleanup.confirmed && network) {
+      try { await onRetiredApp(app); }
+      catch (error) { return { confirmed: false, app, error: error.message }; }
+    }
+    return cleanup;
+  };
 
   return {
     async provision(worker, fleet, context = {}) {
@@ -131,7 +143,10 @@ export async function flyProvisioner({ flujoCloudPath, templateWorkspace, source
             if (!initialOutstanding) { await waitNetworkReady(); releaseInitial(); }
             else await initialReady;
           }
-        } catch (error) { rejectInitial(error); throw error; }
+        } catch (error) {
+          rejectInitial(error);
+          throw attemptError(error, await cleanupProvisioned(app));
+        }
       }
       const reachable = fleetReachable || Boolean(fleet?.remoteUrl);
       const target = { kind: 'fly', app: result.worker, org: result.org,
@@ -148,22 +163,21 @@ export async function flyProvisioner({ flujoCloudPath, templateWorkspace, source
           limits: context.teamLimits ?? teamLimits,
           specialists: context.specialists ?? specialists });
       } catch (error) {
-        if (error.code === 'NETWORK_MEMBERSHIP') throw error;
-        if (network) await verifyNetwork({ allowPending: true });
-        const cleanup = await cleanupAttempt(managed, app);
-        if (cleanup.confirmed && network) await onRetiredApp(app);
-        throw attemptError(error, cleanup);
+        if (error.code === 'NETWORK_MEMBERSHIP') {
+          throw attemptError(error, { confirmed: false, app, error: error.message });
+        }
+        throw attemptError(error, await cleanupProvisioned(app));
       } finally { await connection?.close(); }
       return target;
     },
-    async connect(target) {
+    async connect(target, { operation = 'dispatch' } = {}) {
       if (network) {
         if (target.network !== network || target.accountRef !== accountRef
           || target.org !== org || !target.appId) {
           throw new Error('The Worker target is not pinned to the goal network.');
         }
         await verifyDeployment(target.app, target.appId);
-        await waitNetworkReady();
+        await waitNetworkReady(operation);
       }
       await managed.runtime();
       // A Worker this provisioner created keeps its bearer in flujo-cloud's private store;
@@ -191,11 +205,11 @@ export async function flyProvisioner({ flujoCloudPath, templateWorkspace, source
           throw new Error('The Worker target is not pinned to the goal network.');
         }
         await verifyDeployment(target.app, target.appId);
-        await verifyNetwork({ allowPending: true });
+        await verifyNetwork({ allowPending: true, operation: 'cleanup' });
       }
       const cleanup = await cleanupAttempt(managed, target.app);
       if (!cleanup.confirmed) throw new Error(cleanup.error);
-      if (network) { await onRetiredApp(target.app); await verifyNetwork({ allowPending: true }); }
+      if (network) { await onRetiredApp(target.app); await verifyNetwork({ allowPending: true, operation: 'cleanup' }); }
     },
   };
 }
@@ -209,6 +223,6 @@ export function mixedProvisioner({ branch, leaf }) {
   return {
     provision: (worker, fleet, context) => (context?.isLeaf ? leaf : branch).provision(worker, fleet, context),
     retire: (target) => of(target).retire(target),
-    connect: (target) => (of(target).connect ? of(target).connect(target) : { client: new FlujoClient(target), close: async () => undefined }),
+    connect: (target, context) => (of(target).connect ? of(target).connect(target, context) : { client: new FlujoClient(target), close: async () => undefined }),
   };
 }

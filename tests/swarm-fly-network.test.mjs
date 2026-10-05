@@ -15,22 +15,29 @@ test('bounded org inventory proves exact app and 6PN while unrelated default app
     assert.equal(options.redirect, 'error');
     assert.equal(options.headers.Authorization, 'Bearer fixture-private-token');
     assert.equal(options.headers['Accept-Encoding'], 'identity');
-    return response([{ id: 'other123', name: 'other-production-app', network: 'default' }, app]);
+    return response([{ id: 'other123', name: 'other-production-app', network: 'X' }, app]);
   });
   assert.deepEqual(assertAppNetwork(apps, { app: app.name, appId: app.id, network }), app);
   assert.throws(() => assertNetworkVacant(apps, network), /already has apps/);
   assert.throws(() => assertAppNetwork(apps, { app: app.name, appId: app.id,
     network: 'seagulled-g-other' }), /network identity changed/);
-  assert.equal(apps[0].network, 'default');
+  assert.equal(apps[0].network, 'X', 'an unrelated short mixed-case Fly network is valid inventory');
+  assert.throws(() => assertNetworkVacant([], 'X'), /product-private/);
 });
 
 test('compressed inventory uses the decoded byte cap without comparing encoded Content-Length', async () => {
   const bytes = JSON.stringify({ total_apps: 1, apps: [app] });
   const compressedHeader = new Response(bytes, { status: 200,
-    headers: { 'content-encoding': 'gzip', 'content-length': '12' } });
+    headers: { 'content-encoding': ' gzip ', 'content-length': '12' } });
   assert.deepEqual(await read(async () => compressedHeader), [app]);
   await assert.rejects(read(async () => new Response(bytes, { status: 200,
     headers: { 'content-length': '12' } })), /length changed/);
+  await assert.rejects(read(async () => new Response(bytes, { status: 200,
+    headers: { 'content-length': 'NaN' } })), /length is invalid/);
+  await assert.rejects(readFlyOrgApps({ org: 'personal', token: 'short',
+    fetchImpl: async () => response([app]) }), /token are required/);
+  await assert.rejects(readFlyOrgApps({ org: 'personal', token: 'a'.repeat(20) + '\n',
+    fetchImpl: async () => response([app]) }), /token are required/);
 });
 
 test('unknown, incomplete, duplicate, oversized or redirected inventory never proves isolation', async () => {

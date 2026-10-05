@@ -6,7 +6,8 @@ const MAX_APPS = 2048;
 const ORG = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const APP = /^[a-z][a-z0-9-]{2,62}$/;
 const APP_ID = /^[A-Za-z0-9_-]{1,128}$/;
-const NETWORK = /^[a-z][a-z0-9-]{0,62}$/;
+const PRODUCT_NETWORK = /^[a-z][a-z0-9-]{2,62}$/;
+const API_NETWORK = /^[A-Za-z][A-Za-z0-9-]{0,62}$/;
 const validOwnerMarker = (kind, marker) => typeof marker === 'string'
   && (kind === 'relay' ? /^SEAGULLED_RELAY_OWNER_[A-F0-9]{16,64}$/
     : /^FLUJO_CLOUD_OWNER_[A-F0-9]{16,64}$/).test(marker);
@@ -14,7 +15,7 @@ const membershipError = (message, code = 'NETWORK_MEMBERSHIP') =>
   Object.assign(new Error(message), { code });
 
 export function assertProductNetwork(network) {
-  if (typeof network !== 'string' || !NETWORK.test(network) || network === 'default') {
+  if (typeof network !== 'string' || !PRODUCT_NETWORK.test(network) || network === 'default') {
     throw new Error('A valid explicit product-private Fly network is required.');
   }
   return network;
@@ -25,8 +26,8 @@ async function boundedJson(response) {
     throw new Error('Fly organization network inventory is unavailable.');
   }
   const contentLength = response.headers.get('content-length');
-  const identityEncoding = !response.headers.get('content-encoding')
-    || response.headers.get('content-encoding').toLowerCase() === 'identity';
+  const encoding = response.headers.get('content-encoding')?.trim().toLowerCase();
+  const identityEncoding = !encoding || encoding === 'identity';
   if (identityEncoding && contentLength !== null && !/^\d+$/.test(contentLength)) {
     throw new Error('Fly organization network inventory length is invalid.');
   }
@@ -56,7 +57,8 @@ async function boundedJson(response) {
 }
 
 export async function readFlyOrgApps({ org, token, fetchImpl = fetch }) {
-  if (typeof org !== 'string' || !ORG.test(org) || typeof token !== 'string' || !token.trim()) {
+  if (typeof org !== 'string' || !ORG.test(org) || typeof token !== 'string'
+    || token.length < 20 || token.length > 16_384 || /[\x00-\x1F\x7F]/.test(token)) {
     throw new Error('The selected Fly organization and token are required for network readback.');
   }
   const response = await fetchImpl(`${API}/apps?org_slug=${encodeURIComponent(org)}`, {
@@ -75,7 +77,7 @@ export async function readFlyOrgApps({ org, token, fetchImpl = fetch }) {
     if (typeof app?.name !== 'string' || !APP.test(app.name)
       || typeof app.id !== 'string' || !APP_ID.test(app.id)
       || typeof app.network !== 'string'
-      || !(app.network === 'default' || NETWORK.test(app.network))
+      || !API_NETWORK.test(app.network)
       || names.has(app.name) || ids.has(app.id)) {
       throw new Error('Fly organization network inventory has ambiguous app identity.');
     }

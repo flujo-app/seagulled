@@ -44,6 +44,17 @@ export async function flyAccountLease(providers, signal) {
     ? { flyctlPath: lease.flyctlPath, flyConfigDir: lease.flyConfigDir,
       orgSlug: lease.orgSlug, scope: lease.scope, accountRef: lease.accountRef } : null;
 }
+/** Dispatch obeys Stop; exact-resource cleanup rechecks identity without the aborted dispatch signal. */
+export async function assertFleetAccountCurrent({ lease, intent, assertCurrent, signal, deadlineAt,
+  operation = 'dispatch' } = {}) {
+  if (!['dispatch', 'cleanup'].includes(operation)) throw new Error('Invalid Fly account operation.');
+  if (operation === 'dispatch') assertAdmission(signal, deadlineAt);
+  if (typeof assertCurrent !== 'function' || lease?.accountRef !== intent?.accountRef
+    || lease?.orgSlug !== intent?.org
+    || await assertCurrent(lease, { signal: operation === 'dispatch' ? signal : undefined }) !== true) {
+    throw unknown('The selected Fly account continuation could not be verified.');
+  }
+}
 /** The cloud SDK and all Fly CLI children receive only this selected personal account. */
 export function isolatedFlyEnvironment(account, sourceEnv = process.env, sourceInstanceDir) {
   if (!validFlyAccount(account)) {
@@ -553,14 +564,10 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     }
     record({ apps: { ...intent.apps, [app]: { ...prior, state: 'retired' } } });
   };
-  const assertAccountCurrent = async () => {
+  const assertAccountCurrent = async ({ operation = 'dispatch' } = {}) => {
     if (diagnostic) return;
-    if (typeof assertFlyAccountCurrent !== 'function'
-      || flyAccount.accountRef !== intent.accountRef
-      || flyAccount.orgSlug !== intent.org
-      || await assertFlyAccountCurrent(flyAccount, { signal }) !== true) {
-      throw unknown('The selected Fly account continuation could not be verified.');
-    }
+    return assertFleetAccountCurrent({ lease: flyAccount, intent,
+      assertCurrent: assertFlyAccountCurrent, signal, deadlineAt: fleetDeadlineAt, operation });
   };
   let controller;
   let cloudManaged;
@@ -622,9 +629,9 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
       throw unknown('The selected Fly account or goal organization changed.');
     }
     assertNetworkVacant(await readFlyOrgApps({ org, token: flyToken }), intent.network);
-    const verifyNetwork = async ({ allowPending = true } = {}) => {
+    const verifyNetwork = async ({ allowPending = true, operation = 'dispatch' } = {}) => {
       try {
-        await assertAccountCurrent();
+        await assertAccountCurrent({ operation });
         return assertPlannedNetworkMembers(await readFlyOrgApps({ org, token: flyToken }),
           intent.network, intent.apps, { allowPending });
       } catch (error) {
@@ -688,7 +695,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
       accountRef: intent.accountRef,
       onPlannedApp: planApp, onConfirmedApp: confirmApp, onRetiredApp: retireApp,
       verifyNetwork });
-    const observeWorkerConversations = async (worker) => {
+    const observeWorkerConversations = async (worker, { operation = 'dispatch' } = {}) => {
       if (localConversations.some((entry) => entry.workerId === worker.id)) return;
       const runs = Object.values(controller.registry.state.runs).filter((run) => run.workerId === worker.id);
       if (runs.length !== 1 || runs[0].state !== 'completed') {
@@ -696,7 +703,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
       }
       let connection;
       try {
-        connection = await controller.connect(worker.target);
+        connection = await controller.connect(worker.target, { operation });
         const observed = verifiedLocalConversations(await connection.client.descendants(runs[0].conversationId),
           runs[0].conversationId, teamLimits.concurrency);
         localConversations.push({ workerId: worker.id, leadConversationId: runs[0].conversationId,
@@ -715,9 +722,10 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
       maxRunsPerWorker: goal.workerTopologyVersion === 2 ? 1 : undefined,
       beforeRetire: async ({ worker, target }) => {
         if (target.kind !== 'fly') return;
+        await verifyNetwork({ operation: 'cleanup' });
         if (goal.workerTopologyVersion === 2 && Object.values(controller.registry.state.runs)
           .some((run) => run.workerId === worker.id && run.state === 'completed')) {
-          try { await observeWorkerConversations(worker); }
+          try { await observeWorkerConversations(worker, { operation: 'cleanup' }); }
           catch (error) {
             localConversationErrors.push({ workerId: worker.id, detail: String(error.message).slice(0, 200) });
             record({ localConversationErrors });
@@ -880,7 +888,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
       } else {
         try {
           relayCleanupConfirmed = await relay.retire();
-          if (relayCleanupConfirmed) { retireApp(relay.app); await verifyNetwork(); }
+          if (relayCleanupConfirmed) { retireApp(relay.app); await verifyNetwork({ operation: 'cleanup' }); }
         }
         catch { relayCleanupConfirmed = false; }
       }

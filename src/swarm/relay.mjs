@@ -109,7 +109,7 @@ export async function createOwnedRelay({ journalPath, flujoCloudPath, org, netwo
         record({ state: 'retired', cleanupConfirmed: true });
         return true;
       }
-      await verifyNetwork?.({ allowPending: true });
+      await verifyNetwork?.({ allowPending: true, operation: 'cleanup' });
       await ownedMachines();
       await noVolumes();
     } catch (error) {

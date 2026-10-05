@@ -120,3 +120,83 @@ test('both initial Workers must confirm group membership before either starts it
     assert.equal(order.filter((item) => item === 'template').length, 2);
   } finally { delete globalThis.__networkSdkFixture; f.close(); }
 });
+
+test('Stop after confirmed creation retires only the exact Worker under the same account', async () => {
+  for (const accountChanged of [false, true]) {
+    const f = setup();
+    const stop = new AbortController();
+    const calls = [];
+    let planned;
+    let confirmed;
+    globalThis.__networkSdkFixture = {
+      async up(options) {
+        calls.push(`up:${options.app}`);
+        stop.abort();
+        return { worker: options.app, org: options.org, machineId: 'machineabc', state: 'ready' };
+      },
+      async deployment(app) { return { metadata: { org: 'personal', network },
+        journal: { app, appId: 'exact-app-id', owner, org: 'personal', network,
+          ownershipConfirmed: true, state: 'ready' } }; },
+      async down(app) { calls.push(`down:${app}`); return { state: 'destroyed' }; },
+    };
+    try {
+      const provisioner = await flyProvisioner({ flujoCloudPath: f.root, templateWorkspace: 'boot',
+        source: 'http://127.0.0.1:4200', org: 'personal', network, accountRef,
+        captureSpacingMs: 1, concurrency: 1,
+        onPlannedApp: ({ app }) => { planned = app; calls.push(`plan:${app}`); },
+        onConfirmedApp: ({ app, appId }) => {
+          assert.equal(app, planned); assert.equal(appId, 'exact-app-id');
+          confirmed = app; calls.push(`confirm:${app}`);
+        },
+        onRetiredApp: (app) => { assert.equal(app, confirmed); calls.push(`retired:${app}`); },
+        verifyNetwork: async ({ operation = 'dispatch' }) => {
+          calls.push(`fence:${operation}`);
+          if (operation === 'cleanup' && accountChanged) {
+            throw Object.assign(new Error('Selected account changed.'), { code: 'NETWORK_MEMBERSHIP' });
+          }
+          if (operation === 'dispatch' && stop.signal.aborted) {
+            throw Object.assign(new Error('Cancelled'), { name: 'AbortError' });
+          }
+        },
+        installTemplateImpl: async () => { throw new Error('No run template may start after Stop.'); },
+      });
+      await assert.rejects(provisioner.provision({ id: 'worker-one' }, {}), (error) => {
+        assert.match(error.message, accountChanged ? /Selected account changed/ : /Cancelled.*retired/);
+        assert.equal(error.cleanup.app, planned);
+        assert.equal(error.cleanup.confirmed, !accountChanged);
+        return true;
+      });
+      assert.equal(calls.filter((call) => call.startsWith('up:')).length, 1);
+      assert.equal(calls.filter((call) => call.startsWith('down:')).length,
+        accountChanged ? 0 : 1);
+      assert.equal(calls.some((call) => call.startsWith('retired:')), !accountChanged);
+      assert.ok(calls.indexOf(`confirm:${planned}`) < calls.indexOf('fence:cleanup'));
+    } finally { delete globalThis.__networkSdkFixture; f.close(); }
+  }
+});
+
+test('a mismatched SDK result can retire only the privately planned app', async () => {
+  const f = setup();
+  let planned;
+  const deletions = [];
+  globalThis.__networkSdkFixture = {
+    async up() { return { worker: 'foreign-app', org: 'personal', machineId: 'machineabc' }; },
+    async deployment() { throw new Error('A foreign result must never be inspected.'); },
+    async down(app) { deletions.push(app); return { state: 'destroyed' }; },
+  };
+  try {
+    const provisioner = await flyProvisioner({ flujoCloudPath: f.root, templateWorkspace: 'boot',
+      source: 'http://127.0.0.1:4200', org: 'personal', network, accountRef,
+      captureSpacingMs: 1, concurrency: 1,
+      onPlannedApp: ({ app }) => { planned = app; },
+      onConfirmedApp: () => { throw new Error('No mismatched app can be confirmed.'); },
+      onRetiredApp: (app) => { assert.equal(app, planned); },
+      verifyNetwork: async () => undefined,
+    });
+    await assert.rejects(provisioner.provision({ id: 'worker-one' }, {}),
+      (error) => error.cleanup.confirmed === true && error.cleanup.app === planned
+        && /identity does not match/.test(error.message));
+    assert.deepEqual(deletions, [planned]);
+    assert.notEqual(planned, 'foreign-app');
+  } finally { delete globalThis.__networkSdkFixture; f.close(); }
+});

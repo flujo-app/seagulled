@@ -87,8 +87,8 @@ export class Controller {
       ...(this.remoteUrl ? { remoteUrl: `${this.remoteUrl}/mcp` } : {}) };
   }
 
-  async connect(target) {
-    if (this.provisioner?.connect && target.kind !== 'external') return this.provisioner.connect(target);
+  async connect(target, context = {}) {
+    if (this.provisioner?.connect && target.kind !== 'external') return this.provisioner.connect(target, context);
     return { client: new FlujoClient(target), close: async () => undefined };
   }
 
@@ -240,7 +240,7 @@ export class Controller {
         if (activeRuns.length) {
           let connection;
           try {
-            connection = await this.connect(current.target);
+            connection = await this.connect(current.target, { operation: 'cleanup' });
             for (const run of activeRuns) {
               try { await connection.client.cancel(run.conversationId); }
               catch { this.log(`cancel request for ${run.id} was unconfirmed`); }

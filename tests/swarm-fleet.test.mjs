@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
-import { conversationFailure, fleetStatus, fleetDiagnosticStatus, fleetExecutionLimits, goalCapacity,
+import { assertFleetAccountCurrent, conversationFailure, fleetStatus, fleetDiagnosticStatus, fleetExecutionLimits, goalCapacity,
   fleetTopology, flyAccountLease, isolatedFlyEnvironment, bindVerifiedFlyOrganization,
   recordConfirmedQuotaHold, runFleetLeaf, staffOwnedTeam,
   verifiedLocalConversations } from '../src/swarm/fleet.mjs';
@@ -22,6 +22,27 @@ const relayInventory = (journal, created, network = relayNetwork) => {
   const apps = created ? [{ id: 'fixture-app-id', name: journal.app, network }] : [];
   return new Response(JSON.stringify({ total_apps: apps.length, apps }), { status: 200 });
 };
+
+test('Stop blocks dispatch but permits a fresh same-account fence for exact cleanup', async () => {
+  const stop = new AbortController();
+  const lease = { accountRef, orgSlug: 'personal' };
+  const intent = { accountRef, org: 'personal' };
+  const observedSignals = [];
+  const assertCurrent = async (_, { signal }) => { observedSignals.push(signal); return true; };
+  stop.abort();
+  await assert.rejects(assertFleetAccountCurrent({ lease, intent, assertCurrent,
+    signal: stop.signal, operation: 'dispatch' }), { name: 'AbortError' });
+  assert.equal(observedSignals.length, 0, 'Stop prevents a new dispatch fence');
+  await assertFleetAccountCurrent({ lease, intent, assertCurrent,
+    signal: stop.signal, operation: 'cleanup' });
+  assert.deepEqual(observedSignals, [undefined], 'cleanup rechecks without the aborted signal');
+  await assert.rejects(assertFleetAccountCurrent({ lease: { ...lease,
+    accountRef: `fly-account-sha256:${'b'.repeat(64)}` }, intent, assertCurrent,
+  signal: stop.signal, operation: 'cleanup' }), /continuation could not be verified/);
+  await assert.rejects(assertFleetAccountCurrent({ lease, intent,
+    assertCurrent: async () => { throw new Error('Selected account changed.'); },
+    signal: stop.signal, operation: 'cleanup' }), /Selected account changed/);
+});
 
 test('goal capacity maps selected worker and agent counts to bounded Fly execution limits', async () => {
   assert.deepEqual(goalCapacity({}), { maxWorkers: 5, conversationsPerWorker: 5, agentsPerWorker: 4 });
@@ -685,15 +706,21 @@ test('owned relay journals before Fly mutation, forwards through its own proxy, 
       return JSON.stringify([{ Name: `SEAGULLED_RELAY_OWNER_${journal.owner.toUpperCase()}` }]);
     }
     if (args[0] === 'volumes' && args[1] === 'list') return '[]';
-    return args[0] === 'auth' ? 'fixture-token' : '{}';
+    return args[0] === 'auth' ? 'fixture-private-token-0123456789' : '{}';
   } };
   let agentStopped = false;
   let proxyStopped = false;
+  let stopped = false;
+  const networkOperations = [];
   const fakeProxy = new EventEmitter();
   fakeProxy.stdin = { end: () => undefined };
   fakeProxy.kill = () => { proxyStopped = true; };
   const relay = await createOwnedRelay({ journalPath, org: 'personal', network: relayNetwork,
     flyRunner, flyEnv, flyctlPath,
+    verifyNetwork: async ({ operation = 'dispatch' }) => {
+      networkOperations.push(operation);
+      if (stopped && operation === 'dispatch') throw Object.assign(new Error('Cancelled'), { name: 'AbortError' });
+    },
     portAllocator: async () => 48121,
     spawnImpl: (binary, args, options) => {
       assert.equal(binary, flyctlPath);
@@ -732,7 +759,9 @@ test('owned relay journals before Fly mutation, forwards through its own proxy, 
   });
   assert.match(relay.remoteUrl, /^http:\/\/seagulled-relay-[a-f0-9]+\.internal:4300$/);
   await relay.start('http://127.0.0.1:48122');
+  stopped = true;
   assert.equal(await relay.retire(), true);
+  assert.ok(networkOperations.includes('cleanup'));
   assert.equal(agentStopped, true);
   assert.equal(proxyStopped, true);
   assert.deepEqual(calls, ['auth token', 'apps create', 'secrets import', 'secrets list',
@@ -752,7 +781,7 @@ test('owned relay Machine rejection destroys only its newly created app', async 
         return JSON.stringify([{ name: `SEAGULLED_RELAY_OWNER_${journal.owner.toUpperCase()}` }]);
       }
       if (args[0] === 'volumes' && args[1] === 'list') return '[]';
-      return args[0] === 'auth' ? 'fixture-token' : '{}';
+      return args[0] === 'auth' ? 'fixture-private-token-0123456789' : '{}';
     } },
     portAllocator: async () => 48123,
     fetchImpl: async (url, options) => {
@@ -780,7 +809,7 @@ test('relay rechecks account and network immediately before app creation', async
   await assert.rejects(createOwnedRelay({ journalPath, org: 'personal', network: relayNetwork,
     flyRunner: { run: async (args) => {
       calls.push(args.slice(0, 2).join(' '));
-      return args[0] === 'auth' ? 'fixture-token' : '{}';
+      return args[0] === 'auth' ? 'fixture-private-token-0123456789' : '{}';
     } }, portAllocator: async () => 48124,
     fetchImpl: async (url) => {
       if (url.includes('/apps?org_slug=')) return relayInventory(
@@ -801,7 +830,7 @@ test('relay refuses a mismatched network readback before owner secret or Machine
     portAllocator: async () => 48125,
     flyRunner: { run: async (args) => {
       calls.push(args.slice(0, 2).join(' '));
-      return args[0] === 'auth' ? 'fixture-token' : '{}';
+      return args[0] === 'auth' ? 'fixture-private-token-0123456789' : '{}';
     } },
     fetchImpl: async (url) => {
       const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
@@ -825,7 +854,7 @@ test('ambiguous relay app creation retains its intent and never destroys an unco
     flyRunner: { run: async (args) => {
       calls.push(args.slice(0, 2).join(' '));
       if (args[0] === 'apps') throw new Error('fixture connection lost');
-      return 'fixture-token';
+      return 'fixture-private-token-0123456789';
     } }, portAllocator: async () => 48123,
     fetchImpl: async (url) => {
       if (url.includes('/apps?org_slug=')) return relayInventory(
@@ -845,7 +874,7 @@ test('relay creation holds an app when its staged owner marker cannot be confirm
     flyRunner: { run: async (args) => {
       calls.push(args.slice(0, 2).join(' '));
       if (args[0] === 'secrets' && args[1] === 'list') return '[]';
-      return args[0] === 'auth' ? 'fixture-token' : '{}';
+      return args[0] === 'auth' ? 'fixture-private-token-0123456789' : '{}';
     } }, portAllocator: async () => 48123,
     fetchImpl: async (url) => {
       const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
@@ -880,7 +909,7 @@ test('relay retirement refuses changed app identity, network, app marker, Machin
         if (args[0] === 'volumes' && args[1] === 'list') {
           return retired && changed === 'foreign-volume' ? '[{"id":"foreign-volume"}]' : '[]';
         }
-        return args[0] === 'auth' ? 'fixture-token' : '{}';
+        return args[0] === 'auth' ? 'fixture-private-token-0123456789' : '{}';
       } },
       fetchImpl: async (url, options) => {
         const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
@@ -924,6 +953,35 @@ test('owned worker files are collected before subtree retirement', async () => {
     const result = await controller.retire('operator', { workerId: parent.id });
     assert.deepEqual(result.retired, [child.id, parent.id]);
     assert.deepEqual(order, ['collect:child-app', 'delete:child-app', 'collect:parent-app', 'delete:parent-app']);
+  } finally { await controller.close(); }
+});
+
+test('retirement connects to an active original Worker with cleanup context after Stop', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-stop-retire-'));
+  const order = [];
+  const controller = new Controller({ registryPath: path.join(root, 'registry.json'),
+    operatorToken: 'fixture-operator-token-at-least-32-characters', publicUrl: 'http://127.0.0.1:1',
+    provisioner: {
+      connect: async (target, context) => {
+        assert.equal(target.app, 'owned-app');
+        assert.equal(context.operation, 'cleanup');
+        order.push('connect');
+        return { client: { cancel: async () => { order.push('cancel'); } },
+          close: async () => { order.push('close'); } };
+      },
+      retire: async () => { order.push('retire'); },
+    } });
+  try {
+    const goal = controller.registry.createGoal({ id: 'stopped-tree', text: 'fixture' });
+    const supervisor = controller.registry.reserve({ goalId: goal.id, role: 'supervisor', name: 'Todd' }).worker;
+    controller.registry.enroll(supervisor.id, { kind: 'external', origin: 'http://127.0.0.1:1', workspace: 'fixture' });
+    const worker = controller.registry.reserve({ goalId: goal.id, parentId: supervisor.id,
+      role: 'team', name: 'developer' }).worker;
+    controller.registry.enroll(worker.id, { kind: 'fly', app: 'owned-app' });
+    controller.registry.startRun({ workerId: worker.id, startedBy: 'operator', task: 'fixture' });
+    const receipt = await controller.retire('operator', { workerId: worker.id });
+    assert.deepEqual(receipt.retired, [worker.id]);
+    assert.deepEqual(order, ['connect', 'cancel', 'close', 'retire']);
   } finally { await controller.close(); }
 });
 
