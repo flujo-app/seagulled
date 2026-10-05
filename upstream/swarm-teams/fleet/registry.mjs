@@ -18,6 +18,9 @@ export class FleetError extends Error {
 const fail = (code, message, status) => { throw new FleetError(code, message, status); };
 const tokenHash = (token) => createHash('sha256').update(token).digest('hex');
 const ACTIVE = ['reserved', 'ready'];
+// Target secrets and private origins stay in the existing private Worker record.
+// A run pins only a digest of its exact enrolled target before submission.
+const targetDigest = (target) => createHash('sha256').update(JSON.stringify(target)).digest('hex');
 
 export class Registry {
   constructor(path, { clock = Date.now } = {}) {
@@ -194,6 +197,60 @@ export class Registry {
   }
 
   run(id) { return this.state.runs[id] ?? fail('NOT_FOUND', 'Run not found.', 404); }
+
+  /** Pin the enrolled Worker target before this original root is submitted. */
+  bindRunTarget(runId, target) {
+    const run = this.run(runId);
+    const worker = this.worker(run.workerId);
+    if (run.state !== 'running' || worker.state !== 'ready' || !worker.target
+      || typeof target?.workspace !== 'string' || !target.workspace.trim()
+      || targetDigest(worker.target) !== targetDigest(target)) {
+      fail('NATIVE_TARGET', 'The original run has no matching ready Worker target.', 409);
+    }
+    this.admission(run.goalId);
+    const binding = { workspace: target.workspace, digest: targetDigest(target) };
+    if (run.targetBinding) {
+      if (run.targetBinding.workspace !== binding.workspace || run.targetBinding.digest !== binding.digest) {
+        fail('NATIVE_TARGET', 'The original run target changed after binding.', 409);
+      }
+      return run;
+    }
+    run.targetBinding = binding;
+    this.save();
+    return run;
+  }
+
+  /** New native admission gate only. Existing original-ID reconciliation is separate. */
+  resolveNativeOriginalRun(actor, claim) {
+    if (!actor || typeof actor !== 'object' || this.state.workers[actor.id] !== actor
+      || actor.state !== 'ready' || !actor.target) {
+      fail('FORBIDDEN', 'A ready executing Worker bearer is required.', 403);
+    }
+    const keys = ['runId', 'rootConversationId', 'goalId', 'workspace'];
+    if (!claim || typeof claim !== 'object' || Array.isArray(claim)
+      || Object.keys(claim).some((key) => !keys.includes(key))
+      || keys.some((key) => !Object.hasOwn(claim, key)
+        || typeof claim[key] !== 'string' || !claim[key].trim())) {
+      fail('INVALID', 'An exact original run identity is required.');
+    }
+    const run = this.run(claim.runId);
+    if (run.workerId !== actor.id || run.goalId !== actor.goalId || run.goalId !== claim.goalId
+      || run.conversationId !== claim.rootConversationId || run.state !== 'running') {
+      fail('FORBIDDEN', 'The original run is not current for this executing Worker.', 403);
+    }
+    if (Object.values(this.state.runs).filter((item) =>
+      item.workerId === actor.id && item.conversationId === run.conversationId).length !== 1) {
+      fail('NATIVE_ORIGIN', 'The Worker root conversation is not unique.', 409);
+    }
+    this.admission(run.goalId);
+    const binding = run.targetBinding;
+    if (!binding || binding.workspace !== claim.workspace || actor.target.workspace !== binding.workspace
+      || targetDigest(actor.target) !== binding.digest) {
+      fail('NATIVE_TARGET', 'The original Worker target or workspace changed.', 409);
+    }
+    return Object.freeze({ workerId: actor.id, goalId: run.goalId, fleetRunId: run.id,
+      rootConversationId: run.conversationId, workspace: binding.workspace, targetDigest: binding.digest });
+  }
 
   settleRun(id, { status, output, error, usage }) {
     const run = this.run(id);

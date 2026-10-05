@@ -134,6 +134,12 @@ export class Controller {
         if (this.deadlineAt && Date.now() >= this.deadlineAt) throw new FleetError('DEADLINE', 'The fleet deadline passed before submission.', 409);
         connection = await this.connect(target);
         if (this.deadlineAt && Date.now() >= this.deadlineAt) throw new FleetError('DEADLINE', 'The fleet deadline passed before submission.', 409);
+        // The native actor gate needs an immutable target/workspace receipt.
+        // Older fixtures without a workspace retain their ordinary flow path,
+        // but cannot pass that gate.
+        if (typeof target?.workspace === 'string' && target.workspace.trim()) {
+          this.registry.bindRunTarget(run.id, target);
+        }
         submitted = true;
         const timeoutMs = this.deadlineAt
           ? Math.min(this.runTimeoutMs ?? 6 * 3600_000, Math.max(1, this.deadlineAt - Date.now()))
@@ -332,6 +338,14 @@ export class Controller {
     const token = /^Bearer (.+)$/.exec(request.headers.authorization ?? '')?.[1] ?? '';
     if (token && same(token, this.operatorToken)) return 'operator';
     return this.registry.actorFor(token);
+  }
+
+  /** Trusted host seam for a later gateway; deliberately has no HTTP route. */
+  resolveNativeOriginalRun(request, claim) {
+    const actor = this.authenticate(request);
+    if (!actor) throw new FleetError('UNAUTHORIZED', 'A Worker bearer is required.', 401);
+    if (actor === 'operator') throw new FleetError('FORBIDDEN', 'The operator is not an executing Worker.', 403);
+    return this.registry.resolveNativeOriginalRun(actor, claim);
   }
 
   async handle(request, response) {
