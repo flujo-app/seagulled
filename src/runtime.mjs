@@ -214,7 +214,7 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
     try {
       // Goal cancellation must not cancel the independently required retirement.
       const result = await manager.privateComputeDisable({ goalId: goal.id });
-      if (result.status !== 'retired' && result.cleanupVerified !== true) throw new Error('Private resource retirement could not be verified.');
+      if (result?.cleanupVerified !== true) throw new Error('Private resource retirement could not be verified.');
       goal.privateCompute.cleanupStatus = 'verified';
       goal.status = terminalStatus;
     } catch {

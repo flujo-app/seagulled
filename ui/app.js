@@ -15,7 +15,7 @@ let auth={fly:{connected:false,available:false,detail:'Checking…'},modal:{conn
 let voice={transcribe:false,speak:false,reason:'Voice is not ready.'};
 let mode='ready',started=false,authBusy=false,goalSubmitting=false,pendingGoal=null,goTimer=null,workingSince=0,workingKey='',voiceWait=null,capturePending=false;
 let knownMessages=null,speechQueue=Promise.resolve(),speechEpoch=0,audioUrl=null,activeSpeechFinish=null,refreshTimer=null;
-let budgetWait=null,budgetQuote=null,budgetCustom=false,budgetEpoch=0,currencySwitch=null,selectedPreset=50;
+let budgetWait=null,budgetQuote=null,budgetCustom=false,budgetEpoch=0,currencySwitch=null,selectedPreset=50,quoteExpiryTimer=null;
 let providerBusy=false,providerSetupPending=false,providerWait=null,displayedProvider='';
 const capture=new VoiceCapture({onLevel:level=>{elements['voice-level'].style.setProperty('--level',String(Math.max(.2,level*3)));},onHeard:()=>announce('Listening to your goal.'),onReady:()=>{setMode('listening');announce('Listening. Speak one sentence.');}});
 const moviePlayer=new MoviePlayer({video:elements['movie-video'],stage:elements.movie,manifest:movieManifest,onStatus:({status,detail})=>{
@@ -122,6 +122,40 @@ function appendGoalEditor(card,goal){
 }
 function providerState(id){return state.providers?.find(item=>item.id===id)||null;}
 function ordinaryInference(){return state.providers?.find(item=>item.connected===true&&item.available===true&&item.id!=='private-h100')||null;}
+const quoteMaxAgeMs=48*60*60*1000;
+function validSpendQuote(quote,currency){
+  if(currency==='USD'||quote?.currency!==currency||quote?.quoteSource!=='https://www.exchangerate-api.com'||!Number.isFinite(quote.usdPerUnit)||quote.usdPerUnit<=0)return false;
+  const dated=Date.parse(quote.quoteAsOf);
+  return Number.isFinite(dated)&&dated<=Date.now()+5*60*1000&&Date.now()-dated<=quoteMaxAgeMs;
+}
+function renderSpend(){
+  clearTimeout(quoteExpiryTimer);quoteExpiryTimer=null;
+  const spend=elements['spend-details'];spend.replaceChildren();
+  const amounts=['reportedUsd','estimatedUsd','pendingUsd'].map(field=>{
+    const spendData=state.spend;
+    if(spendData===undefined)return 0;
+    if(!spendData||typeof spendData!=='object'||Array.isArray(spendData))return null;
+    if(!Object.hasOwn(spendData,field))return 0;
+    const value=spendData[field];return typeof value==='number'&&Number.isFinite(value)&&value>=0?value:null;
+  });
+  const usd=value=>value===null?'unavailable':`${value.toFixed(2)} USD`;
+  spend.append(node('p',`${usd(amounts[0])} provider-reported · ${usd(amounts[1])} estimated · ${usd(amounts[2])} pending. These figures are not a bill.`));
+  const currency=elements['budget-currency'].value;
+  if(currency!=='USD'){
+    if(validSpendQuote(budgetQuote,currency)&&amounts.every(value=>value!==null)){
+      const digits=new Intl.NumberFormat('en',{style:'currency',currency}).resolvedOptions().maximumFractionDigits;
+      const formatted=value=>`${new Intl.NumberFormat(undefined,{minimumFractionDigits:digits,maximumFractionDigits:digits}).format(value/budgetQuote.usdPerUnit)} ${currency}`;
+      const date=new Date(budgetQuote.quoteAsOf).toLocaleString();
+      spend.append(node('p',`Estimated ${currency} equivalents: ${formatted(amounts[0])} of provider-reported USD · ${formatted(amounts[1])} of estimated USD · ${formatted(amounts[2])} of pending USD. FX quote ${date} (ExchangeRate-API); conversions are not billed amounts.`));
+      const until=Date.parse(budgetQuote.quoteAsOf)+quoteMaxAgeMs-Date.now()+1;
+      quoteExpiryTimer=setTimeout(renderSpend,Math.max(1,until));
+    }else{
+      const reason=validSpendQuote(budgetQuote,currency)?'the USD spend figures are unavailable':'a current dated quote is required';
+      spend.append(node('p',`${currency} conversion unavailable: ${reason}. Available spend remains shown in USD.`));
+    }
+  }
+  if(Number(state.spend?.unknownCalls)>0||Number(state.spend?.subscriptionCalls)>0)spend.append(node('p',`${Number(state.spend.unknownCalls||0)} calls without a price · ${Number(state.spend.subscriptionCalls||0)} subscription calls.`));
+}
 function renderProviderForm(){
   const id=elements['provider-choice'].value,item=providerState(id),native=id==='codex'||id==='claude',api=Object.hasOwn(providerModels,id),connected=item?.connected===true;
   if(id!==displayedProvider){
@@ -155,9 +189,7 @@ function renderDetails(){
   const ready=state.providers?.filter(provider=>provider.available&&provider.connected&&(provider.id!=='private-h100'||elements['private-h100'].checked))||[];
   providers.append(node('p',ready.length?`${ready.map(provider=>provider.name||provider.id).join(', ')} available. First execution still needs verification.`:'No inference provider is ready. A goal may remain queued.'));
   for(const provider of state.providers||[]){if(provider.id!=='modal'&&provider.id!=='private-h100'&&!provider.connected)continue;providers.append(node('p',`${provider.name||provider.id}: ${provider.detail||'Status unknown.'}`));}
-  const spend=elements['spend-details'];spend.replaceChildren();
-  spend.append(node('p',`${Number(state.spend?.reportedUsd||0).toFixed(2)} USD provider-reported · ${Number(state.spend?.estimatedUsd||0).toFixed(2)} USD estimated · ${Number(state.spend?.pendingUsd||0).toFixed(2)} USD pending. These figures are not a bill.`));
-  if(Number(state.spend?.unknownCalls)>0||Number(state.spend?.subscriptionCalls)>0)spend.append(node('p',`${Number(state.spend.unknownCalls||0)} calls without a price · ${Number(state.spend.subscriptionCalls||0)} subscription calls.`));
+  renderSpend();
   const host=elements['goal-details'];const editing=host.querySelector('.goal-editor[open]');
   if(!editing){host.replaceChildren();for(const goal of [...(state.goals||[])].reverse().slice(0,12)){
     const card=node('section',undefined,'goal-detail');card.append(node('strong',goal.text||'Goal'),node('small',`${goal.status||'queued'}${goal.privateH100===true?' · private H100 + Qwen requested':''} · ${budgetLine(goal)} · ${Number(goal.spentUsd||0).toFixed(2)} USD tracked${Number(goal.pendingUsd)>0?` · ${Number(goal.pendingUsd).toFixed(2)} USD pending`:''}`));
@@ -286,11 +318,11 @@ function budgetNote(quote,usd=selectedPreset??50){const amount=amountForUsd(usd,
 function loadBudget(currency,{convertCustom=false}={}){
   const generation=++budgetEpoch;
   const previous=budgetQuote,previousAmount=Number(elements['budget-amount'].value),wasCustom=budgetCustom;
-  elements['budget-note'].textContent='Checking currency allowance…';
+  elements['budget-note'].textContent='Checking currency allowance…';renderSpend();
   const pending=(async()=>{try{
       const quote=await bridge.defaultBudget(currency);
       if(generation!==budgetEpoch)return;
-      if(!quote||quote.currency!==currency||!Number.isFinite(quote.usdPerUnit)||quote.usdPerUnit<=0)throw new Error('Currency allowance is unavailable.');
+      if(!quote||quote.currency!==currency||!Number.isFinite(quote.usdPerUnit)||quote.usdPerUnit<=0||(currency!=='USD'&&!validSpendQuote(quote,currency)))throw new Error('Currency allowance is unavailable.');
       budgetQuote=quote;elements['budget-currency'].value=currency;
       if(convertCustom&&wasCustom&&selectedPreset!==null){elements['budget-amount'].value=String(amountForUsd(selectedPreset,quote));budgetNote(quote);}
       else if(convertCustom&&wasCustom&&previous&&Number.isFinite(previousAmount)&&previousAmount>0){
@@ -298,9 +330,9 @@ function loadBudget(currency,{convertCustom=false}={}){
         elements['budget-amount'].value=String(Math.max(1/10**digits,Math.round(previousAmount*previous.usdPerUnit/quote.usdPerUnit*10**digits)/10**digits));
         budgetCustom=true;elements['budget-note'].textContent=`Converted your allowance using the ${new Date(quote.quoteAsOf||Date.now()).toLocaleDateString()} rate.`;
       }else if(!convertCustom&&budgetCustom){elements['budget-note'].textContent='Your chosen allowance will be checked before work starts.';}
-      else{elements['budget-amount'].value=String(amountForUsd(50,quote));budgetCustom=false;selectedPreset=50;markPreset(50);budgetNote(quote,50);}
+      else{elements['budget-amount'].value=String(amountForUsd(50,quote));budgetCustom=false;selectedPreset=50;markPreset(50);budgetNote(quote,50);}renderSpend();
     }catch(error){if(generation!==budgetEpoch)return;if(previous&&convertCustom){elements['budget-currency'].value=previous.currency;budgetQuote=previous;showError(errorMessage(error));}
-      else{elements['budget-currency'].value='USD';elements['budget-amount'].value='50.00';budgetQuote={amount:50,currency:'USD',allowanceUsd:50,usdPerUnit:1};budgetCustom=false;selectedPreset=50;markPreset(50);elements['budget-note'].textContent='50 USD allowance selected. Local currency is unavailable.';}
+      else{elements['budget-currency'].value='USD';elements['budget-amount'].value='50.00';budgetQuote={amount:50,currency:'USD',allowanceUsd:50,usdPerUnit:1};budgetCustom=false;selectedPreset=50;markPreset(50);elements['budget-note'].textContent='50 USD allowance selected. Local currency is unavailable.';}renderSpend();
     }})();
   budgetWait=pending;void pending.finally(()=>{if(budgetWait===pending)budgetWait=null;});
   return budgetWait;
@@ -327,7 +359,7 @@ elements['budget-amount'].addEventListener('input',()=>{budgetCustom=true;select
 for(const button of document.querySelectorAll('[data-budget-usd]'))button.addEventListener('click',()=>{const usd=Number(button.dataset.budgetUsd);void (async()=>{if(currencySwitch)await currencySwitch;if(budgetWait)await budgetWait;if(!budgetQuote){showError('Currency allowance is unavailable.');return;}selectedPreset=usd;budgetCustom=true;elements['budget-amount'].value=String(amountForUsd(usd,budgetQuote));markPreset(usd);budgetNote(budgetQuote,usd);})();});
 elements['budget-currency'].addEventListener('change',()=>{const selected=elements['budget-currency'].value;const prior=budgetWait;const switchJob=(async()=>{if(prior)await prior;await loadBudget(selected,{convertCustom:true});})();currencySwitch=switchJob;void switchJob.finally(()=>{if(currencySwitch===switchJob)currencySwitch=null;});});
 for(const action of ['pause','resume','stop'])$(`${action}-all`).addEventListener('click',()=>void controlTeam(action));
-window.addEventListener('beforeunload',()=>{capture.cancel();moviePlayer.destroy();clearAudio();clearTimeout(goTimer);});
+window.addEventListener('beforeunload',()=>{capture.cancel();moviePlayer.destroy();clearAudio();clearTimeout(goTimer);clearTimeout(quoteExpiryTimer);});
 bridge.onEvent(event=>{if(event?.type==='state')applyState(event.state);else if(!refreshTimer)refreshTimer=setTimeout(()=>{refreshTimer=null;void refresh().catch(()=>{});},150);});
 void moviePlayer.load();void chooseCurrency();setMode('ready');
 void (async()=>{try{await refresh();}catch(error){announce(errorMessage(error));}

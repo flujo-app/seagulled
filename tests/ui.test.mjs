@@ -19,7 +19,7 @@ test('fullscreen stage keeps text in dialogs and sends one bounded goal after ac
     {id:'anthropic',name:'Anthropic API',connected:false,available:false,methods:['key'],fleetSupported:true,fleetEligible:false,detail:'Requires an API key.'},
   ],spend:{usd:0,reportedUsd:0,estimatedUsd:0},swarm:{status:'idle',admissionPaused:false}};
   const auth={fly:{id:'fly',connected:false,loginAvailable:true,detail:'Fly browser sign-in is ready.'},modal:{id:'modal',connected:false,loginAvailable:true,detail:'Modal browser sign-in is ready.'}};
-  const streams=new Set();const authCalls=[],providerCalls=[];let goalCall,editCall,voiceCapabilityCalls=0;
+  const streams=new Set();const authCalls=[],providerCalls=[];let goalCall,editCall,voiceCapabilityCalls=0,fxQuoteAsOf=new Date(Date.now()-3600000).toISOString();
   const publish=()=>{for(const client of streams)client.write(`data: ${JSON.stringify({type:'state',state})}\n\n`);};
   const server=createServer(async(req,res)=>{
     const route=new URL(req.url,'http://localhost').pathname;
@@ -28,7 +28,8 @@ test('fullscreen stage keeps text in dialogs and sends one bounded goal after ac
     if(route.startsWith('/api/')&&req.headers.authorization!==`Bearer ${token}`){send(401,{error:'Unauthorized'});return;}
     if(route==='/api/events'){res.writeHead(200,{'Content-Type':'text/event-stream'});res.write(': ready\n\n');streams.add(res);req.on('close',()=>streams.delete(res));return;}
     if(route==='/api/state'){send(200,state);return;}
-    if(route==='/api/budget/default'){const currency=new URL(req.url,'http://localhost').searchParams.get('currency');send(200,currency==='COP'?{amount:200000,currency:'COP',allowanceUsd:50,usdPerUnit:0.00025,quoteAsOf:'2026-10-05T00:00:00.000Z',quoteSource:'https://www.exchangerate-api.com'}:{amount:50,currency:'USD',allowanceUsd:50,usdPerUnit:1,quoteAsOf:null,quoteSource:null});return;}
+    if(route==='/api/budget/default'){const currency=new URL(req.url,'http://localhost').searchParams.get('currency');send(200,currency==='COP'?{amount:200000,currency:'COP',allowanceUsd:50,usdPerUnit:0.00025,quoteAsOf:fxQuoteAsOf,quoteSource:'https://www.exchangerate-api.com'}:{amount:50,currency:'USD',allowanceUsd:50,usdPerUnit:1,quoteAsOf:null,quoteSource:null});return;}
+    if(route==='/api/test/state'&&req.method==='POST'){const next=await readJson(req);if(next.spend)state.spend=next.spend;if(next.quoteAsOf)fxQuoteAsOf=next.quoteAsOf;publish();send(200,{ok:true});return;}
     if(route==='/api/auth/state'){send(200,auth);return;}
     if(route==='/api/voice/capabilities'){voiceCapabilityCalls++;send(200,{transcribe:false,speak:true,ready:false,status:'unavailable',narration:voiceCapabilityCalls>1?'kokoro':'system',narrationStatus:voiceCapabilityCalls>1?'ready':'preparing',voiceName:voiceCapabilityCalls>1?'Michael (preset)':'Installed system voice',reason:'Voice capture is unavailable in this test browser.'});return;}
     if(route==='/api/auth/connect'){const {id}=await readJson(req);authCalls.push(id);auth[id].connected=true;auth[id].detail=`${id} account sign-in verified; inference remains separate.`;send(200,auth[id]);return;}
@@ -88,13 +89,24 @@ test('fullscreen stage keeps text in dialogs and sends one bounded goal after ac
   await page.getByRole('button',{name:'Connect account'}).click();
   await page.getByText('Codex is connected locally; remote five-by-five staffing remains unverified.').waitFor();
   assert.deepEqual(providerCalls[2],{id:'codex',method:'subscription'});
+  await page.locator('#budget-amount').fill('321000');
+  await page.request.post(`http://127.0.0.1:${server.address().port}/api/test/state`,{headers:{Authorization:`Bearer ${token}`},data:{spend:{reportedUsd:1.25,estimatedUsd:0.5,pendingUsd:0.75}}});
+  await page.waitForFunction(()=>document.getElementById('spend-details').textContent.includes('Estimated COP equivalents: 5.000 COP of provider-reported USD · 2.000 COP of estimated USD · 3.000 COP of pending USD.'));
+  assert.equal(await page.locator('#budget-amount').inputValue(),'321000');
+  assert.equal(await page.evaluate(()=>document.activeElement?.id),'budget-amount');
+  await page.request.post(`http://127.0.0.1:${server.address().port}/api/test/state`,{headers:{Authorization:`Bearer ${token}`},data:{spend:{reportedUsd:null,estimatedUsd:'0.5',pendingUsd:-1}}});
+  await page.waitForFunction(()=>document.getElementById('spend-details').textContent.includes('unavailable provider-reported · unavailable estimated · unavailable pending.'));
+  assert.equal((await page.locator('#spend-details').textContent()).includes('Estimated COP equivalents:'),false);
+  await page.waitForFunction(()=>document.getElementById('spend-details').textContent.includes('COP conversion unavailable: the USD spend figures are unavailable.'));
+  await page.request.post(`http://127.0.0.1:${server.address().port}/api/test/state`,{headers:{Authorization:`Bearer ${token}`},data:{spend:{reportedUsd:1.25,estimatedUsd:0.5,pendingUsd:0.75}}});
+  await page.waitForFunction(()=>document.getElementById('spend-details').textContent.includes('Estimated COP equivalents: 5.000 COP of provider-reported USD'));
   if(process.env.UI_ADVANCED_SCREENSHOT)await page.screenshot({path:process.env.UI_ADVANCED_SCREENSHOT});
   await page.getByLabel('Budget currency').selectOption('COP');
   await page.getByRole('button',{name:'$100',exact:true}).click();
   await page.waitForFunction(()=>document.getElementById('budget-amount').value==='400000');
-  await page.getByLabel('Budget currency').selectOption('USD');
+  await page.locator('#budget-currency').selectOption('USD');
   await page.waitForFunction(()=>document.getElementById('budget-amount').value==='100');
-  await page.getByLabel('Budget currency').selectOption('COP');
+  await page.locator('#budget-currency').selectOption('COP');
   await page.waitForFunction(()=>document.getElementById('budget-amount').value==='400000');
   await page.getByLabel('Goal budget amount').fill('25000');
   await page.getByLabel('Workers 5').fill('4');
@@ -114,11 +126,17 @@ test('fullscreen stage keeps text in dialogs and sends one bounded goal after ac
   await page.getByText('Narration: Michael (preset) local preset.').waitFor();
   await page.getByText('Provider and spend').click();
   await page.getByText('Codex, OpenAI API, Anthropic API available. First execution still needs verification.').waitFor();
-  await page.getByText('0.00 USD provider-reported', {exact:false}).waitFor();
+  await page.getByText('1.25 USD provider-reported · 0.50 USD estimated · 0.75 USD pending.', {exact:false}).waitFor();
   await page.getByText('Work details').click();
   assert.equal(await page.getByRole('link',{name:'ExchangeRate-API'}).getAttribute('href'),'https://www.exchangerate-api.com');
   await page.getByText('Edit goal').click();
   await page.locator('.goal-edit-form textarea').fill('Build the improved game.');
+  await page.locator('.goal-edit-form input[aria-label="Edit budget amount"]').fill('30000');
+  await page.request.post(`http://127.0.0.1:${server.address().port}/api/test/state`,{headers:{Authorization:`Bearer ${token}`},data:{spend:{reportedUsd:2.5,estimatedUsd:0.5,pendingUsd:0.75}}});
+  await page.getByText('Estimated COP equivalents: 10.000 COP of provider-reported USD', {exact:false}).waitFor();
+  assert.equal(await page.locator('.goal-edit-form textarea').inputValue(),'Build the improved game.');
+  assert.equal(await page.locator('.goal-edit-form input[aria-label="Edit budget amount"]').inputValue(),'30000');
+  assert.equal(await page.evaluate(()=>document.activeElement?.getAttribute('aria-label')),'Edit budget amount');
   await page.locator('.goal-edit-form button').click();
   await page.getByText('Build the improved game.').waitFor();
   assert.equal(state.goals[0].privateH100,true);
@@ -129,4 +147,11 @@ test('fullscreen stage keeps text in dialogs and sends one bounded goal after ac
   await page.locator('#movie[data-scene="idle"]').waitFor();
   await page.getByRole('button',{name:'Resume'}).click();
   await page.locator('#movie[data-scene="work"]').waitFor();
+  await page.locator('#budget-currency').selectOption('USD');
+  await page.waitForFunction(()=>!document.getElementById('budget-note').textContent.includes('Checking'));
+  await page.request.post(`http://127.0.0.1:${server.address().port}/api/test/state`,{headers:{Authorization:`Bearer ${token}`},data:{quoteAsOf:new Date(Date.now()-(48*60*60*1000)+5000).toISOString()}});
+  await page.locator('#budget-currency').selectOption('COP');
+  await page.getByText('Estimated COP equivalents:',{exact:false}).waitFor();
+  await page.getByText('COP conversion unavailable: a current dated quote is required. Available spend remains shown in USD.').waitFor();
+  await page.getByText('2.50 USD provider-reported · 0.50 USD estimated · 0.75 USD pending.',{exact:false}).waitFor();
 });

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createRuntime } from '../src/runtime.mjs';
 
-function fixture(t, { enableFailure, cleanupFailure, deferredStartup, deferredCleanup, requestReceipt } = {}) {
+function fixture(t, { enableFailure, cleanupFailure, cleanupReceipt, deferredStartup, deferredCleanup, requestReceipt } = {}) {
   const dataDir = mkdtempSync(path.join(tmpdir(), 'seagulled-gpu-lifecycle-'));
   let runtime, sink, startupResolve, cleanupResolve, enabled = false, executions = 0;
   const calls = [];
@@ -31,7 +31,7 @@ function fixture(t, { enableFailure, cleanupFailure, deferredStartup, deferredCl
       if (deferredCleanup) await new Promise(resolve => { cleanupResolve = resolve; });
       if (cleanupFailure) throw new Error('Fixture cleanup outcome unknown.');
       enabled = false;
-      return enableFailure ? { status: 'unknown', cleanupVerified: true } : { status: 'retired' };
+      return cleanupReceipt ?? { status: enableFailure ? 'unknown' : 'retired', cleanupVerified: true };
     },
   };
   const swarm = { setEventHandler(handler) { sink = handler; }, async execute({ goal }) {
@@ -82,6 +82,21 @@ test('unconfirmed owned cleanup prevents a completed result from clearing the re
   const result = await f.runtime.wait(goal.id);
   assert.equal(result.status, 'interrupted'); assert.equal(result.privateCompute.cleanupStatus, 'unknown');
   assert.equal(result.recoveryHold, true);
+});
+
+test('a retired status without explicit cleanup proof retains the hold and suppresses completion', async t => {
+  for (const cleanupReceipt of [{ status: 'retired' }, { status: 'retired', cleanupVerified: false }]) {
+    await t.test(JSON.stringify(cleanupReceipt), async t => {
+      const f = fixture(t, { cleanupReceipt });
+      const goal = await f.runtime.chat('Verify the owned retirement receipt.', { privateH100: true });
+      const result = await f.runtime.wait(goal.id);
+      assert.equal(result.status, 'interrupted');
+      assert.equal(result.privateCompute.cleanupStatus, 'unknown');
+      assert.equal(result.recoveryHold, true);
+      assert.equal(f.runtime.snapshot().conversation.some(message => message.text === 'Fixture goal complete.'), false);
+      await assert.rejects(f.runtime.controlGoal(goal.id, 'resume'), /reconciliation/);
+    });
+  }
 });
 
 test('pause during GPU startup settles the accepted preparation and retires without dispatching work', async t => {
