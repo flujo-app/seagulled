@@ -57,6 +57,15 @@ test('disabled model preflight makes no boot workspace or Fly intent', async () 
     assert.equal((await runFleetLeaf({ goal: { id: 'another-goal', text: 'fictional' }, task: 'fictional',
       dataDir: root, maxUsd: 2 })).available, false);
     assert.equal(requests.length, 4, 'a held source is not re-probed or mutated');
+    const accountData = path.join(root, 'held-account');
+    const accountFleet = path.join(accountData, 'fleet'); mkdirSync(accountFleet, { recursive: true });
+    process.env.OPENAI_API_KEY = 'fixture-key';
+    const accountFingerprint = createHash('sha256').update('https://api.openai.com/v1\0gpt-4.1-mini\0fixture-key').digest('hex').slice(0, 24);
+    writeFileSync(path.join(accountFleet, `model-admission-${accountFingerprint}.json`), JSON.stringify({ state: 'held' }));
+    const creditHeld = await fleetStatus({ dataDir: accountData });
+    assert.equal(creditHeld.available, false);
+    assert.match(creditHeld.detail, /no credits/);
+    assert.deepEqual(requests.slice(4), ['/api/workspaces', '/v1/models'], 'credit hold avoids another API catalog request');
   } finally {
     if (previous === undefined) delete process.env.SEAGULLED_FLEET_PROFILE;
     else process.env.SEAGULLED_FLEET_PROFILE = previous;

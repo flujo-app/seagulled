@@ -11,9 +11,10 @@ import { createServer } from '../src/server.mjs';
 function fixture(t, { connected = true, mode = 'complete' } = {}) {
   const dataDir = mkdtempSync(path.join(tmpdir(), 'seagulled-runtime-'));
   let sink;
+  let available = true;
   const providers = {
     async discover() { return this.publicState(); },
-    publicState() { return [{ id: 'fixture', name: 'Scripted fixture', available: true, connected, methods: ['key'] }]; },
+    publicState() { return [{ id: 'fixture', name: 'Scripted fixture', available, connected, methods: ['key'] }]; },
     async connect() { connected = true; }, async disconnect() { connected = false; },
   };
   const swarm = {
@@ -22,6 +23,10 @@ function fixture(t, { connected = true, mode = 'complete' } = {}) {
       sink({ type: 'task', goalId: goal.id, task: { id: 'owned-task', role: 'developer', status: 'running' } });
       if (mode === 'wait') await new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(Object.assign(new Error('Owned process terminated'), { name: 'AbortError' })), { once: true }));
       if (mode === 'unknown') throw Object.assign(new Error('Remote response lost'), { code: 'UNKNOWN' });
+      if (mode === 'denied') {
+        available = false;
+        throw Object.assign(new Error('Provider credits unavailable'), { outcome: 'not_applied' });
+      }
       if (mode === 'slow-complete') await new Promise(resolve => setTimeout(resolve, 25));
       const usage = { costKind: 'reported', costUsd: 0.03, inputTokens: 10, outputTokens: 20 };
       sink({ type: 'usage', goalId: goal.id, usage });
@@ -52,6 +57,19 @@ test('durable goal and conversation count emitted usage once, not aggregate twic
   assert.equal(reopened.snapshot().goals[0].result, 'Checked fixture output');
   assert.equal(reopened.snapshot().conversation.filter(m => m.role === 'user').length, 1);
   await reopened.close();
+});
+
+test('known provider denial refreshes availability without an unknown execution hold', async t => {
+  const { app } = fixture(t, { mode: 'denied' });
+  const first = await app.chat('Rejected account request');
+  const result = await app.wait(first.id);
+  assert.equal(result.status, 'failed');
+  assert.equal(Boolean(result.recoveryHold), false);
+  assert.equal(app.snapshot().providers[0].available, false);
+  const next = await app.chat('A fresh goal waits for a working provider');
+  assert.equal(next.status, 'queued');
+  assert.equal(app.snapshot().spend.usd, 0);
+  assert.equal(app.snapshot().spend.unknownCalls, 0);
 });
 
 test('queued goal waits for provider; budget and goal edit persist', async t => {

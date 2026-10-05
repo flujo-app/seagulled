@@ -140,6 +140,7 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm } =
           if (!state.conversation.some(m => m.goalId === goal.id && m.text === result.text)) message('todd', result.text || 'The team has wrapped up. Open the goal to review their work.', goal.id);
         }
       } catch (e) {
+        if (typeof manager.publicState === 'function') state.providers = manager.publicState();
         if (e.usage && !e.usageRecorded) recordUsage(goal, e.usage);
         if (controller.signal.aborted && !e.unknown && e.code !== 'UNKNOWN') goal.status = goal.status === 'stopping' ? 'stopped' : 'paused';
         else {

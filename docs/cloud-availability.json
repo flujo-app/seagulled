@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "kind": "live-cloud-availability-check",
+  "date": "2026-10-04",
+  "status": "unqualified",
+  "checks": [
+    {
+      "path": "initial-isolated-fly-worker",
+      "workerProvisioned": true,
+      "teamRunSubmitted": true,
+      "modelExecutionStatus": 404,
+      "reason": "configured-inference-workspace-disabled",
+      "modelAnswerProduced": false,
+      "ownedWorkerCleanupConfirmed": true,
+      "ownedBootWorkspaceCleanupConfirmed": true
+    },
+    {
+      "path": "production-local-source",
+      "workspaceCreationStatus": 500,
+      "exactNameReadbackAbsent": true,
+      "flyProvisioningAttempted": false,
+      "sourceAdmissionHeld": true
+    },
+    {
+      "path": "separate-isolated-local-source",
+      "workspaceCreationStatus": 201,
+      "bootFlowInstalled": true,
+      "realModelCallSubmitted": true,
+      "modelExecutionStatus": 429,
+      "reason": "provider-account-has-no-credits",
+      "modelAnswerProduced": false,
+      "flyProvisioningAttempted": false,
+      "ownedWorkspaceCleanupConfirmed": true,
+      "ownedLocalProcessStopped": true,
+      "modelAdmissionHeld": true
+    }
+  ],
+  "billing": {
+    "kind": "unknown",
+    "billedUsd": null
+  },
+  "conclusion": "No successful live Fly model run is qualified. Native provider acceptance is reported separately."
+}

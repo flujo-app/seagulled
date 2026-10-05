@@ -156,3 +156,50 @@ test('provider artifact paths cannot escape the owned workspace', async () => {
     await assert.rejects(access(join(dataDir, 'workspaces', 'escape.txt')));
   } finally { await rm(dataDir, { recursive: true, force: true }); }
 });
+
+test('structured exhausted credits block paid retries until explicit reconnect', async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'seagulled-provider-test-'));
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls++;
+    return { status: 429, ok: false, text: async () => JSON.stringify({ error: { type: 'insufficient_quota', code: 'insufficient_quota', message: 'No credits remaining' } }) };
+  };
+  try {
+    const manager = new ProviderManager({ dataDir, fetchImpl, commandRunner: mockCommands, env: {} });
+    await manager.connect({ id: 'openai', method: 'key', key: 'fixture-key' });
+    await assert.rejects(manager.run({ providerId: 'openai', prompt: 'Hi', maxUsd: 1 }),
+      (error) => error.outcome === 'not_applied' && error.code === 'PROVIDER_UNAVAILABLE' && !error.unknown);
+    assert.equal(manager.publicState().find((item) => item.id === 'openai').available, false);
+    assert.equal(manager.publicState().find((item) => item.id === 'openai').connected, false);
+    await assert.rejects(manager.run({ providerId: 'openai', prompt: 'Hi', maxUsd: 1 }), /credits/);
+    assert.equal(calls, 1);
+    await manager.discover();
+    assert.equal(manager.publicState().find((item) => item.id === 'openai').available, false);
+    const saved = await readFile(join(dataDir, 'connections.json'), 'utf8');
+    assert.doesNotMatch(saved, /fixture-key/);
+    assert.match(saved, /blocked/);
+    const restarted = new ProviderManager({ dataDir, fetchImpl, commandRunner: mockCommands, env: { OPENAI_API_KEY: 'fixture-key' } });
+    await restarted.discover();
+    assert.equal(restarted.publicState().find((item) => item.id === 'openai').available, false);
+    assert.equal(restarted.publicState().find((item) => item.id === 'openai').connected, false);
+    await manager.connect({ id: 'openai', method: 'key', key: 'replacement-key' });
+    assert.equal(manager.publicState().find((item) => item.id === 'openai').available, true);
+  } finally { await rm(dataDir, { recursive: true, force: true }); }
+});
+
+test('definitive auth denials are not applied; ambiguous 429 and 502 stay unknown', async () => {
+  for (const status of [401, 403]) {
+    const manager = new ProviderManager({ env: {}, fetchImpl: async () => ({ status, ok: false, text: async () => { throw new Error('body should not be needed'); } }) });
+    await manager.connect({ id: 'anthropic', method: 'key', key: 'fixture-key' });
+    await assert.rejects(manager.run({ providerId: 'anthropic', prompt: 'Hi', maxUsd: 1 }),
+      (error) => error.outcome === 'not_applied' && error.code === 'PROVIDER_UNAVAILABLE');
+    assert.equal(manager.publicState().find((item) => item.id === 'anthropic').available, false);
+  }
+  for (const status of [429, 502]) {
+    const manager = new ProviderManager({ env: {}, fetchImpl: async () => ({ status, ok: false, text: async () => JSON.stringify({ error: { type: 'rate_limit_error', message: 'Try later' } }) }) });
+    await manager.connect({ id: 'openai', method: 'key', key: 'fixture-key' });
+    await assert.rejects(manager.run({ providerId: 'openai', prompt: 'Hi', maxUsd: 1 }),
+      (error) => error.outcome === 'unknown' && error.code === 'UNKNOWN' && error.unknown === true);
+    assert.equal(manager.publicState().find((item) => item.id === 'openai').available, true);
+  }
+});

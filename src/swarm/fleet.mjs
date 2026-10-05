@@ -14,6 +14,9 @@ const unknown = (message) => Object.assign(new Error(message), { code: 'UNKNOWN'
 const sourceFingerprint = (origin) => createHash('sha256').update(new URL(origin).origin.toLowerCase()).digest('hex').slice(0, 24);
 const holdPath = (dataDir, origin) => path.join(dataDir, 'fleet', `source-admission-${sourceFingerprint(origin)}.json`);
 const sourceHold = (dataDir, origin) => dataDir && existsSync(holdPath(dataDir, origin));
+const modelFingerprint = (model) => createHash('sha256').update(`${model.baseUrl}\0${model.name}\0${model.apiKey}`).digest('hex').slice(0, 24);
+const modelHoldPath = (dataDir, model) => path.join(dataDir, 'fleet', `model-admission-${modelFingerprint(model)}.json`);
+const modelHold = (dataDir, model) => dataDir && existsSync(modelHoldPath(dataDir, model));
 function recordSourceHold(dataDir, origin, workspace, reason) {
   const target = holdPath(dataDir, origin);
   mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
@@ -59,13 +62,13 @@ async function inspectFleet({ dataDir } = {}) {
     || !config.supervisor?.origin) {
     return { available: false, detail: 'The local FLUJO fleet profile lacks a compatible Fly provisioner and model.' };
   }
-  if (sourceHold(dataDir, config.supervisor.origin)) {
-    return { available: false, detail: 'Local FLUJO workspace creation is held after a confirmed failure. Native provider work remains available.' };
-  }
   try {
     const origin = new URL(config.supervisor.origin);
     if (!['127.0.0.1', 'localhost', '[::1]'].includes(origin.hostname)) {
       return { available: false, detail: 'The FLUJO source must be a local instance.' };
+    }
+    if (sourceHold(dataDir, config.supervisor.origin)) {
+      return { available: false, detail: 'Local FLUJO workspace creation is held after a confirmed failure. Native provider work remains available.' };
     }
     const client = new FlujoClient({ origin: origin.href, workspace: null });
     await client.api('GET', '/api/workspaces', undefined, { workspace: null, timeoutMs: 3000 }).then((response) => {
@@ -81,6 +84,9 @@ async function inspectFleet({ dataDir } = {}) {
   if (fallbackKey) {
     const fallback = { name: 'gpt-4.1-mini', baseUrl: 'https://api.openai.com/v1', apiKey: fallbackKey,
       contextWindow: 8192, provider: 'openai', adapter: 'openai' };
+    if (modelHold(dataDir, fallback)) {
+      return { available: false, detail: 'The OpenAI API model rejected a real execution because this account has no credits. Native provider work remains available.' };
+    }
     if ((await modelProbe(fallback)).available) {
       return { available: true, provider: 'openai-api',
         detail: 'The saved model is unavailable; an existing OpenAI API key can run one isolated Fly Worker. Cloud and model billing remain pending.', config: { ...config, model: fallback } };

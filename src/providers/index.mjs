@@ -16,6 +16,13 @@ const safeText = (value) => String(value ?? '').slice(0, MAX_TEXT);
 const validModel = (value) => typeof value === 'string' && /^[\w./:-]{1,160}$/.test(value);
 const positiveBudget = (value) => value === undefined || (Number.isFinite(value) && value > 0);
 const notApplied = (message) => Object.assign(new Error(message), { outcome: 'not_applied' });
+const unavailable = (message) => Object.assign(notApplied(message), { code: 'PROVIDER_UNAVAILABLE' });
+const quotaDenied = (body) => {
+  const error = body?.error;
+  if (!error || typeof error !== 'object') return false;
+  return error.code === 'insufficient_quota' || error.type === 'insufficient_quota'
+    || typeof error.message === 'string' && /\bno credits remaining\b/i.test(error.message);
+};
 const cancelled = (outcome) => Object.assign(new Error('Cancelled'), { name: 'AbortError', outcome, ...(outcome === 'unknown' ? { code: 'UNKNOWN', unknown: true } : {}) });
 const markUnknown = (error) => {
   if (error && typeof error === 'object' && error.outcome !== 'not_applied') {
@@ -81,12 +88,14 @@ export class ProviderManager {
     this.credentialStore = credentialStore;
     this.connected = new Map();
     this.detected = new Map();
+    this.apiBlocked = new Map();
     this.explicitlyDisconnected = new Set();
     this.saved = {};
     if (dataDir) {
       try { this.saved = JSON.parse(readFileSync(join(dataDir, 'connections.json'), 'utf8')); } catch { this.saved = {}; }
     }
     for (const [id, config] of Object.entries(this.saved)) if (config?.disabled) this.explicitlyDisconnected.add(id);
+    for (const [id, config] of Object.entries(this.saved)) if (config?.blocked && ['openai', 'anthropic', 'modal'].includes(id)) this.apiBlocked.set(id, config.blocked);
   }
 
   #save() {
@@ -121,13 +130,13 @@ export class ProviderManager {
       }
     }
     for (const [id, envKey] of [['openai', this.env.OPENAI_API_KEY], ['anthropic', this.env.ANTHROPIC_API_KEY], ['modal', this.env.MODAL_PROXY_TOKEN]]) {
-      if (envKey && !this.explicitlyDisconnected.has(id) && !this.connected.has(id) && (id !== 'modal' || this.saved[id]?.model)) {
+      if (envKey && !this.explicitlyDisconnected.has(id) && !this.apiBlocked.has(id) && !this.connected.has(id) && (id !== 'modal' || this.saved[id]?.model)) {
         this.connected.set(id, { method: 'key', key: envKey, model: this.saved[id]?.model ?? DEFAULT_MODEL[id] });
       }
     }
     if (this.credentialStore) {
       for (const id of ['openai', 'anthropic', 'modal']) {
-        if (this.saved[id]?.method === 'key' && !this.connected.has(id) && !this.explicitlyDisconnected.has(id)) {
+        if (this.saved[id]?.method === 'key' && !this.connected.has(id) && !this.explicitlyDisconnected.has(id) && !this.apiBlocked.has(id)) {
           try {
             const key = await this.credentialStore.get?.(id);
             if (key && (id !== 'modal' || this.saved[id]?.model)) this.connected.set(id, { method: 'key', key, model: this.saved[id].model ?? DEFAULT_MODEL[id] });
@@ -142,13 +151,15 @@ export class ProviderManager {
     return Object.entries(NAMES).map(([id, name]) => {
       const detected = this.detected.get(id);
       const connection = this.connected.get(id);
+      const apiBlocked = this.apiBlocked.get(id);
       const keyAvailable = id === 'openai' ? Boolean(this.env.OPENAI_API_KEY) : id === 'anthropic' ? Boolean(this.env.ANTHROPIC_API_KEY) : id === 'modal' ? Boolean(this.env.MODAL_PROXY_TOKEN) : false;
       let detail;
       if (id === 'antigravity') detail = detected?.installed ? 'CLI found; unattended execution is unsupported.' : 'CLI not found; unattended execution is unsupported.';
       else if (id === 'codex' || id === 'claude') detail = detected?.blocked ? 'Native sign-in exists, but subscription execution was denied. Use an API key or update native access.' : detected?.loggedIn ? 'Native sign-in found; execution is verified on first run. Subscription usage is separate from API billing.' : detected?.installed ? 'Sign in through the native app or CLI first.' : 'CLI not installed.';
+      else if (apiBlocked) detail = apiBlocked;
       else if (id === 'modal') detail = 'Requires a Modal inference Proxy Token and an available endpoint model. Modal account tokens are not inference tokens.';
       else detail = 'Requires an API key; API billing is separate from CLI subscriptions.';
-      return { id, name, available: (id === 'codex' || id === 'claude') ? Boolean(detected?.installed && detected?.loggedIn && !detected?.blocked) : id === 'antigravity' ? false : Boolean(connection || keyAvailable), connected: Boolean(connection), methods: METHOD[id], detail, ...(connection?.model ? { models: [connection.model] } : {}) };
+      return { id, name, available: (id === 'codex' || id === 'claude') ? Boolean(detected?.installed && detected?.loggedIn && !detected?.blocked) : id === 'antigravity' ? false : !apiBlocked && Boolean(connection || keyAvailable), connected: Boolean(connection), methods: METHOD[id], detail, ...(connection?.model ? { models: [connection.model] } : {}) };
     });
   }
 
@@ -186,6 +197,7 @@ export class ProviderManager {
     }
     if (supplied && this.credentialStore) await this.credentialStore.set(id, secret);
     this.connected.set(id, { method, key: secret, model: selectedModel });
+    this.apiBlocked.delete(id);
     this.explicitlyDisconnected.delete(id);
     this.saved[id] = { method, model: selectedModel }; this.#save();
     return this.publicState().find((item) => item.id === id);
@@ -195,6 +207,7 @@ export class ProviderManager {
     if (!Object.hasOwn(NAMES, id)) throw new Error('Unknown provider.');
     await this.credentialStore?.delete?.(id);
     this.connected.delete(id);
+    this.apiBlocked.delete(id);
     this.explicitlyDisconnected.add(id);
     this.saved[id] = { disabled: true }; this.#save();
     return this.publicState().find((item) => item.id === id);
@@ -203,6 +216,7 @@ export class ProviderManager {
   async run({ providerId, prompt, signal, onEvent, maxUsd, role, goalId } = {}) {
     if (!positiveBudget(maxUsd)) throw notApplied('Remaining budget must be positive.');
     if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > MAX_PROMPT) throw notApplied('Prompt is empty or too long.');
+    if (this.apiBlocked.has(providerId)) throw unavailable(this.apiBlocked.get(providerId));
     const connection = this.connected.get(providerId);
     if (!connection) throw notApplied('Connect this provider first.');
     if (signal?.aborted) throw cancelled('not_applied');
@@ -300,9 +314,19 @@ export class ProviderManager {
     const timer = setTimeout(() => controller.abort(new Error('Provider timed out.')), 120_000);
     try {
       const response = await this.fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal, redirect: 'error' });
+      if (response.status === 401 || response.status === 403) {
+        const reason = `${NAMES[id]} rejected authentication. Reconnect with a valid key or choose another provider.`;
+        this.#blockApi(id, connection, reason);
+        throw unavailable(reason);
+      }
       const raw = await response.text();
       if (raw.length > 256_000) throw new Error('Provider response exceeded the safety limit.');
       const result = json(raw);
+      if (response.status === 429 && quotaDenied(result)) {
+        const reason = `${NAMES[id]} has no remaining inference credits. Add credits or choose another provider, then reconnect.`;
+        this.#blockApi(id, connection, reason);
+        throw unavailable(reason);
+      }
       if (!response.ok) throw new Error(`${NAMES[id]} request failed (HTTP ${response.status}). Check the key and model.`);
       let text;
       if (id === 'anthropic') text = result?.content?.filter((item) => item.type === 'text').map((item) => item.text).join('\n');
@@ -317,9 +341,17 @@ export class ProviderManager {
         ? (inputTokens * prices[0] + outputTokensUsed * prices[1]) / 1_000_000 : null;
       return { text, usage: { inputTokens, outputTokens: outputTokensUsed, costUsd: estimatedCost, costKind: estimatedCost === null ? 'unknown' : 'estimated' } };
     } catch (error) {
+      if (error?.outcome === 'not_applied') throw error;
       if (controller.signal.aborted) throw cancelled('unknown');
       throw markUnknown(error);
     } finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
+  }
+
+  #blockApi(id, connection, reason) {
+    this.apiBlocked.set(id, reason);
+    this.connected.delete(id);
+    this.saved[id] = { method: connection.method, model: connection.model, blocked: reason };
+    try { this.#save(); } catch { /* In-memory block still prevents an automatic retry this session. */ }
   }
 }
 
