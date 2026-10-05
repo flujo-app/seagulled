@@ -13,6 +13,7 @@ The candidate is checked with 79 automated cases. Packaged Electron startup, ren
 - Recovered swarm checks cover worker/depth caps, provisioning, relay transport, original run identities and uncertain cleanup. Product fixtures also exercise child-before-parent artifact capture, incomplete-capture retirement holds, and exact owned relay journals. Live Fly diagnostics are excluded from ordinary test discovery and require explicit opt-in.
 - Artifact capture executes trusted collection code against a designated output tree, validates file names, bounds, links, bytes and SHA-256, then saves private receipts atomically. Tests use actual local files and Node execution; successful capture from a live Fly worker remains unqualified.
 - The collector supports Fly CLI's omitted zero exit code, while explicit failure or malformed codes cannot commit artifacts. The official [Fly response type](https://github.com/superfly/fly-go/blob/main/machine_types.go) omits the zero value when serialized. This fixes a receipt compatibility defect; it does not establish the cause of the earlier live model failure.
+- The exact collection command also passed in the cached immutable Linux worker image with networking disabled and a read-only fixture mount: one 33-byte file matched its expected SHA-256. This was a batch collection check, with no FLUJO service startup, provider call or Fly mutation; it does not qualify a live cloud deliverable.
 
 ## Cloud and provider scope
 
