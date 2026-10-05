@@ -69,13 +69,43 @@ test('real local video seeks through transition frames forward and backward and 
   assert.equal(ranged.status,206);assert.equal(ranged.headers.get('content-range')?.startsWith('bytes 0-3/'),true);
   const browser=await chromium.launch({channel:'chrome',headless:true});t.after(()=>browser.close());
   const page=await browser.newPage();await page.goto(server.url);
+  // The browser's first media decoder and network startup can compete with
+  // other test files on Windows CI. Qualify the real fixture before measuring
+  // MoviePlayer's bounded source switch and frame presentation.
+  const fixtureStarted=Date.now();
+  await page.evaluate(()=>{
+    const video=document.getElementById('video');
+    video.src='/clips/frames.mp4';video.load();
+  });
+  await page.waitForFunction(()=>{
+    const video=document.getElementById('video');
+    return video.readyState>=2||Boolean(video.error);
+  },null,{timeout:30000});
+  const fixtureReady=await page.locator('#video').evaluate(video=>({
+    ready:video.readyState,duration:video.duration,error:video.error?.message||null,
+  }));
+  assert.equal(fixtureReady.error,null,JSON.stringify(fixtureReady));
+  assert.equal(fixtureReady.ready>=2&&fixtureReady.duration===1,true,JSON.stringify(fixtureReady));
+  await page.locator('#video').evaluate(video=>{video.removeAttribute('src');video.load();});
+  const fixtureWarmupMs=Date.now()-fixtureStarted;
+  const playerStarted=Date.now();
+  await page.evaluate(()=>{
+    const video=document.getElementById('video'),started=performance.now();
+    window.movieMediaTrace=[];
+    for(const event of ['loadstart','loadedmetadata','durationchange','loadeddata','canplay','error','stalled','suspend']){
+      video.addEventListener(event,()=>window.movieMediaTrace.push({
+        event,ms:Math.round(performance.now()-started),ready:video.readyState,
+        network:video.networkState,duration:video.duration,
+      }));
+    }
+  });
   const loaded=await page.evaluate(async()=>{
     const {MoviePlayer}=await import('/movie-player.mjs');
     const video=document.getElementById('video'),stage=document.getElementById('stage');
     const frames=[];const player=new MoviePlayer({video,stage,manifestUrl:'/movie-manifest.json',onFrame:event=>frames.push(event),onStatus:({detail})=>{stage.dataset.detail=detail;}});
     window.testMovie={player,frames};return player.load();
   });
-  assert.equal(loaded,true,await page.locator('#stage').evaluate(element=>JSON.stringify({status:element.dataset.movieStatus,detail:element.dataset.detail,video:document.getElementById('video').error?.message,time:document.getElementById('video').currentTime,duration:document.getElementById('video').duration,ready:document.getElementById('video').readyState})));
+  assert.equal(loaded,true,await page.locator('#stage').evaluate((element,timing)=>JSON.stringify({status:element.dataset.movieStatus,detail:element.dataset.detail,video:document.getElementById('video').error?.message,time:document.getElementById('video').currentTime,duration:document.getElementById('video').duration,ready:document.getElementById('video').readyState,network:document.getElementById('video').networkState,mediaTrace:window.movieMediaTrace,...timing}),{fixtureWarmupMs,playerLoadMs:Date.now()-playerStarted}));
   assert.equal(await page.locator('#stage').getAttribute('data-movie-status'),'playing');
   assert.equal(await page.locator('#video').getAttribute('data-ready'),'true');
   await page.waitForFunction(()=>window.testMovie.frames.filter(frame=>frame.clipId==='idle').length>=9);
