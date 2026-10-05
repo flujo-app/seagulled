@@ -293,6 +293,88 @@ test('product fleet requires one bound private source and checks the SDK proof b
   }
 });
 
+test('private SDK preflight rejects an incompatible Worker source before relay or app creation', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-private-profile-'));
+  const dataDir = path.join(root, 'swarm');
+  const cloudSdkRoot = path.join(root, 'cloud-sdk');
+  const sourceInstanceDir = path.join(root, 'instances');
+  const sourceDataRoot = path.join(root, 'flujo-data');
+  const sourceAppRoot = path.join(root, 'flujo-app');
+  const flyConfigDir = path.join(root, 'fly-auth');
+  for (const directory of [dataDir, path.join(cloudSdkRoot, 'lib'), sourceInstanceDir,
+    sourceDataRoot, sourceAppRoot, flyConfigDir]) mkdirSync(directory, { recursive: true });
+  const flyctlPath = path.join(root, 'flyctl');
+  writeFileSync(flyctlPath, 'fixture');
+  writeFileSync(path.join(flyConfigDir, 'config.yml'), 'fixture');
+  const requests = [];
+  const server = http.createServer(async (request, response) => {
+    for await (const _chunk of request) { /* Drain fixture requests. */ }
+    const pathname = new URL(request.url, 'http://local').pathname;
+    requests.push(`${request.method} ${pathname}`);
+    const send = (status, value) => { response.writeHead(status, { 'content-type': 'application/json' });
+      response.end(JSON.stringify(value)); };
+    if (pathname === '/api/workspaces' && request.method === 'GET') return send(200, { workspaces: [] });
+    if (pathname === '/api/workspaces' && request.method === 'POST') return send(201, {});
+    if (pathname === '/api/workspaces' && request.method === 'DELETE') return send(200, {});
+    if (pathname === '/api/init') return send(200, {});
+    if (pathname === '/api/model' && request.method === 'GET') return send(200, []);
+    if (pathname === '/api/model' && request.method === 'POST') return send(201, {});
+    if (pathname === '/api/flow' && request.method === 'GET') return send(200, []);
+    if (pathname === '/api/flow/compile') return send(201, { flow: { id: 'boot-flow', name: 'swarm_boot' } });
+    return send(404, {});
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const sourceOrigin = `http://127.0.0.1:${server.address().port}`;
+  writeFileSync(path.join(cloudSdkRoot, 'package.json'), '{"type":"module"}');
+  writeFileSync(path.join(cloudSdkRoot, 'lib', 'managed.mjs'), `export class ManagedCloud {
+    static privateNetworkContractVersion = 1;
+    constructor() {}
+    async source() { return { source: '${sourceOrigin}', dataRoot: '${sourceDataRoot.replaceAll('\\', '\\\\')}',
+      appRoot: '${sourceAppRoot.replaceAll('\\', '\\\\')}' }; }
+    async preflight(input) { globalThis.__privateProfilePreflight.push(input);
+      throw new Error(globalThis.__privateProfileFailure); }
+    async openOwnedProxy() { throw new Error('No proxy should open.'); }
+    async credential() { throw new Error('No credential should be read.'); }
+  }`);
+  const sourceBinding = { cloudSdkRoot, sourceOrigin, sourceInstanceDir, sourceDataRoot, sourceAppRoot };
+  const flyAccount = { flyctlPath, flyConfigDir, orgSlug: 'personal', scope: 'private', accountRef };
+  const fleetRoute = { available: true, providerId: 'openai', model: {
+    name: 'fixture-model', baseUrl: 'https://api.openai.com/v1', apiKey: 'fixture-key',
+    provider: 'openai', adapter: 'openai-responses' } };
+  const previousFetch = globalThis.fetch;
+  globalThis.__privateProfilePreflight = [];
+  globalThis.__privateProfileFailure = 'Private-workspace source capability is incompatible.';
+  globalThis.fetch = async () => new Response(JSON.stringify({ data: [{ id: 'fixture-model' }] }),
+    { status: 200 });
+  try {
+    for (const [goalId, failure] of [
+      ['source-held', 'Private-workspace source capability is incompatible.'],
+      ['image-held', 'No compatible official worker image.'],
+    ]) {
+      globalThis.__privateProfileFailure = failure;
+      await assert.rejects(runFleetLeaf({ goal: { id: goalId, text: 'fixture', providerId: 'openai' },
+        task: 'fixture', dataDir, maxUsd: 2, fleetRoute, flyAccount, sourceBinding,
+        assertFlyAccountCurrent: async () => true }),
+      (error) => error.outcome === 'not_applied' && error.message === failure);
+      const intent = JSON.parse(readFileSync(path.join(dataDir, 'fleet', goalId, 'intent.json'), 'utf8'));
+      assert.deepEqual(intent.apps, {});
+    }
+    assert.equal(globalThis.__privateProfilePreflight.length, 2);
+    for (const input of globalThis.__privateProfilePreflight) {
+      assert.equal(input.profile, 'private-workspace');
+      assert.equal(input.source, sourceOrigin);
+      assert.deepEqual(input.flowIds, ['swarm_boot']);
+      assert.equal('network' in input, false);
+    }
+    assert.equal(requests.filter((entry) => entry === 'DELETE /api/workspaces').length, 2);
+  } finally {
+    globalThis.fetch = previousFetch;
+    delete globalThis.__privateProfilePreflight;
+    delete globalThis.__privateProfileFailure;
+    server.closeAllConnections(); await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('Fly provisioner gives ManagedCloud only the selected account and owned record directory', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'seagulled-managed-lease-'));
   const lib = path.join(root, 'lib'); mkdirSync(lib);

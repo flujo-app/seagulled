@@ -185,7 +185,7 @@ export class NativeOriginalLedger {
 
   // New admission is serialized by this owner's goal-scoped journal. Identity
   // fields come only from the two trusted callbacks and must agree exactly.
-  async accept({ request, claim, originEnvelope, callId, input, inventory, invocation }) {
+  async accept({ request, claim, originEnvelope, callId, input, inventory, invocation, beforeGrant }) {
     id(callId);
     const claimSnapshot = json(claim, this.limits.claim);
     const envelope = json(originEnvelope, this.limits.envelope);
@@ -212,6 +212,8 @@ export class NativeOriginalLedger {
         || !same(existing.payload, payload)) fail('CHANGED_ORIGINAL');
       return this.view(existing);
     }
+    if (typeof beforeGrant === 'function') await beforeGrant(copy(owner), copy(payload));
+    if (scope.state.records[callId]) fail('CHANGED_ORIGINAL');
     if (Object.keys(scope.state.records).length >= this.limits.records) fail('CAPACITY');
     // A genuine uncertain original holds the whole goal, which includes this
     // root and Worker. Already admitted IDs remain queryable and reconcilable.
@@ -255,7 +257,7 @@ export class NativeOriginalLedger {
 
   // The original effect is called at most once. Losing its return or throwing
   // leaves the saved invocation uncertain; retrying the ID never calls it again.
-  async invoke(callId, goalId, { request, claim, execute }) {
+  async invoke(callId, goalId, { request, claim, execute, beforeInvoke }) {
     const scope = this.scope(goalId);
     const record = scope.state.records[id(callId)] ?? fail('NOT_FOUND');
     if (record.state !== 'accepted' || record.invocationEffect !== 'not-started') fail('NO_REISSUE');
@@ -268,7 +270,15 @@ export class NativeOriginalLedger {
     if (!same(record.owner, { ...binding, conversationId: origin.conversationId,
       logicalRunId: origin.logicalRunId, nodeId: origin.nodeId,
       generation: origin.generation, ...expected })) fail('ORIGIN');
-    if (record.state !== 'accepted') fail('NO_REISSUE');
+    await this.refreshGoal(scope);
+    // Source admission runs after potentially slow lifecycle probes, so Stop,
+    // lease and budget changes during those probes are checked before issue.
+    if (typeof beforeInvoke === 'function') await beforeInvoke(copy(record.owner), copy(record.payload));
+    if (record.state !== 'accepted' || record.cancel) fail('NO_REISSUE');
+    if (!this.pending.has(key)) fail('NO_REISSUE');
+    if (Object.values(scope.state.records).some((other) => other !== record && this.uncertain(other))) {
+      fail('UNCERTAIN_SCOPE');
+    }
     record.state = 'uncertain';
     record.invocationEffect = 'uncertain';
     this.save(scope);

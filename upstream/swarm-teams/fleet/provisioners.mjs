@@ -43,9 +43,12 @@ export async function flyProvisioner({ flujoCloudPath, templateWorkspace, source
   const { ManagedCloud } = await lib('managed.mjs');
   const { createFlyRunner, unusedLoopbackPort } = await lib('process.mjs');
   const { readPrivateJson } = await lib('private-files.mjs');
+  const { controlToken } = network ? await lib('snapshot.mjs') : {};
   const managed = new ManagedCloud({ ...(flyEnv ? { env: flyEnv } : {}),
     ...(cloudDirectory ? { directory: cloudDirectory } : {}) });
   if (network && (ManagedCloud.privateNetworkContractVersion !== 1
+    || typeof managed.openOwnedProxy !== 'function'
+    || typeof managed.credential !== 'function' || typeof controlToken !== 'function'
     || typeof accountRef !== 'string' || !/^fly-account-sha256:[a-f0-9]{64}$/.test(accountRef)
     || typeof onPlannedApp !== 'function' || typeof onConfirmedApp !== 'function'
     || typeof onRetiredApp !== 'function' || typeof verifyNetwork !== 'function')) {
@@ -72,14 +75,21 @@ export async function flyProvisioner({ flujoCloudPath, templateWorkspace, source
       }
     }
   };
-  const verifyDeployment = async (app, appId) => {
-    const { metadata, journal } = await managed.deployment(app);
+  const verifyDeployment = async (app, appId, { machineId, workspace } = {}) => {
+    const deployment = await managed.deployment(app);
+    const { metadata, journal } = deployment;
     if (!journal || metadata.network !== network || journal.network !== network
       || journal.app !== app || journal.appId !== appId || journal.ownershipConfirmed !== true
-      || journal.org !== org || metadata.org !== org || journal.state !== 'ready') {
+      || journal.org !== org || metadata.org !== org || metadata.phase !== 'ready'
+      || journal.state !== 'ready' || journal.stage !== 'ready'
+      || metadata.profile !== 'private-workspace' || journal.profile !== 'private-workspace'
+      || journal.workspace !== templateWorkspace || metadata.workspace !== templateWorkspace
+      || typeof journal.machineId !== 'string' || !journal.machineId
+      || machineId !== undefined && journal.machineId !== machineId
+      || workspace !== undefined && journal.workspace !== workspace) {
       throw new Error('The owned Worker network receipt does not match its private SDK journal.');
     }
-    return journal;
+    return deployment;
   };
   // Bounded parallel provisioning. Snapshot capture of the one template workspace is
   // exclusive, so a busy source is retried instead of failing the Worker.
@@ -122,18 +132,23 @@ export async function flyProvisioner({ flujoCloudPath, templateWorkspace, source
       let result;
       await slot();
       try { result = await up(worker, { workspace: templateWorkspace, source, org, network,
-        region, memoryMb, flowIds: [BOOT_FLOW] }); }
+        region, memoryMb, flowIds: [BOOT_FLOW],
+        ...(network ? { profile: 'private-workspace' } : {}) }); }
       catch (error) { if (initialOutstanding) rejectInitial(error); throw error; }
       finally { release(); }
       const app = result.worker;
+      let confirmedAppId;
       if (network) {
         try {
           const journal = await managed.deployment(app).then((value) => value.journal);
           if (!journal?.appId || !journal.owner || journal.network !== network
-            || journal.ownershipConfirmed !== true) {
+            || journal.ownershipConfirmed !== true || result.machineId !== journal.machineId
+            || result.workspace !== templateWorkspace) {
             throw new Error('The owned Worker app has no confirmed private network receipt.');
           }
-          await verifyDeployment(app, journal.appId);
+          await verifyDeployment(app, journal.appId, { machineId: result.machineId,
+            workspace: templateWorkspace });
+          confirmedAppId = journal.appId;
           await onConfirmedApp({ app, appId: journal.appId,
             ownerMarker: `FLUJO_CLOUD_OWNER_${journal.owner.replaceAll('-', '').toUpperCase()}`,
             kind: 'worker' });
@@ -150,7 +165,7 @@ export async function flyProvisioner({ flujoCloudPath, templateWorkspace, source
       }
       const reachable = fleetReachable || Boolean(fleet?.remoteUrl);
       const target = { kind: 'fly', app: result.worker, org: result.org,
-        ...(network ? { network, accountRef, appId: (await managed.deployment(app)).journal.appId } : {}),
+        ...(network ? { network, accountRef, appId: confirmedAppId } : {}),
         machineId: result.machineId, workspace: templateWorkspace };
       // The clone is tool-free (see bootSpec). Switch on the Worker's own tool servers and
       // install the swarm flows there. Without a controller URL that Fly can reach the Worker
@@ -163,7 +178,7 @@ export async function flyProvisioner({ flujoCloudPath, templateWorkspace, source
           limits: context.teamLimits ?? teamLimits,
           specialists: context.specialists ?? specialists });
       } catch (error) {
-        if (error.code === 'NETWORK_MEMBERSHIP') {
+        if (error.code === 'NETWORK_MEMBERSHIP' || error.code === 'PROXY_CLEANUP_UNKNOWN') {
           throw attemptError(error, { confirmed: false, app, error: error.message });
         }
         throw attemptError(error, await cleanupProvisioned(app));
@@ -171,40 +186,87 @@ export async function flyProvisioner({ flujoCloudPath, templateWorkspace, source
       return target;
     },
     async connect(target, { operation = 'dispatch' } = {}) {
+      let originalDeployment;
       if (network) {
         if (target.network !== network || target.accountRef !== accountRef
-          || target.org !== org || !target.appId) {
+          || target.org !== org || !target.appId
+          || target.workspace !== templateWorkspace
+          || typeof target.machineId !== 'string' || !target.machineId) {
           throw new Error('The Worker target is not pinned to the goal network.');
         }
-        await verifyDeployment(target.app, target.appId);
+        originalDeployment = await verifyDeployment(target.app, target.appId, { machineId: target.machineId,
+          workspace: target.workspace });
         await waitNetworkReady(operation);
       }
-      await managed.runtime();
-      // A Worker this provisioner created keeps its bearer in flujo-cloud's private store;
-      // an existing always-on worker brings its own.
-      const credentials = target.token ? { token: target.token } : await readPrivateJson(managed.paths(target.app).credentials);
-      const fly = createFlyRunner({ env: managed.env, binary: managed.env.FLYCTL_PATH || 'flyctl' });
-      const proxy = await fly.proxy({ app: target.app, org: target.org, machineId: target.machineId, localPort: await unusedLoopbackPort() });
-      // The proxy needs a moment before it accepts connections.
-      const client = new FlujoClient({ origin: proxy.origin, workspace: target.workspace, token: credentials.token });
+      let proxy;
+      const closeProxy = async () => {
+        if (!proxy) return;
+        const stopped = await proxy.stop();
+        if (network && stopped?.childClosed !== true) {
+          throw new Error('The owned Worker proxy supplied no observed child-close result.');
+        }
+      };
       try {
+        if (network) {
+          // The SDK must perform fresh owned-app, exact Machine marker/config,
+          // and pinned-image checks before it opens its own proxy.
+          proxy = await managed.openOwnedProxy({ app: target.app, appId: target.appId,
+            org, network, machineId: target.machineId, workspace: target.workspace });
+          if (typeof proxy?.origin !== 'string' || typeof proxy.check !== 'function'
+            || typeof proxy.stop !== 'function') {
+            throw new Error('The pinned cloud SDK returned no owned proxy lifecycle.');
+          }
+        } else {
+          await managed.runtime();
+          const fly = createFlyRunner({ env: managed.env, binary: managed.env.FLYCTL_PATH || 'flyctl' });
+          proxy = await fly.proxy({ app: target.app, org: target.org,
+            machineId: target.machineId, localPort: await unusedLoopbackPort() });
+        }
+        // The goal-private bearer belongs to the exact managed attempt, never the target.
+        let credentials;
+        if (network) {
+          const current = await verifyDeployment(target.app, target.appId,
+            { machineId: target.machineId, workspace: target.workspace });
+          if (current.metadata.attemptId !== originalDeployment.metadata.attemptId
+            || current.journal.owner !== originalDeployment.journal.owner) {
+            throw new Error('The owned Worker attempt changed while opening its proxy.');
+          }
+          credentials = await managed.credential(current.files, current.metadata, { required: true });
+        } else {
+          credentials = target.token ? { token: target.token }
+            : await readPrivateJson(managed.paths(target.app).credentials);
+        }
+        const token = network ? controlToken(credentials?.token, 'Saved Worker credential') : credentials.token;
+        const client = new FlujoClient({ origin: proxy.origin, workspace: target.workspace, token });
+        // The proxy needs a moment before it accepts connections.
         for (let attempt = 0; attempt < 40; attempt++) {
           proxy.check();
           if ((await client.api('GET', '/api/worker/status', undefined, { timeoutMs: 3000 }).catch(() => null))?.status === 200) {
-            return { client, close: () => proxy.stop() };
+            return { client, close: async () => {
+              try { await closeProxy(); }
+              catch (cause) { throw Object.assign(new Error('Owned Worker proxy cleanup is unconfirmed.', { cause }),
+                { code: 'PROXY_CLEANUP_UNKNOWN' }); }
+            } };
           }
           await new Promise((resolve) => setTimeout(resolve, 500));
         }
         throw new Error('The Fly Worker did not become reachable; no flow was submitted.');
-      } catch (error) { await proxy.stop(); throw error; }
+      } catch (error) {
+        try { await closeProxy(); }
+        catch (cause) { throw Object.assign(new Error('Owned Worker proxy cleanup is unconfirmed.', { cause }),
+          { code: 'PROXY_CLEANUP_UNKNOWN' }); }
+        throw error;
+      }
     },
     async retire(target) {
       if (network) {
         if (target.network !== network || target.accountRef !== accountRef
-          || target.org !== org || !target.appId) {
+          || target.org !== org || !target.appId || target.workspace !== templateWorkspace
+          || typeof target.machineId !== 'string' || !target.machineId) {
           throw new Error('The Worker target is not pinned to the goal network.');
         }
-        await verifyDeployment(target.app, target.appId);
+        await verifyDeployment(target.app, target.appId, { machineId: target.machineId,
+          workspace: target.workspace });
         await verifyNetwork({ allowPending: true, operation: 'cleanup' });
       }
       const cleanup = await cleanupAttempt(managed, target.app);

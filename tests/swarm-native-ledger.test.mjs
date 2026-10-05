@@ -379,6 +379,69 @@ test('one uncertain child holds new IDs but admitted siblings retain original cu
   } finally { f.close(); }
 });
 
+test('a sibling marked uncertain during beforeInvoke blocks the next issue write but keeps both exact-ID lanes', async () => {
+  const f = fixture();
+  try {
+    const who = f.actor('lead');
+    const first = f.input(who, f.origin(who, 'first-root'), 'call-first');
+    const second = f.input(who, f.origin(who, 'second-root'), 'call-second');
+    await f.ledger.accept(first);
+    await f.invoke('call-first', 'goal-one', (_, owner) => f.live(owner));
+    await f.ledger.accept(second);
+    let effects = 0;
+    await assert.rejects(f.ledger.invoke('call-second', 'goal-one', {
+      request: second.request, claim: second.claim,
+      beforeInvoke: async () => {
+        f.ledger.lostOriginal('call-first', 'goal-one', f.handle('goal-one', 'call-first'));
+      },
+      execute: () => { effects++; throw new Error('No second effect is permitted.'); },
+    }), hasCode('UNCERTAIN_SCOPE'));
+    assert.equal(effects, 0);
+    assert.equal((await f.ledger.status('call-first', 'goal-one')).state, 'uncertain');
+    const admitted = await f.ledger.status('call-second', 'goal-one');
+    assert.equal(admitted.state, 'accepted');
+    assert.equal(admitted.invocationEffect, 'not-started');
+    const cancelled = await f.ledger.cancelPending('call-second', 'goal-one', async () => undefined);
+    assert.equal(cancelled.cancel.state, 'resolved');
+  } finally { f.close(); }
+});
+
+test('the final admission sees Stop after a held sibling probe and issues no effect', async () => {
+  const f = fixture();
+  try {
+    const who = f.actor('lead');
+    const first = f.input(who, f.origin(who, 'first-root'), 'call-first');
+    const second = f.input(who, f.origin(who, 'second-root'), 'call-second');
+    await f.ledger.accept(first);
+    await f.invoke('call-first', 'goal-one', (_, owner) => f.live(owner));
+    await f.ledger.accept(second);
+    const probing = deferred();
+    const release = deferred();
+    f.setProbeGate(async () => { probing.resolve(); await release.promise; });
+    let stopped = false;
+    let admissionChecks = 0;
+    let effects = 0;
+    const invocation = f.ledger.invoke('call-second', 'goal-one', {
+      request: second.request, claim: second.claim,
+      beforeInvoke: () => {
+        admissionChecks++;
+        if (stopped) throw Object.assign(new Error('Goal stopped.'), { code: 'STOPPED' });
+      },
+      execute: () => { effects++; throw new Error('No second effect is permitted.'); },
+    });
+    try {
+      await probing.promise;
+      stopped = true;
+    } finally { release.resolve(); }
+    await assert.rejects(invocation, hasCode('STOPPED'));
+    assert.equal(admissionChecks, 1);
+    assert.equal(effects, 0);
+    const admitted = await f.ledger.status('call-second', 'goal-one');
+    assert.equal(admitted.state, 'accepted');
+    assert.equal(admitted.invocationEffect, 'not-started');
+  } finally { f.close(); }
+});
+
 test('two cancellations waiting on one original probe journal and execute only one cancellation', { timeout: 10_000 }, async () => {
   const f = fixture();
   try {

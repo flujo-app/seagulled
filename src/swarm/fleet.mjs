@@ -7,6 +7,7 @@ import { Controller } from '../../upstream/swarm-teams/fleet/controller.mjs';
 import { flyProvisioner } from '../../upstream/swarm-teams/fleet/provisioners.mjs';
 import { FlujoClient } from '../../upstream/swarm-teams/lib/flujo-client.mjs';
 import { installTemplate } from '../../upstream/swarm-teams/install.mjs';
+import { BOOT_FLOW } from '../../upstream/swarm-teams/template/flows.mjs';
 import { collectFlyArtifacts } from '../artifacts/fly.mjs';
 import { createOwnedRelay } from './relay.mjs';
 import { assertNetworkVacant, assertPlannedNetworkMembers, readFlyOrgApps } from './fly-network.mjs';
@@ -615,12 +616,35 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
       diagnostic ? undefined : config.sourceInstanceDir);
     mkdirSync(cloudDirectory, { recursive: true, mode: 0o700 });
     const { ManagedCloud } = await import(pathToFileURL(path.join(config.provisioner.flujoCloudPath, 'lib', 'managed.mjs')).href);
-    if (ManagedCloud.privateNetworkContractVersion !== 1) {
-      throw Object.assign(new Error('The pinned cloud SDK has no verified private network contract.'),
+    if (ManagedCloud.privateNetworkContractVersion !== 1
+      || typeof ManagedCloud.prototype.openOwnedProxy !== 'function'
+      || typeof ManagedCloud.prototype.credential !== 'function'
+      || typeof ManagedCloud.prototype.preflight !== 'function') {
+      throw Object.assign(new Error('The pinned cloud SDK has no verified private network and owned proxy contract.'),
         { outcome: 'not_applied' });
     }
     await assertAccountCurrent();
     cloudManaged = new ManagedCloud({ env: flyEnv, directory: cloudDirectory });
+    const workerSource = config.provisioner.source ?? config.supervisor.origin;
+    const workerOrg = intent.org;
+    const workerRegion = config.provisioner.region ?? 'iad';
+    if (workerSource !== config.supervisor.origin) {
+      throw Object.assign(new Error('The Worker source does not match the isolated boot workspace.'),
+        { outcome: 'not_applied' });
+    }
+    const workerPreflight = await cloudManaged.preflight({ profile: 'private-workspace',
+      source: workerSource, workspace: bootWorkspace, org: workerOrg,
+      region: workerRegion, flowIds: [BOOT_FLOW] });
+    if (workerPreflight?.readyToDeploy !== true
+      || workerPreflight.profile !== 'private-workspace' || workerPreflight.captureScope !== 'workspace'
+      || workerPreflight.source !== workerSource || workerPreflight.workspace !== bootWorkspace
+      || workerPreflight.org !== workerOrg || workerPreflight.region !== workerRegion
+      || workerPreflight.image?.mode !== 'official' || workerPreflight.image.compatibility !== 'verified'
+      || workerPreflight.flows?.length !== 1 || workerPreflight.flows[0].name !== BOOT_FLOW) {
+      throw Object.assign(new Error('The pinned cloud SDK did not confirm a private-workspace Worker source and image.'),
+        { outcome: 'not_applied' });
+    }
+    assertAdmission(signal, fleetDeadlineAt);
     const { createFlyRunner } = await import(pathToFileURL(path.join(config.provisioner.flujoCloudPath, 'lib', 'process.mjs')).href);
     const selectedFly = createFlyRunner({ env: flyEnv, binary: flyAccount.flyctlPath });
     const flyToken = (await selectedFly.run(['auth', 'token'])).trim();
@@ -689,6 +713,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     assertAdmission(signal, fleetDeadlineAt);
     const topology = fleetTopology(goal, { workerCap, relay: Boolean(relay) });
     const provisioner = await flyProvisioner({ ...config.provisioner, templateWorkspace: bootWorkspace,
+      source: workerSource,
       fleetReachable: Boolean(relay), concurrency: workerCap,
       initialWorkers: topology.initialWorkers,
       teamLimits, flyEnv, cloudDirectory, network: intent.network,
