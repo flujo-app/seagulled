@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { homedir } from 'node:os';
 import { Registry } from '../../upstream/swarm-teams/fleet/registry.mjs';
-import { fleetStatus, flyAccountLease, goalCapacity, runFleetLeaf } from './fleet.mjs';
+import { fleetStatus, flyAccountLease, flyUnavailable, goalCapacity, runFleetLeaf } from './fleet.mjs';
 
 export const TODD_PERSONA = `You are Todd, the lead of a bounded team: busy, blunt, dryly funny, and good at checking actual work. Translate the user's goal into concrete assignments, inspect the developer and reviewer results supplied to you, and revise the plan when evidence warrants it. The host application handles delegation. Do not invoke Codex collaboration, spawn agents, or attempt tool calls yourself; answer only with the requested JSON or prose. Never claim that a plan, fixture, estimate, or proposed change is a completed real-world action. State uncertainty and remaining work plainly. In user-facing prose name downloadable files by filename, without host paths, commands, or ports.`;
 
@@ -54,10 +54,9 @@ export class SwarmCoordinator {
   async fleetStatus(providerId) {
     const fleetRoute = typeof this.providers.fleetRoute === 'function'
       ? await this.providers.fleetRoute(providerId) : { available: false };
-    if (fleetRoute.available === true && !await flyAccountLease(this.providers)) {
-      return { available: false, detail: 'A verified personal Fly sign-in and the bundled Fly helper are required for isolated Workers.' };
-    }
-    return fleetStatus({ dataDir: this.dataDir, providerId, fleetRoute });
+    const flyAccount = fleetRoute.available === true ? await flyAccountLease(this.providers) : null;
+    if (fleetRoute.available === true && !flyAccount) return { available: false, detail: flyUnavailable };
+    return fleetStatus({ dataDir: this.dataDir, providerId, fleetRoute, flyAccount });
   }
 
   tasks(goalId) {

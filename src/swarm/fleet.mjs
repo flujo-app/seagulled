@@ -14,14 +14,15 @@ const legacyProfilePath = () => path.join(process.env.SWARM_TEAMS_HOME || path.j
 const profilePath = () => process.env.SEAGULLED_FLEET_PROFILE || legacyProfilePath();
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const unknown = (message) => Object.assign(new Error(message), { code: 'UNKNOWN', unknown: true });
-const flyUnavailable = 'A verified personal Fly sign-in and the bundled Fly helper are required for isolated Workers.';
+export const flyUnavailable = 'A verified personal Fly sign-in, an unused personal organization, and the bundled Fly helper are required for isolated Workers.';
 const regularFile = (value) => {
   try { return typeof value === 'string' && path.isAbsolute(value) && statSync(value).isFile(); }
   catch { return false; }
 };
 const validFlyAccount = (account) => Boolean(account
   && typeof account.flyConfigDir === 'string' && path.isAbsolute(account.flyConfigDir)
-  && regularFile(account.flyctlPath) && regularFile(path.join(account.flyConfigDir, 'config.yml')));
+  && regularFile(account.flyctlPath) && regularFile(path.join(account.flyConfigDir, 'config.yml'))
+  && typeof account.orgSlug === 'string' && /^[a-z0-9][a-z0-9-]{0,62}$/.test(account.orgSlug));
 /** Backend-only, read-only account lease. It never returns a Fly token or public path. */
 export async function flyAccountLease(providers, signal) {
   if (typeof providers?.flyFleetLease !== 'function') return null;
@@ -29,12 +30,12 @@ export async function flyAccountLease(providers, signal) {
     if (error?.name === 'AbortError') throw Object.assign(error, { outcome: 'not_applied' });
     return null;
   });
-  return validFlyAccount(lease) ? { flyctlPath: lease.flyctlPath, flyConfigDir: lease.flyConfigDir } : null;
+  return lease?.available === true && validFlyAccount(lease)
+    ? { flyctlPath: lease.flyctlPath, flyConfigDir: lease.flyConfigDir, orgSlug: lease.orgSlug } : null;
 }
 /** The cloud SDK and all Fly CLI children receive only this selected personal account. */
 export function isolatedFlyEnvironment(account, sourceEnv = process.env) {
-  if (!account || !regularFile(account.flyctlPath) || typeof account.flyConfigDir !== 'string'
-    || !path.isAbsolute(account.flyConfigDir) || !regularFile(path.join(account.flyConfigDir, 'config.yml'))) {
+  if (!validFlyAccount(account)) {
     throw new Error(flyUnavailable);
   }
   const env = {};
@@ -46,6 +47,11 @@ export function isolatedFlyEnvironment(account, sourceEnv = process.env) {
   env.FLY_CONFIG_DIR = account.flyConfigDir;
   env.FLYCTL_PATH = account.flyctlPath;
   return env;
+}
+/** A product goal always bills the provider-verified personal org, never a legacy profile slug. */
+export function bindVerifiedFlyOrganization(config, account) {
+  if (!validFlyAccount(account)) throw new Error(flyUnavailable);
+  return { ...config, provisioner: { ...config.provisioner, org: account.orgSlug } };
 }
 const boundedCount = (value, fallback, maximum, name) => {
   if (value === undefined) return fallback;
@@ -274,7 +280,7 @@ const exactProductBinding = (providerId, model, route) => {
 };
 
 /** Read-only discovery. Product calls require the selected provider's private route. */
-async function inspectFleet({ dataDir, providerId, fleetRoute, goalId, diagnostic = false } = {}) {
+async function inspectFleet({ dataDir, providerId, fleetRoute, goalId, diagnostic = false, flyAccount } = {}) {
   if (!diagnostic && (fleetRoute?.available !== true || fleetRoute.providerId !== providerId
     || typeof providerId !== 'string' || !providerId)) {
     return { available: false, detail: 'The selected provider has no Fly route. Local provider work remains available.' };
@@ -305,6 +311,10 @@ async function inspectFleet({ dataDir, providerId, fleetRoute, goalId, diagnosti
     } catch { return { available: false, detail: 'The local Fly tooling profile could not be read.' }; }
   }
   if (!diagnostic) config = { ...config, model: fleetRoute.model };
+  if (!diagnostic && flyAccount) {
+    if (!validFlyAccount(flyAccount)) return { available: false, detail: flyUnavailable };
+    config = bindVerifiedFlyOrganization(config, flyAccount);
+  }
   if (config?.provisioner?.kind !== 'fly' || !config.provisioner.flujoCloudPath
     || !existsSync(config.provisioner.flujoCloudPath) || !config.model?.name
     || (!nativeCodex(config.model) && (!config.model?.baseUrl || !config.model?.apiKey))
@@ -355,8 +365,8 @@ async function inspectFleet({ dataDir, providerId, fleetRoute, goalId, diagnosti
   return { available: false, detail: `The configured FLUJO model endpoint is unavailable (${original.detail}); no working API fallback was found.` };
 }
 
-export async function fleetStatus({ dataDir, providerId, fleetRoute, goalId } = {}) {
-  const { config, ...publicState } = await inspectFleet({ dataDir, providerId, fleetRoute, goalId });
+export async function fleetStatus({ dataDir, providerId, fleetRoute, goalId, flyAccount } = {}) {
+  const { config, ...publicState } = await inspectFleet({ dataDir, providerId, fleetRoute, goalId, flyAccount });
   return publicState;
 }
 
@@ -372,7 +382,8 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
   if (!goal || typeof goal.id !== 'string' || !/^[\w-]{1,100}$/.test(goal.id)) throw new Error('A safe goal id is required for isolated fleet work.');
   goalCapacity(goal);
   if (!diagnostic && !validFlyAccount(flyAccount)) return { available: false, detail: flyUnavailable };
-  const discovered = await inspectFleet({ dataDir, providerId: goal.providerId, fleetRoute, goalId: goal.id, diagnostic });
+  const discovered = await inspectFleet({ dataDir, providerId: goal.providerId, fleetRoute, goalId: goal.id,
+    diagnostic, flyAccount });
   if (!discovered.available) return { available: false, detail: discovered.detail };
   const config = discovered.config;
   const bootWorkspace = `seagulled-${goal.id.slice(-12)}-boot`;
@@ -453,7 +464,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
       record({ state: 'budget-reserved', reservationId, reservedUsd: maxUsd });
     }
     if (multiWorker) {
-      const org = await cloudManaged.organization(config.provisioner.org);
+      const org = await cloudManaged.organization(diagnostic ? config.provisioner.org : flyAccount.orgSlug);
       if (workerCap > 1) {
         onStatus('Creating an owned relay for the bounded Fly Worker tree.');
         relayCleanupConfirmed = false;

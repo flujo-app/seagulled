@@ -7,7 +7,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { conversationFailure, fleetStatus, fleetDiagnosticStatus, fleetExecutionLimits, goalCapacity,
-  fleetTopology, flyAccountLease, isolatedFlyEnvironment, recordConfirmedQuotaHold, runFleetLeaf, staffOwnedTeam,
+  fleetTopology, flyAccountLease, isolatedFlyEnvironment, bindVerifiedFlyOrganization,
+  recordConfirmedQuotaHold, runFleetLeaf, staffOwnedTeam,
   verifiedLocalConversations } from '../src/swarm/fleet.mjs';
 import { createOwnedRelay } from '../src/swarm/relay.mjs';
 import { buildSpecs } from '../upstream/swarm-teams/template/flows.mjs';
@@ -52,22 +53,57 @@ test('Fly account lease selects one verified personal config and drops inherited
   mkdirSync(flyConfigDir);
   writeFileSync(flyctlPath, 'fixture executable');
   writeFileSync(path.join(flyConfigDir, 'config.yml'), 'fixture personal config');
-  const providers = { async flyFleetLease() { return { flyctlPath, flyConfigDir,
+  const providers = { async flyFleetLease() { return { available: true, flyctlPath, flyConfigDir, orgSlug: 'personal-test',
     token: 'provider-internal-token-must-not-cross-the-lease' }; } };
   const lease = await flyAccountLease(providers);
-  assert.deepEqual(lease, { flyctlPath, flyConfigDir });
+  assert.deepEqual(lease, { flyctlPath, flyConfigDir, orgSlug: 'personal-test' });
   const env = isolatedFlyEnvironment(lease, { PATH: 'fixture-path', FLY_API_TOKEN: 'inherited-service-token',
     FLY_ACCESS_TOKEN: 'inherited-access-token', FLY_CONFIG_DIR: 'foreign-config',
     FLYCTL_PATH: 'foreign-helper', FLUJO_CLOUD_HOME: 'foreign-cloud-records',
     FLUJO_SNAPSHOT_CONTROL_TOKEN: 'foreign-source-token', FLUJO_LOCAL_INSTANCE_DIR: 'fixture-local-instances' });
   assert.deepEqual(env, { PATH: 'fixture-path', FLUJO_LOCAL_INSTANCE_DIR: 'fixture-local-instances',
     FLY_CONFIG_DIR: flyConfigDir, FLYCTL_PATH: flyctlPath });
-  assert.equal(await flyAccountLease({ async flyFleetLease() { return { flyctlPath,
+  assert.equal(await flyAccountLease({ async flyFleetLease() { return { available: true, flyctlPath, orgSlug: 'personal-test',
     flyConfigDir: path.join(root, 'missing') }; } }), null);
   const dataDir = mkdtempSync(path.join(tmpdir(), 'seagulled-fly-no-account-'));
   assert.deepEqual(await runFleetLeaf({ goal: { id: 'no-account', providerId: 'openai' }, dataDir }),
-    { available: false, detail: 'A verified personal Fly sign-in and the bundled Fly helper are required for isolated Workers.' });
+    { available: false, detail: 'A verified personal Fly sign-in, an unused personal organization, and the bundled Fly helper are required for isolated Workers.' });
   assert.equal(existsSync(path.join(dataDir, 'fleet')), false);
+});
+
+test('a stale legacy Fly organization is ignored for the verified product lease', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-org-boundary-'));
+  const flyConfigDir = path.join(root, 'fly-auth');
+  mkdirSync(flyConfigDir);
+  writeFileSync(path.join(flyConfigDir, 'config.yml'), 'fixture');
+  const flyctlPath = path.join(root, 'flyctl');
+  writeFileSync(flyctlPath, 'fixture');
+  const flyAccount = { flyctlPath, flyConfigDir, orgSlug: 'personal-test' };
+  const legacy = { provisioner: { kind: 'fly', org: 'production-org', region: 'iad' } };
+  const bound = bindVerifiedFlyOrganization(legacy, flyAccount);
+  assert.equal(bound.provisioner.org, 'personal-test');
+  assert.equal(bound.provisioner.region, 'iad');
+  assert.equal(legacy.provisioner.org, 'production-org');
+  assert.throws(() => bindVerifiedFlyOrganization(legacy, { ...flyAccount, orgSlug: undefined }),
+    /verified personal Fly sign-in/);
+  const profile = path.join(root, 'legacy-profile.json');
+  writeFileSync(profile, JSON.stringify({ supervisor: { origin: 'http://127.0.0.1:1' },
+    provisioner: { kind: 'fly', flujoCloudPath: root, org: 'production-org' } }));
+  const previous = process.env.SEAGULLED_FLEET_PROFILE;
+  process.env.SEAGULLED_FLEET_PROFILE = profile;
+  const fleetRoute = { available: true, providerId: 'openai', model: {
+    name: 'fixture', baseUrl: 'https://api.openai.com/v1', apiKey: 'fixture',
+    provider: 'openai', adapter: 'openai-responses' } };
+  try {
+    const result = await runFleetLeaf({ goal: { id: 'org-boundary', providerId: 'openai' },
+      dataDir: root, fleetRoute, flyAccount });
+    assert.equal(result.available, false);
+    assert.match(result.detail, /local FLUJO source is unavailable/);
+    assert.equal(existsSync(path.join(root, 'fleet')), false);
+  } finally {
+    if (previous === undefined) delete process.env.SEAGULLED_FLEET_PROFILE;
+    else process.env.SEAGULLED_FLEET_PROFILE = previous;
+  }
 });
 
 test('Fly provisioner gives ManagedCloud only the selected account and owned record directory', async () => {
@@ -145,10 +181,12 @@ test('local conversation receipt accepts only the exact observed child tree', ()
 test('fleet deadline blocks a late Worker before any model submission', async () => {
   const registryPath = path.join(mkdtempSync(path.join(tmpdir(), 'seagulled-deadline-')), 'registry.json');
   let modelCalls = 0;
+  let releaseProvisioning;
+  const provisioningGate = new Promise((resolve) => { releaseProvisioning = resolve; });
   const controller = new Controller({ registryPath, operatorToken: 'fixture-operator-token-more-than-32-characters',
-    publicUrl: 'http://127.0.0.1:1', deadlineAt: Date.now() + 100,
+    publicUrl: 'http://127.0.0.1:1', deadlineAt: Number.MAX_SAFE_INTEGER,
     provisioner: { async provision(worker) {
-      await new Promise((resolve) => setTimeout(resolve, 150));
+      await provisioningGate;
       return { kind: 'fixture', workerId: worker.id };
     }, async connect() { return { client: { async runFlow() { modelCalls++; return { status: 'completed', output: 'late' }; } },
       close: async () => undefined }; } } });
@@ -157,11 +195,13 @@ test('fleet deadline blocks a late Worker before any model submission', async ()
     const root = controller.registry.reserve({ goalId: goal.id, role: 'supervisor' }).worker;
     controller.registry.enroll(root.id, { kind: 'external', origin: 'http://127.0.0.1:1', workspace: 'fixture' });
     const run = controller.delegate(root, { name: 'late-worker', task: 'Fixture' });
+    controller.deadlineAt = Date.now() - 1;
+    releaseProvisioning();
     await controller.settled.get(run.runId);
     assert.equal(controller.registry.run(run.runId).state, 'failed');
     assert.equal(modelCalls, 0);
     assert.throws(() => controller.delegate(root, { name: 'too-late', task: 'Fixture' }), /deadline has passed/);
-  } finally { await controller.close(); }
+  } finally { releaseProvisioning(); await controller.close(); }
 });
 
 test('FLUJO HTTP deadline is absolute even while a server keeps sending bytes', async () => {
