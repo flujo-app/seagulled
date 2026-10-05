@@ -18,7 +18,7 @@ function conversations(options, previous) {
   if (options.agentsPerWorker !== undefined) return capacity(options.agentsPerWorker, 4, 10) + 1;
   return previous?.conversationsPerWorker ?? (previous?.agentsPerWorker === undefined ? 5 : previous.agentsPerWorker + 1);
 }
-export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, voice, budgets } = {}) {
+export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, voice, budgets, fleetSource } = {}) {
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const statePath = path.join(dataDir, 'state.json');
   const lockPath = path.join(dataDir, 'runtime.lock');
@@ -148,7 +148,7 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
     }
     events.emit('event', copy(event)); publish();
   }
-  const coordinator = swarm || new SwarmCoordinator({ providers: manager, onEvent, dataDir: path.join(dataDir, 'swarm'), fleet: process.env.SEAGULLED_DISABLE_FLEET === '1' ? undefined : 'auto' });
+  const coordinator = swarm || new SwarmCoordinator({ providers: manager, onEvent, dataDir: path.join(dataDir, 'swarm'), sourceBinding: fleetSource, fleet: process.env.SEAGULLED_DISABLE_FLEET === '1' ? undefined : 'auto' });
   // Test/integration injection supports the same event sink without a mock-only runtime branch.
   if (swarm?.setEventHandler) swarm.setEventHandler(onEvent);
   const privateLifecycle = () => typeof manager.privateComputeEnable === 'function'

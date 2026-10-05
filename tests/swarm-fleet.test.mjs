@@ -61,8 +61,9 @@ test('Fly account lease selects one verified personal config and drops inherited
     FLY_ACCESS_TOKEN: 'inherited-access-token', FLY_CONFIG_DIR: 'foreign-config',
     FLYCTL_PATH: 'foreign-helper', FLUJO_CLOUD_HOME: 'foreign-cloud-records',
     FLUJO_SNAPSHOT_CONTROL_TOKEN: 'foreign-source-token', FLUJO_LOCAL_INSTANCE_DIR: 'fixture-local-instances' });
-  assert.deepEqual(env, { PATH: 'fixture-path', FLUJO_LOCAL_INSTANCE_DIR: 'fixture-local-instances',
-    FLY_CONFIG_DIR: flyConfigDir, FLYCTL_PATH: flyctlPath });
+  assert.deepEqual(env, { PATH: 'fixture-path', FLY_CONFIG_DIR: flyConfigDir, FLYCTL_PATH: flyctlPath });
+  assert.equal(isolatedFlyEnvironment(lease, { FLUJO_LOCAL_INSTANCE_DIR: 'foreign' }, flyConfigDir)
+    .FLUJO_LOCAL_INSTANCE_DIR, flyConfigDir, 'only the explicit product source directory crosses to the SDK');
   assert.equal(await flyAccountLease({ async flyFleetLease() { return { available: true, flyctlPath, orgSlug: 'personal-test',
     flyConfigDir: path.join(root, 'missing') }; } }), null);
   const dataDir = mkdtempSync(path.join(tmpdir(), 'seagulled-fly-no-account-'));
@@ -71,7 +72,7 @@ test('Fly account lease selects one verified personal config and drops inherited
   assert.equal(existsSync(path.join(dataDir, 'fleet')), false);
 });
 
-test('a stale legacy Fly organization is ignored for the verified product lease', async () => {
+test('a legacy profile cannot supply the product source or redirect its verified Fly organization', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'seagulled-org-boundary-'));
   const flyConfigDir = path.join(root, 'fly-auth');
   mkdirSync(flyConfigDir);
@@ -98,11 +99,122 @@ test('a stale legacy Fly organization is ignored for the verified product lease'
     const result = await runFleetLeaf({ goal: { id: 'org-boundary', providerId: 'openai' },
       dataDir: root, fleetRoute, flyAccount });
     assert.equal(result.available, false);
-    assert.match(result.detail, /local FLUJO source is unavailable/);
+    assert.match(result.detail, /product-owned FLUJO source/);
     assert.equal(existsSync(path.join(root, 'fleet')), false);
   } finally {
     if (previous === undefined) delete process.env.SEAGULLED_FLEET_PROFILE;
     else process.env.SEAGULLED_FLEET_PROFILE = previous;
+  }
+});
+
+test('product fleet requires one bound private source and checks the SDK proof before any workspace call', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-bound-source-'));
+  const dataDir = path.join(root, 'swarm');
+  const sourceInstanceDir = path.join(root, 'instances');
+  const sourceDataRoot = path.join(root, 'flujo-data');
+  const sourceAppRoot = path.join(root, 'flujo-package');
+  const cloudSdkRoot = path.join(root, 'cloud-sdk');
+  const flyConfigDir = path.join(root, 'fly-auth');
+  for (const directory of [dataDir, sourceInstanceDir, sourceDataRoot, sourceAppRoot,
+    path.join(root, 'wrong-data'), path.join(root, 'wrong-app'),
+    path.join(cloudSdkRoot, 'lib'), flyConfigDir]) mkdirSync(directory, { recursive: true });
+  const snapshottedInstances = path.join(sourceDataRoot, 'workspaces', 'instances');
+  mkdirSync(snapshottedInstances, { recursive: true });
+  writeFileSync(path.join(cloudSdkRoot, 'lib', 'managed.mjs'), `export class ManagedCloud {
+    constructor(options) { globalThis.__seagulledSourceFixture.options = options; this.fetch = options.fetchImpl; }
+    async source(input) { globalThis.__seagulledSourceFixture.input = input;
+      if (globalThis.__seagulledSourceFixture.sourceImpl) return globalThis.__seagulledSourceFixture.sourceImpl(this);
+      return globalThis.__seagulledSourceFixture.proof; }
+  }`);
+  const flyctlPath = path.join(root, 'flyctl');
+  writeFileSync(flyctlPath, 'fixture');
+  writeFileSync(path.join(flyConfigDir, 'config.yml'), 'fixture');
+  const flyAccount = { flyctlPath, flyConfigDir, orgSlug: 'personal-test' };
+  const requests = [];
+  const server = http.createServer((request, response) => {
+    requests.push(new URL(request.url, 'http://local').pathname);
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ workspaces: [] }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const sourceOrigin = `http://127.0.0.1:${server.address().port}`;
+  const sourceBinding = { cloudSdkRoot, sourceOrigin, sourceInstanceDir, sourceDataRoot, sourceAppRoot };
+  const fleetRoute = { available: true, providerId: 'openai', model: {
+    name: 'fixture-model', baseUrl: 'https://api.openai.com/v1', apiKey: 'fixture-key',
+    provider: 'openai', adapter: 'openai-responses' } };
+  const previousProfile = process.env.SEAGULLED_FLEET_PROFILE;
+  const previousInstances = process.env.FLUJO_LOCAL_INSTANCE_DIR;
+  const previousFetch = globalThis.fetch;
+  process.env.SEAGULLED_FLEET_PROFILE = path.join(root, 'missing-legacy-profile.json');
+  process.env.FLUJO_LOCAL_INSTANCE_DIR = path.join(root, 'foreign-host-instances');
+  let modelFetches = 0;
+  globalThis.fetch = async () => { modelFetches++;
+    return new Response(JSON.stringify({ data: [{ id: 'fixture-model' }] }), { status: 200 }); };
+  globalThis.__seagulledSourceFixture = { proof: { source: sourceOrigin, dataRoot: sourceDataRoot,
+    appRoot: sourceAppRoot } };
+  try {
+    const status = (binding) => fleetStatus({ dataDir, providerId: 'openai', fleetRoute,
+      flyAccount, sourceBinding: binding });
+    assert.match((await status(undefined)).detail, /product-owned FLUJO source/);
+    assert.match((await status({ ...sourceBinding, sourceInstanceDir: path.join(root, '..', 'host-instances') })).detail,
+      /product-owned FLUJO source/);
+    assert.match((await status({ ...sourceBinding, sourceInstanceDir: snapshottedInstances })).detail,
+      /product-owned FLUJO source/);
+    assert.deepEqual(requests, []);
+    assert.equal(modelFetches, 0);
+    globalThis.__seagulledSourceFixture.proof = { source: sourceOrigin,
+      dataRoot: path.join(root, 'wrong-data'), appRoot: sourceAppRoot };
+    assert.match((await status(sourceBinding)).detail, /identity did not match/);
+    const rejected = await runFleetLeaf({ goal: { id: 'proof-mismatch', providerId: 'openai' },
+      task: 'fixture', dataDir, maxUsd: 2, fleetRoute, flyAccount, sourceBinding });
+    assert.equal(rejected.available, false);
+    assert.match(rejected.detail, /identity did not match/);
+    for (const proof of [
+      { source: 'http://127.0.0.1:1', dataRoot: sourceDataRoot, appRoot: sourceAppRoot },
+      { source: sourceOrigin, dataRoot: sourceDataRoot, appRoot: path.join(root, 'wrong-app') },
+    ]) {
+      globalThis.__seagulledSourceFixture.proof = proof;
+      assert.match((await status(sourceBinding)).detail, /identity did not match/);
+    }
+    assert.deepEqual(requests, [], 'a mismatched proof cannot reach the workspace API');
+    globalThis.__seagulledSourceFixture.proof = { source: sourceOrigin, dataRoot: sourceDataRoot,
+      appRoot: sourceAppRoot };
+    const ready = await status(sourceBinding);
+    assert.equal(ready.available, true);
+    assert.equal('config' in ready, false);
+    assert.equal(JSON.stringify(ready).includes(root), false, 'private paths remain backend-only');
+    assert.deepEqual(globalThis.__seagulledSourceFixture.input, { source: sourceOrigin });
+    assert.equal(globalThis.__seagulledSourceFixture.options.env.FLUJO_LOCAL_INSTANCE_DIR, sourceInstanceDir);
+    assert.deepEqual(requests, ['/api/workspaces']);
+    assert.equal(modelFetches, 1);
+    assert.equal(existsSync(path.join(dataDir, 'fleet')), false, 'discovery does not create an intent');
+    const cancellation = new AbortController();
+    let discoveryStarted;
+    const started = new Promise((resolve) => { discoveryStarted = resolve; });
+    globalThis.fetch = (_, options) => new Promise((resolve, reject) => {
+      discoveryStarted();
+      options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+    });
+    globalThis.__seagulledSourceFixture.sourceImpl = (managed) => managed.fetch(sourceOrigin, {
+      signal: AbortSignal.timeout(10_000) });
+    const cancelled = runFleetLeaf({ goal: { id: 'cancel-discovery', providerId: 'openai' },
+      task: 'fixture', dataDir, maxUsd: 2, fleetRoute, flyAccount, sourceBinding,
+      signal: cancellation.signal });
+    await started;
+    const stoppedAt = Date.now();
+    cancellation.abort();
+    await assert.rejects(cancelled, { name: 'AbortError' });
+    assert.ok(Date.now() - stoppedAt < 2000, 'Stop does not wait for the SDK proof timeout');
+    assert.equal(existsSync(path.join(dataDir, 'fleet')), false, 'Stop before source proof creates no intent');
+  } finally {
+    if (previousProfile === undefined) delete process.env.SEAGULLED_FLEET_PROFILE;
+    else process.env.SEAGULLED_FLEET_PROFILE = previousProfile;
+    if (previousInstances === undefined) delete process.env.FLUJO_LOCAL_INSTANCE_DIR;
+    else process.env.FLUJO_LOCAL_INSTANCE_DIR = previousInstances;
+    globalThis.fetch = previousFetch;
+    delete globalThis.__seagulledSourceFixture;
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
   }
 });
 
@@ -236,7 +348,7 @@ test('private H100 Fly route accepts only the verified owned endpoint identity b
       fleetRoute: { ...valid, verification: 'previously-verified' }, goalId: 'owned-goal' });
     assert.match(catalogOnly.detail, /no usable Fly model binding/);
     const accepted = await fleetStatus({ dataDir, providerId: 'private-h100', fleetRoute: valid, goalId: 'owned-goal' });
-    assert.match(accepted.detail, /profile was found/, 'binding passes to tooling discovery without fetching a model');
+    assert.match(accepted.detail, /product-owned FLUJO source/, 'binding passes to owned source discovery without fetching a model');
     assert.equal((await fleetStatus({ dataDir, providerId: 'private-h100', fleetRoute: valid,
       goalId: 'different-goal' })).available, false, 'another goal cannot borrow the route');
     for (const route of [

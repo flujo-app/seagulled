@@ -39,13 +39,16 @@ const usageOf = (value) => {
 
 /** Durable, bounded provider team. The registry is stored in the caller's private dataDir. */
 export class SwarmCoordinator {
-  constructor({ providers, onEvent = () => undefined, dataDir, fleet = 'off', fleetRunner = runFleetLeaf } = {}) {
+  constructor({ providers, onEvent = () => undefined, dataDir, fleet = 'off', fleetRunner = runFleetLeaf,
+    sourceBinding } = {}) {
     if (!providers || typeof providers.run !== 'function') throw new Error('SwarmCoordinator needs a ProviderManager.');
     this.providers = providers;
     this.onEvent = onEvent;
     this.dataDir = dataDir ?? path.join(homedir(), '.seagulled');
     this.fleet = fleet;
     this.fleetRunner = fleetRunner;
+    this.sourceBinding = sourceBinding && typeof sourceBinding === 'object'
+      ? Object.freeze({ ...sourceBinding }) : null;
     this.registry = new Registry(path.join(this.dataDir, 'swarm', 'registry.json'));
     this.active = new Set();
   }
@@ -56,7 +59,8 @@ export class SwarmCoordinator {
       ? await this.providers.fleetRoute(providerId) : { available: false };
     const flyAccount = fleetRoute.available === true ? await flyAccountLease(this.providers) : null;
     if (fleetRoute.available === true && !flyAccount) return { available: false, detail: flyUnavailable };
-    return fleetStatus({ dataDir: this.dataDir, providerId, fleetRoute, flyAccount });
+    return fleetStatus({ dataDir: this.dataDir, providerId, fleetRoute, flyAccount,
+      sourceBinding: this.sourceBinding });
   }
 
   tasks(goalId) {
@@ -165,6 +169,7 @@ export class SwarmCoordinator {
             const remote = await this.fleetRunner({ goal: remoteGoal, task: `ASSIGNMENT:\n${task}\n\nWork in your isolated sandbox. Report what was actually run and checked, plus paths and limits.`,
               dataDir: this.dataDir, signal, maxUsd: remaining, fleetRoute: route,
               flyAccount: await flyAccountLease(this.providers, signal),
+              sourceBinding: this.sourceBinding,
               reservationId: `${run.id}-fly`,
               reserveCloud: (reservation) => this.emit({ type: 'reservation', goalId: goal.id, reservation }),
               onStatus: (text) => this.emit({ type: 'task', goalId: goal.id,

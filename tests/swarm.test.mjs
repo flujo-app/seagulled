@@ -169,11 +169,13 @@ test('one isolated Fly developer receipt holds further paid review while cloud a
   const fleetCalls = [];
   const events = [];
   const dataDir = directory();
+  const sourceBinding = { cloudSdkRoot: '/fixture/sdk', sourceOrigin: 'http://127.0.0.1:1',
+    sourceInstanceDir: '/fixture/instances', sourceDataRoot: '/fixture/data', sourceAppRoot: '/fixture/app' };
   const privateKey = 'fictional-private-key-never-saved';
   providers.fleetRoute = (providerId) => ({ available: true, providerId,
     model: { name: 'fixture-model', baseUrl: 'http://127.0.0.1:1/v1', apiKey: privateKey,
       provider: 'openai', adapter: 'openai-responses' }, verification: 'unverified', costPolicy: 'pending' });
-  const swarm = new SwarmCoordinator({ providers, dataDir, fleet: 'auto',
+  const swarm = new SwarmCoordinator({ providers, dataDir, fleet: 'auto', sourceBinding,
     fleetRunner: async (input) => {
       fleetCalls.push(input);
       return { available: true, text: 'Fly worker ran Node 22 and reported its output.',
@@ -184,10 +186,12 @@ test('one isolated Fly developer receipt holds further paid review while cloud a
   await assert.rejects(swarm.execute({ goal: goal({ maxWorkers: 6, conversationsPerWorker: 5 }) }), /spend is unknown/);
   assert.equal(fleetCalls.length, 1);
   assert.equal(fleetCalls[0].fleetRoute.providerId, 'fictional');
+  assert.deepEqual(fleetCalls[0].sourceBinding, sourceBinding);
   assert.equal(fleetCalls[0].goal.maxWorkers, 6);
   assert.equal(fleetCalls[0].goal.conversationsPerWorker, 5);
   assert.equal(fleetCalls[0].goal.agentsPerWorker, 4);
   assert.equal(readFileSync(path.join(dataDir, 'swarm', 'registry.json'), 'utf8').includes(privateKey), false);
+  assert.equal(readFileSync(path.join(dataDir, 'swarm', 'registry.json'), 'utf8').includes(sourceBinding.cloudSdkRoot), false);
   assert.equal(swarm.tasks('goal-one')[1].sandbox.kind, 'fly');
   assert.equal(swarm.tasks('goal-one')[1].artifacts[0].kind, 'run-result');
   assert.equal(events.find((event) => event.type === 'usage' && event.usage.billingPending)?.usage.reservedUsd, 4.8);

@@ -2,7 +2,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { homedir } from 'node:os';
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { Controller } from '../../upstream/swarm-teams/fleet/controller.mjs';
 import { flyProvisioner } from '../../upstream/swarm-teams/fleet/provisioners.mjs';
 import { FlujoClient } from '../../upstream/swarm-teams/lib/flujo-client.mjs';
@@ -40,24 +40,59 @@ export async function flyAccountLease(providers, signal) {
     ? { flyctlPath: lease.flyctlPath, flyConfigDir: lease.flyConfigDir, orgSlug: lease.orgSlug } : null;
 }
 /** The cloud SDK and all Fly CLI children receive only this selected personal account. */
-export function isolatedFlyEnvironment(account, sourceEnv = process.env) {
+export function isolatedFlyEnvironment(account, sourceEnv = process.env, sourceInstanceDir) {
   if (!validFlyAccount(account)) {
     throw new Error(flyUnavailable);
   }
   const env = {};
   for (const key of ['PATH', 'Path', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'HOME', 'USERPROFILE',
-    'APPDATA', 'LOCALAPPDATA', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'NODE_EXTRA_CA_CERTS',
-    'FLUJO_LOCAL_INSTANCE_DIR']) {
+    'APPDATA', 'LOCALAPPDATA', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'NODE_EXTRA_CA_CERTS']) {
     if (typeof sourceEnv[key] === 'string') env[key] = sourceEnv[key];
   }
   env.FLY_CONFIG_DIR = account.flyConfigDir;
   env.FLYCTL_PATH = account.flyctlPath;
+  if (sourceInstanceDir !== undefined) {
+    if (typeof sourceInstanceDir !== 'string' || !path.isAbsolute(sourceInstanceDir)) {
+      throw new Error('A product-private FLUJO instance directory is required.');
+    }
+    env.FLUJO_LOCAL_INSTANCE_DIR = sourceInstanceDir;
+  }
   return env;
 }
 /** A product goal always bills the provider-verified personal org, never a legacy profile slug. */
 export function bindVerifiedFlyOrganization(config, account) {
   if (!validFlyAccount(account)) throw new Error(flyUnavailable);
   return { ...config, provisioner: { ...config.provisioner, org: account.orgSlug } };
+}
+const productSourceUnavailable = 'A packaged, product-owned FLUJO source and cloud SDK are not ready for isolated Workers.';
+const inside = (root, candidate) => {
+  const relative = path.relative(root, candidate);
+  return Boolean(relative && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+};
+function verifiedSourceBinding(binding, dataDir) {
+  if (!binding || typeof dataDir !== 'string' || !path.isAbsolute(dataDir)) return null;
+  try {
+    const origin = new URL(binding.sourceOrigin);
+    if (origin.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(origin.hostname)
+      || binding.sourceOrigin !== origin.origin) return null;
+    for (const key of ['cloudSdkRoot', 'sourceInstanceDir', 'sourceDataRoot', 'sourceAppRoot']) {
+      if (typeof binding[key] !== 'string' || !path.isAbsolute(binding[key])) return null;
+    }
+    const productRoot = realpathSync(path.dirname(path.resolve(dataDir)));
+    const sourceInstanceDir = realpathSync(binding.sourceInstanceDir);
+    const sourceDataRoot = realpathSync(binding.sourceDataRoot);
+    const sourceAppRoot = realpathSync(binding.sourceAppRoot);
+    const cloudSdkRoot = realpathSync(binding.cloudSdkRoot);
+    const workspaceRoot = path.join(sourceDataRoot, 'workspaces');
+    if (!inside(productRoot, sourceInstanceDir) || !inside(productRoot, sourceDataRoot)
+      || sourceInstanceDir === workspaceRoot || inside(workspaceRoot, sourceInstanceDir)
+      || sourceAppRoot === sourceDataRoot || inside(sourceDataRoot, sourceAppRoot)
+      || cloudSdkRoot === sourceDataRoot || inside(sourceDataRoot, cloudSdkRoot)
+      || !statSync(sourceInstanceDir).isDirectory() || !statSync(sourceDataRoot).isDirectory()
+      || !statSync(sourceAppRoot).isDirectory() || !statSync(cloudSdkRoot).isDirectory()
+      || !regularFile(path.join(cloudSdkRoot, 'lib', 'managed.mjs'))) return null;
+    return { cloudSdkRoot, sourceOrigin: origin.origin, sourceInstanceDir, sourceDataRoot, sourceAppRoot };
+  } catch { return null; }
 }
 const boundedCount = (value, fallback, maximum, name) => {
   if (value === undefined) return fallback;
@@ -292,7 +327,7 @@ const exactProductBinding = (providerId, model, route) => {
 
 /** Read-only discovery. Product calls require the selected provider's private route. */
 async function inspectFleet({ dataDir, providerId, fleetRoute, goalId, diagnostic = false,
-  flyAccount, signal, deadlineAt } = {}) {
+  flyAccount, sourceBinding, signal, deadlineAt } = {}) {
   assertAdmission(signal, deadlineAt);
   if (!diagnostic && (fleetRoute?.available !== true || fleetRoute.providerId !== providerId
     || typeof providerId !== 'string' || !providerId)) {
@@ -309,24 +344,46 @@ async function inspectFleet({ dataDir, providerId, fleetRoute, goalId, diagnosti
   if (!diagnostic && (modelHold(dataDir, fleetRoute.model) || knownQuotaHold(dataDir, fleetRoute.model))) {
     return { available: false, detail: 'The selected provider account has a saved no-credits hold. Local provider work remains available.' };
   }
-  const location = profilePath();
-  if (!existsSync(location)) return { available: false, detail: 'No local FLUJO fleet profile was found.' };
+  const binding = diagnostic ? null : verifiedSourceBinding(sourceBinding, dataDir);
+  if (!diagnostic && !binding) return { available: false, detail: productSourceUnavailable };
+  if (!diagnostic && !validFlyAccount(flyAccount)) return { available: false, detail: flyUnavailable };
   let config;
-  try { config = JSON.parse(readFileSync(location, 'utf8')); }
-  catch { return { available: false, detail: 'The local FLUJO fleet profile could not be read.' }; }
-  if (typeof config.model === 'string' && typeof config.baseUrl === 'string' && typeof config.token === 'string') {
-    // A private direct model profile may replace only the model, in memory.
-    // Its owner retains the endpoint; the old fleet profile supplies local tooling metadata only.
+  if (diagnostic) {
+    const location = profilePath();
+    if (!existsSync(location)) return { available: false, detail: 'No local FLUJO fleet profile was found.' };
+    try { config = JSON.parse(readFileSync(location, 'utf8')); }
+    catch { return { available: false, detail: 'The local FLUJO fleet profile could not be read.' }; }
+    if (typeof config.model === 'string' && typeof config.baseUrl === 'string' && typeof config.token === 'string') {
+      try {
+        const tooling = JSON.parse(readFileSync(legacyProfilePath(), 'utf8'));
+        config = { ...tooling, model: { name: config.model, baseUrl: config.baseUrl,
+          apiKey: config.token, contextWindow: config.contextLimit ?? config.maxModelLen } };
+      } catch { return { available: false, detail: 'The local Fly tooling profile could not be read.' }; }
+    }
+  } else {
+    config = bindVerifiedFlyOrganization({ model: fleetRoute.model,
+      sourceInstanceDir: binding.sourceInstanceDir,
+      supervisor: { origin: binding.sourceOrigin },
+      provisioner: { kind: 'fly', flujoCloudPath: binding.cloudSdkRoot, source: binding.sourceOrigin } }, flyAccount);
     try {
-      const tooling = JSON.parse(readFileSync(legacyProfilePath(), 'utf8'));
-      config = { ...tooling, model: { name: config.model, baseUrl: config.baseUrl,
-        apiKey: config.token, contextWindow: config.contextLimit ?? config.maxModelLen } };
-    } catch { return { available: false, detail: 'The local Fly tooling profile could not be read.' }; }
-  }
-  if (!diagnostic) config = { ...config, model: fleetRoute.model };
-  if (!diagnostic && flyAccount) {
-    if (!validFlyAccount(flyAccount)) return { available: false, detail: flyUnavailable };
-    config = bindVerifiedFlyOrganization(config, flyAccount);
+      const { ManagedCloud } = await import(pathToFileURL(path.join(binding.cloudSdkRoot, 'lib', 'managed.mjs')).href);
+      const env = isolatedFlyEnvironment(flyAccount, process.env, binding.sourceInstanceDir);
+      const discoveryFetch = (url, options = {}) => fetch(url, { ...options,
+        signal: AbortSignal.any([options.signal, signal,
+          deadlineAt === undefined ? undefined : AbortSignal.timeout(Math.max(1, deadlineAt - Date.now()))]
+          .filter(Boolean)) });
+      const managed = new ManagedCloud({ env, directory: path.join(dataDir, 'fleet', 'source-proof'),
+        fetchImpl: discoveryFetch });
+      const source = await managed.source({ source: binding.sourceOrigin });
+      assertAdmission(signal, deadlineAt);
+      if (source.source !== binding.sourceOrigin || realpathSync(source.dataRoot) !== binding.sourceDataRoot
+        || realpathSync(source.appRoot) !== binding.sourceAppRoot) {
+        return { available: false, detail: 'The product FLUJO source identity did not match its owned binding.' };
+      }
+    } catch {
+      assertAdmission(signal, deadlineAt);
+      return { available: false, detail: 'The product FLUJO source could not be verified.' };
+    }
   }
   if (config?.provisioner?.kind !== 'fly' || !config.provisioner.flujoCloudPath
     || !existsSync(config.provisioner.flujoCloudPath) || !config.model?.name
@@ -381,8 +438,8 @@ async function inspectFleet({ dataDir, providerId, fleetRoute, goalId, diagnosti
   return { available: false, detail: `The configured FLUJO model endpoint is unavailable (${original.detail}); no working API fallback was found.` };
 }
 
-export async function fleetStatus({ dataDir, providerId, fleetRoute, goalId, flyAccount } = {}) {
-  const { config, ...publicState } = await inspectFleet({ dataDir, providerId, fleetRoute, goalId, flyAccount });
+export async function fleetStatus({ dataDir, providerId, fleetRoute, goalId, flyAccount, sourceBinding } = {}) {
+  const { config, ...publicState } = await inspectFleet({ dataDir, providerId, fleetRoute, goalId, flyAccount, sourceBinding });
   return publicState;
 }
 
@@ -394,14 +451,14 @@ export async function fleetDiagnosticStatus({ dataDir } = {}) {
 
 /** One owned Fly leaf, with no existing fleet writer or Machine adoption. */
 export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetRoute,
-  diagnostic = false, reservationId, reserveCloud, flyAccount, onStatus = () => undefined }) {
+  diagnostic = false, reservationId, reserveCloud, flyAccount, sourceBinding, onStatus = () => undefined }) {
   if (!goal || typeof goal.id !== 'string' || !/^[\w-]{1,100}$/.test(goal.id)) throw new Error('A safe goal id is required for isolated fleet work.');
   goalCapacity(goal);
   const fleetDeadlineAt = Date.now() + 30 * 60_000;
   assertAdmission(signal, fleetDeadlineAt);
   if (!diagnostic && !validFlyAccount(flyAccount)) return { available: false, detail: flyUnavailable };
   const discovered = await inspectFleet({ dataDir, providerId: goal.providerId, fleetRoute, goalId: goal.id,
-    diagnostic, flyAccount, signal, deadlineAt: fleetDeadlineAt });
+    diagnostic, flyAccount, sourceBinding, signal, deadlineAt: fleetDeadlineAt });
   assertAdmission(signal, fleetDeadlineAt);
   if (!discovered.available) return { available: false, detail: discovered.detail };
   const config = discovered.config;
@@ -470,7 +527,8 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     if (!validFlyAccount(flyAccount)) {
       throw Object.assign(new Error(flyUnavailable), { outcome: 'not_applied' });
     }
-    const flyEnv = isolatedFlyEnvironment(flyAccount);
+    const flyEnv = isolatedFlyEnvironment(flyAccount, process.env,
+      diagnostic ? undefined : config.sourceInstanceDir);
     mkdirSync(cloudDirectory, { recursive: true, mode: 0o700 });
     const { ManagedCloud } = await import(pathToFileURL(path.join(config.provisioner.flujoCloudPath, 'lib', 'managed.mjs')).href);
     cloudManaged = new ManagedCloud({ env: flyEnv, directory: cloudDirectory });
