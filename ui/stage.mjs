@@ -17,4 +17,3 @@ export function sceneFor({mode='ready',goal=null,workingMs=0,completedRecently=f
   }
   return 'idle';
 }
-

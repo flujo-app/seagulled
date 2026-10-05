@@ -14,4 +14,3 @@ test('movie moods follow interaction and real task state',()=>{
   assert.equal(sceneFor({goal:{status:'paused',tasks:[{status:'running'}]},workingMs:15000}),'idle');
   assert.equal(sceneFor({goal:{status:'completed'}}),'critique');
 });
-
