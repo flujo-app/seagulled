@@ -1,8 +1,8 @@
 # RC acceptance
 
-Seagulled 0.1.0-rc.2 is a Windows Electron app and a Node CLI with a shared durable conversation, goals, controls, provider setup and bounded team coordinator. The full live company across Fly workers is still unqualified.
+Seagulled 0.1.0-rc.3 is a Windows Electron app and a Node CLI with a shared durable conversation, goals, controls, provider setup and bounded team coordinator. The full live company across Fly workers is still unqualified.
 
-The frozen candidate passed 78 automated checks. Packaged Electron startup, renderer isolation, provider discovery, shared CLI access and shutdown passed; the CLI archive runs independently. Package auditing found no private-state entries, and npm audit reported zero vulnerabilities. These checks do not replace live cloud qualification.
+The candidate is checked with 79 automated cases. Packaged Electron startup, renderer isolation, provider discovery, shared CLI access and shutdown are separate release gates; the CLI archive runs independently. Package auditing excludes private-state entries. These checks do not replace live cloud qualification.
 
 ## Qualified paths
 
@@ -12,6 +12,7 @@ The frozen candidate passed 78 automated checks. Packaged Electron startup, rend
 - Durable source checks cover single authority, damaged state preservation, graceful pause boundaries, exact resume stages, unknown holds, one-time usage, allowance holds, UTF-8 requests, API authentication and artifact integrity.
 - Recovered swarm checks cover worker/depth caps, provisioning, relay transport, original run identities and uncertain cleanup. Product fixtures also exercise child-before-parent artifact capture, incomplete-capture retirement holds, and exact owned relay journals. Live Fly diagnostics are excluded from ordinary test discovery and require explicit opt-in.
 - Artifact capture executes trusted collection code against a designated output tree, validates file names, bounds, links, bytes and SHA-256, then saves private receipts atomically. Tests use actual local files and Node execution; successful capture from a live Fly worker remains unqualified.
+- The collector supports Fly CLI's omitted zero exit code, while explicit failure or malformed codes cannot commit artifacts. The official [Fly response type](https://github.com/superfly/fly-go/blob/main/machine_types.go) omits the zero value when serialized. This fixes a receipt compatibility defect; it does not establish the cause of the earlier live model failure.
 
 ## Cloud and provider scope
 

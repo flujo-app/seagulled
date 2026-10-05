@@ -130,7 +130,15 @@ export async function collectFlyArtifacts({target,goalId,workerId,dataDir,flujoC
     const raw=await bridge.fly.run(['machine','exec',target.machineId,collectorCommand(target.workspace),'--app',target.app,'--json'],{timeoutMs:30_000});
     if(raw.length>8*1024*1024) throw Error('Owned output response is too large.');
     let execution,payload;
-    try { execution=JSON.parse(raw); if(execution.exit_code!==0 || typeof execution.stdout!=='string') throw Error(); payload=JSON.parse(execution.stdout); }
+    try {
+      execution=JSON.parse(raw);
+      // fly-go MachineExecResponse uses omitempty for a zero ExitCode; flyctl
+      // re-serializes that response. Explicit nonzero/malformed codes still fail.
+      if (!execution || typeof execution !== 'object' || Array.isArray(execution)
+        || Object.hasOwn(execution,'exit_code') && execution.exit_code!==0
+        || typeof execution.stdout!=='string') throw Error();
+      payload=JSON.parse(execution.stdout);
+    }
     catch { throw Error('Owned output command did not produce a complete receipt.'); }
     return validateFiles(payload,target.workspace);
   });

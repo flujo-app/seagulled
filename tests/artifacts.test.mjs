@@ -48,6 +48,18 @@ test('foreign ownership and tampered file bytes produce no artifact commit',asyn
   await assert.rejects(fs.access(path.join(f.options.dataDir,'artifacts','goal-proof','worker-proof')));
 });
 
+test('Fly CLI omitted zero exit code is supported while explicit bad exit codes never commit output',async t=>{
+  const f=await setup(t);
+  for(const exit_code of [1,-1,null,'0']){
+    f.bridge.fly.run=async()=>JSON.stringify({exit_code,stdout:JSON.stringify(f.payload)});
+    await assert.rejects(collectFlyArtifacts(f.options),/complete receipt/);
+    await assert.rejects(fs.access(path.join(f.options.dataDir,'artifacts','goal-proof','worker-proof')));
+  }
+  f.bridge.fly.run=async()=>JSON.stringify({stdout:JSON.stringify(f.payload)});
+  const [receipt]=await collectFlyArtifacts(f.options);
+  assert.equal(await fs.readFile(receipt.path,'utf8'),'proof café');
+});
+
 test('trusted collector rejects credential files and hard links rather than copying a workspace snapshot',async t=>{
   const f=await setup(t);
   await fs.writeFile(path.join(f.output,'auth.json'),'not-a-secret-fixture');
