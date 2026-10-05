@@ -13,7 +13,7 @@ test('large requested topology persists and H100 is never selected without its e
     async discover() { return this.publicState(); }, async connect() {},
   };
   const swarm = { async execute({ goal }) { executions++; return { text: `Fixture for ${goal.providerId}.` }; } };
-  const runtime = createRuntime({ dataDir, providers, swarm });
+  const runtime = createRuntime({ executionMode: 'local', dataDir, providers, swarm });
   t.after(async () => { await runtime.close(); rmSync(dataDir, { recursive: true, force: true }); });
   await runtime.connect({ id: 'private-h100' });
   const ordinary = await runtime.chat('Build an ordinary project.');
@@ -28,7 +28,7 @@ test('large requested topology persists and H100 is never selected without its e
   const finished = await runtime.wait(privateGoal.id);
   assert.equal(finished.providerId, 'private-h100'); assert.equal(finished.privateH100, true); assert.equal(executions, 1);
   await runtime.close();
-  const reopened = createRuntime({ dataDir, providers, swarm });
+  const reopened = createRuntime({ executionMode: 'local', dataDir, providers, swarm });
   try { assert.equal(reopened.snapshot().goals[1].privateH100, true); assert.equal(reopened.snapshot().goals[1].conversationsPerWorker, 5); }
   finally { await reopened.close(); }
 });

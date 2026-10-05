@@ -57,7 +57,12 @@ test('a held quote admits one Go while Pause, Stop, or quote failure preserves i
     const calls=await page.evaluate(()=>window.fixture.chatCalls);
     assert.equal(calls.length,action?0:1,`${action||'Go'} must not duplicate or submit after interruption`);
     if(action){assert.equal(await page.locator('#fallback-goal').inputValue(),'Build the next game.');assert.equal(await page.locator('#action').getAttribute('data-action'),'go');}
-    else assert.equal(calls[0].text,'Build the next game.');
+    else {
+      assert.equal(calls[0].text,'Build the next game.');
+      assert.equal(calls[0].options.executionMode,'company');
+      assert.equal(calls[0].options.providerId,'openai');
+      assert.equal(Object.hasOwn(calls[0].options,'modelId'),false);
+    }
     await page.close();
   }
 });

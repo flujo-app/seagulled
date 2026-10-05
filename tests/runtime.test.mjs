@@ -41,7 +41,7 @@ function fixture(t, { connected = true, mode = 'complete', receipt, providerIds 
       return { text: 'Checked fixture output', usage };
     },
   };
-  const app = createRuntime({ dataDir, providers, swarm });
+  const app = createRuntime({ executionMode: 'local', dataDir, providers, swarm });
   t.after(async () => { await app.close(); rmSync(dataDir, { recursive: true, force: true }); });
   return { app, dataDir, providers, swarm };
 }
@@ -53,7 +53,7 @@ test('durable goal and conversation count emitted usage once, not aggregate twic
   assert.equal(app.snapshot().spend.usd, 0.03);
   assert.equal(app.snapshot().goals[0].tasks.length, 1);
   await app.close();
-  const reopened = createRuntime({ dataDir, providers, swarm });
+  const reopened = createRuntime({ executionMode: 'local', dataDir, providers, swarm });
   assert.equal(reopened.snapshot().goals[0].result, 'Checked fixture output');
   assert.equal(reopened.snapshot().conversation.filter(m => m.role === 'user').length, 1);
   await reopened.close();
@@ -72,7 +72,7 @@ test('invalid monetary receipts stay unpriced and preserve pending spend across 
     assert.equal(state.spend.pendingUsd, 0.5);
     assert.deepEqual(state.goals[0].usage, { inputTokens: 10, outputTokens: 20, costKind: 'unknown' });
     await app.close();
-    const reopened = createRuntime({ dataDir, providers, swarm });
+    const reopened = createRuntime({ executionMode: 'local', dataDir, providers, swarm });
     assert.equal(reopened.snapshot().spend.unknownCalls, 1);
     assert.equal(reopened.snapshot().goals[0].pendingUsd, 0.5);
     assert.equal(reopened.snapshot().goals[0].billingPending, true);
@@ -115,7 +115,7 @@ test('explicit provider connection selects future goals and survives reopening w
   await app.wait(explicit.id);
   assert.equal(app.snapshot().goals[2].providerId, 'native-first');
   await app.close();
-  const reopened = createRuntime({ dataDir, providers, swarm });
+  const reopened = createRuntime({ executionMode: 'local', dataDir, providers, swarm });
   const next = await reopened.chat('Keep selected API');
   await reopened.wait(next.id);
   assert.equal(reopened.snapshot().goals[3].providerId, 'selected-api');
@@ -162,7 +162,7 @@ test('reopening accepted running intent retains interrupted hold and never auto 
   const stored = JSON.parse(readFileSync(path.join(dataDir, 'state.json'), 'utf8'));
   stored.goals.push({ id: 'accepted-original', text: 'Original', status: 'running', tasks: [], spentUsd: 0, budgetUsd: 5 });
   writeFileSync(path.join(dataDir, 'state.json'), JSON.stringify(stored));
-  const recovered = createRuntime({ dataDir, providers, swarm });
+  const recovered = createRuntime({ executionMode: 'local', dataDir, providers, swarm });
   await recovered.discover();
   assert.equal(recovered.snapshot().goals[0].status, 'interrupted');
   assert.equal(recovered.snapshot().goals[0].recoveryHold, true);
@@ -171,10 +171,10 @@ test('reopening accepted running intent retains interrupted hold and never auto 
 
 test('single runtime owns state; corrupt state stays byte-exact', async t => {
   const { app, dataDir, providers, swarm } = fixture(t);
-  assert.throws(() => createRuntime({ dataDir, providers, swarm }), /already running/);
+  assert.throws(() => createRuntime({ executionMode: 'local', dataDir, providers, swarm }), /already running/);
   await app.close();
   writeFileSync(path.join(dataDir, 'state.json'), '{broken');
-  assert.throws(() => createRuntime({ dataDir, providers, swarm }), /preserved/);
+  assert.throws(() => createRuntime({ executionMode: 'local', dataDir, providers, swarm }), /preserved/);
   assert.equal(readFileSync(path.join(dataDir, 'state.json'), 'utf8'), '{broken');
 });
 

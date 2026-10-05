@@ -94,6 +94,33 @@ function verifiedSourceBinding(binding, dataDir) {
     return { cloudSdkRoot, sourceOrigin: origin.origin, sourceInstanceDir, sourceDataRoot, sourceAppRoot };
   } catch { return null; }
 }
+/** Backend-only, read-only proof of this product's exact local source and Fly identity. */
+export async function boundFleetSource({ dataDir, sourceBinding, flyAccount, signal, deadlineAt } = {}) {
+  assertAdmission(signal, deadlineAt);
+  const binding = verifiedSourceBinding(sourceBinding, dataDir);
+  if (!binding) return { available: false, detail: productSourceUnavailable };
+  if (!validFlyAccount(flyAccount)) return { available: false, detail: flyUnavailable };
+  try {
+    const { ManagedCloud } = await import(pathToFileURL(path.join(binding.cloudSdkRoot, 'lib', 'managed.mjs')).href);
+    const env = isolatedFlyEnvironment(flyAccount, process.env, binding.sourceInstanceDir);
+    const discoveryFetch = (url, options = {}) => fetch(url, { ...options,
+      signal: AbortSignal.any([options.signal, signal,
+        deadlineAt === undefined ? undefined : AbortSignal.timeout(Math.max(1, deadlineAt - Date.now()))]
+        .filter(Boolean)) });
+    const managed = new ManagedCloud({ env, directory: path.join(dataDir, 'fleet', 'source-proof'),
+      fetchImpl: discoveryFetch });
+    const source = await managed.source({ source: binding.sourceOrigin });
+    assertAdmission(signal, deadlineAt);
+    if (source.source !== binding.sourceOrigin || realpathSync(source.dataRoot) !== binding.sourceDataRoot
+      || realpathSync(source.appRoot) !== binding.sourceAppRoot) {
+      return { available: false, detail: 'The product FLUJO source identity did not match its owned binding.' };
+    }
+    return { available: true, binding };
+  } catch {
+    assertAdmission(signal, deadlineAt);
+    return { available: false, detail: 'The product FLUJO source could not be verified.' };
+  }
+}
 const boundedCount = (value, fallback, maximum, name) => {
   if (value === undefined) return fallback;
   if (!Number.isInteger(value) || value < 1 || value > maximum) {
@@ -285,12 +312,31 @@ async function modelProbe(model, { signal, deadlineAt } = {}) {
       method: 'GET', headers: anthropic
         ? { 'x-api-key': model.apiKey, 'anthropic-version': '2023-06-01' }
         : { Authorization: `Bearer ${model.apiKey}` },
-      signal: AbortSignal.any([AbortSignal.timeout(7000), ...(signal ? [signal] : [])]), redirect: 'error',
+      signal: AbortSignal.any([AbortSignal.timeout(7000), signal,
+        deadlineAt === undefined ? undefined : AbortSignal.timeout(Math.max(1, deadlineAt - Date.now()))]
+        .filter(Boolean)), redirect: 'error',
     });
     if (!response.ok) return { available: false, detail: `HTTP ${response.status}` };
-    const catalogue = await response.json().catch(() => null);
+    const maxBytes = 1024 * 1024;
+    if (Number(response.headers.get('content-length')) > maxBytes) {
+      return { available: false, detail: 'model catalog is oversized' };
+    }
+    const chunks = [];
+    let bytes = 0;
+    for await (const chunk of response.body ?? []) {
+      bytes += chunk.length;
+      if (bytes > maxBytes) return { available: false, detail: 'model catalog is oversized' };
+      chunks.push(chunk);
+    }
+    let catalogue;
+    try { catalogue = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+    catch { return { available: false, detail: 'invalid model catalog' }; }
     if (anthropic && catalogue?.id !== model.name) return { available: false, detail: 'model identity not confirmed' };
-    if (!anthropic && Array.isArray(catalogue?.data) && !catalogue.data.some((entry) => entry?.id === model.name)) {
+    if (!anthropic && (!Array.isArray(catalogue?.data)
+      || !catalogue.data.every((entry) => entry && typeof entry.id === 'string'))) {
+      return { available: false, detail: 'invalid model catalog' };
+    }
+    if (!anthropic && !catalogue.data.some((entry) => entry.id === model.name)) {
       return { available: false, detail: 'model absent from catalog' };
     }
     assertAdmission(signal, deadlineAt);
@@ -344,9 +390,12 @@ async function inspectFleet({ dataDir, providerId, fleetRoute, goalId, diagnosti
   if (!diagnostic && (modelHold(dataDir, fleetRoute.model) || knownQuotaHold(dataDir, fleetRoute.model))) {
     return { available: false, detail: 'The selected provider account has a saved no-credits hold. Local provider work remains available.' };
   }
-  const binding = diagnostic ? null : verifiedSourceBinding(sourceBinding, dataDir);
-  if (!diagnostic && !binding) return { available: false, detail: productSourceUnavailable };
-  if (!diagnostic && !validFlyAccount(flyAccount)) return { available: false, detail: flyUnavailable };
+  let binding;
+  if (!diagnostic) {
+    const source = await boundFleetSource({ dataDir, sourceBinding, flyAccount, signal, deadlineAt });
+    if (!source.available) return source;
+    binding = source.binding;
+  }
   let config;
   if (diagnostic) {
     const location = profilePath();
@@ -365,25 +414,6 @@ async function inspectFleet({ dataDir, providerId, fleetRoute, goalId, diagnosti
       sourceInstanceDir: binding.sourceInstanceDir,
       supervisor: { origin: binding.sourceOrigin },
       provisioner: { kind: 'fly', flujoCloudPath: binding.cloudSdkRoot, source: binding.sourceOrigin } }, flyAccount);
-    try {
-      const { ManagedCloud } = await import(pathToFileURL(path.join(binding.cloudSdkRoot, 'lib', 'managed.mjs')).href);
-      const env = isolatedFlyEnvironment(flyAccount, process.env, binding.sourceInstanceDir);
-      const discoveryFetch = (url, options = {}) => fetch(url, { ...options,
-        signal: AbortSignal.any([options.signal, signal,
-          deadlineAt === undefined ? undefined : AbortSignal.timeout(Math.max(1, deadlineAt - Date.now()))]
-          .filter(Boolean)) });
-      const managed = new ManagedCloud({ env, directory: path.join(dataDir, 'fleet', 'source-proof'),
-        fetchImpl: discoveryFetch });
-      const source = await managed.source({ source: binding.sourceOrigin });
-      assertAdmission(signal, deadlineAt);
-      if (source.source !== binding.sourceOrigin || realpathSync(source.dataRoot) !== binding.sourceDataRoot
-        || realpathSync(source.appRoot) !== binding.sourceAppRoot) {
-        return { available: false, detail: 'The product FLUJO source identity did not match its owned binding.' };
-      }
-    } catch {
-      assertAdmission(signal, deadlineAt);
-      return { available: false, detail: 'The product FLUJO source could not be verified.' };
-    }
   }
   if (config?.provisioner?.kind !== 'fly' || !config.provisioner.flujoCloudPath
     || !existsSync(config.provisioner.flujoCloudPath) || !config.model?.name
@@ -418,6 +448,7 @@ async function inspectFleet({ dataDir, providerId, fleetRoute, goalId, diagnosti
   const original = await modelProbe(config.model, { signal, deadlineAt });
   if (original.available) {
     return { available: true, provider: 'configured-model',
+      modelIdentityVerified: true,
       detail: 'Local FLUJO and the selected provider model catalog are configured; live Fly execution has not been verified.',
       ...(!diagnostic ? { providerId } : {}), config };
   }
@@ -438,8 +469,10 @@ async function inspectFleet({ dataDir, providerId, fleetRoute, goalId, diagnosti
   return { available: false, detail: `The configured FLUJO model endpoint is unavailable (${original.detail}); no working API fallback was found.` };
 }
 
-export async function fleetStatus({ dataDir, providerId, fleetRoute, goalId, flyAccount, sourceBinding } = {}) {
-  const { config, ...publicState } = await inspectFleet({ dataDir, providerId, fleetRoute, goalId, flyAccount, sourceBinding });
+export async function fleetStatus({ dataDir, providerId, fleetRoute, goalId, flyAccount, sourceBinding,
+  signal, deadlineAt } = {}) {
+  const { config, ...publicState } = await inspectFleet({ dataDir, providerId, fleetRoute, goalId,
+    flyAccount, sourceBinding, signal, deadlineAt });
   return publicState;
 }
 
@@ -451,7 +484,8 @@ export async function fleetDiagnosticStatus({ dataDir } = {}) {
 
 /** One owned Fly leaf, with no existing fleet writer or Machine adoption. */
 export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetRoute,
-  diagnostic = false, reservationId, reserveCloud, flyAccount, sourceBinding, onStatus = () => undefined }) {
+  diagnostic = false, reservationId, reserveCloud, flyAccount, sourceBinding,
+  onStatus = () => undefined, onCompany = () => undefined }) {
   if (!goal || typeof goal.id !== 'string' || !/^[\w-]{1,100}$/.test(goal.id)) throw new Error('A safe goal id is required for isolated fleet work.');
   goalCapacity(goal);
   const fleetDeadlineAt = Date.now() + 30 * 60_000;
@@ -703,10 +737,16 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     delivered = { available: true, text: result.result, artifacts, usage: { inputTokens: 0, outputTokens: 0, costUsd: null, costKind: 'unknown',
       reservedUsd: maxUsd, billingPending: true, ...(cloudReserved ? { reservationId } : {}) },
       sandbox: { kind: 'fly', workerId: child.workerId, runId: child.runId, retired: true, cleanupConfirmed: true,
+        verification: 'original-worker-hierarchy-v1', relayUsed: Boolean(relay),
         workerCount: localConversations.length, initialWorkerCount: staffed.length,
         teamLeadRuns: staffed.map((item) => item.runId),
         localConversationCount: localConversations.reduce((sum, item) => sum + item.children.length, 0),
         conversationCountVerified: localConversations.length + localConversations.reduce((sum, item) => sum + item.children.length, 0) } };
+    if (!diagnostic && goal.workerTopologyVersion === 2) {
+      try { onCompany({ verifiedWorkers: localConversations.length,
+        verifiedChildConversations: delivered.sandbox.localConversationCount }); }
+      catch { /* A status listener cannot invalidate a verified Worker result. */ }
+    }
     return delivered;
   } catch (error) {
     if (typeof error?.message === 'string' && config.model.apiKey) {

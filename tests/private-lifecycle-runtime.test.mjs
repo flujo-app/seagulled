@@ -49,7 +49,7 @@ function fixture(t, { enableFailure, cleanupFailure, cleanupReceipt, deferredSta
     }
     return { text: 'Fixture goal complete.' };
   } };
-  runtime = createRuntime({ dataDir, providers, swarm });
+  runtime = createRuntime({ executionMode: 'local', dataDir, providers, swarm });
   t.after(async () => { await runtime.close(); rmSync(dataDir, { recursive: true, force: true }); });
   return { runtime, calls, get executions() { return executions; }, releaseStartup() { startupResolve(); }, releaseCleanup() { cleanupResolve(); } };
 }

@@ -25,6 +25,16 @@ export function validateGoalOptions(value={}) {
   if(!Number.isInteger(maxWorkers)||maxWorkers<1||maxWorkers>6)throw new Error('Workers must be between 1 and 6.');
   if(!Number.isInteger(conversationsPerWorker)||conversationsPerWorker<1||conversationsPerWorker>10)throw new Error('Conversations per worker must be between 1 and 10.');
   const options={maxWorkers,conversationsPerWorker};
+  if(value.executionMode!==undefined) {
+    if(value.executionMode!=='company')throw new Error('Company execution mode is invalid.');
+    options.executionMode='company';
+  }
+  if(value.providerId!==undefined) {
+    if(typeof value.providerId!=='string'||!['codex','claude','openai','anthropic'].includes(value.providerId))
+      throw new Error('Goal provider is invalid.');
+    if(value.privateH100===true)throw new Error('Choose one inference route.');
+    options.providerId=value.providerId;
+  }
   if(value.privateH100!==undefined)options.privateH100=value.privateH100;
   if(value.budget!==undefined){
     if(!value.budget||typeof value.budget!=='object'||Array.isArray(value.budget))throw new Error('Budget is invalid.');

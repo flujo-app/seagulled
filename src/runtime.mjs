@@ -12,13 +12,25 @@ export const defaultDataDir = () => process.env.SEAGULLED_HOME || path.join(home
 const now = () => new Date().toISOString();
 const id = (prefix) => `${prefix}-${randomUUID()}`;
 const copy = (value) => structuredClone(value);
+const companyReasons = {
+  source: 'The crew is still getting ready.', account: 'Sign in to Fly so the crew can start.',
+  provider: 'Your provider is not ready to run the company yet.', capacity: 'The crew has no room for this goal yet.',
+  budget: 'The allowance cannot cover the requested crew yet.', unavailable: 'The crew is not ready yet.',
+};
+const company = goal => goal.executionMode === 'company';
+function mode(value) {
+  if (!['company', 'local'].includes(value)) throw new Error('Choose company execution or an explicit local diagnostic.');
+  return value;
+}
 function conversations(options, previous) {
   if (options.conversationsPerWorker !== undefined && options.agentsPerWorker !== undefined) throw new Error('Choose one conversation limit.');
   if (options.conversationsPerWorker !== undefined) return capacity(options.conversationsPerWorker, 5, 10);
   if (options.agentsPerWorker !== undefined) return capacity(options.agentsPerWorker, 4, 10) + 1;
   return previous?.conversationsPerWorker ?? (previous?.agentsPerWorker === undefined ? 5 : previous.agentsPerWorker + 1);
 }
-export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, voice, budgets, fleetSource } = {}) {
+export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, voice, budgets, fleetSource, sourceProvider, executionMode = 'company' } = {}) {
+  mode(executionMode);
+  if (sourceProvider !== undefined && typeof sourceProvider !== 'function') throw new Error('The owned source getter is invalid.');
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const statePath = path.join(dataDir, 'state.json');
   const lockPath = path.join(dataDir, 'runtime.lock');
@@ -36,15 +48,31 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
   try {
     state = existsSync(statePath) ? JSON.parse(readFileSync(statePath, 'utf8')) : {
       version: 1,
-      conversation: [{ id: id('message'), role: 'todd', text: 'Alright. What are we building? Give me the goal. I’ll get my people on it.', at: now() }],
+      conversation: [{ id: id('message'), role: 'todd', text: 'What are we building?', at: now() }],
       goals: [], providers: [], spend: { usd: 0, reportedUsd: 0, estimatedUsd: 0, unknownCalls: 0, subscriptionCalls: 0 }, swarm: { status: 'idle' },
     };
     if (state.version !== 1 || !Array.isArray(state.goals) || !Array.isArray(state.conversation) || !state.spend) throw new Error('Unsupported saved state.');
   } catch (e) { unlinkSync(lockPath); throw new Error(`Saved conversation needs recovery: ${e.message}. Your original file is preserved.`); }
   for (const goal of state.goals) {
-    if (goal.status === 'running' || goal.status === 'pausing' || goal.status === 'stopping') {
+    // Unfinished topology-v2 goals from earlier builds must pass company
+    // admission; terminal historical results retain their original provenance.
+    if (goal.executionMode === undefined && goal.workerTopologyVersion === 2
+      && ['queued', 'paused', 'running', 'pausing', 'stopping', 'interrupted'].includes(goal.status)) {
+      goal.executionMode = 'company';
+    }
+    const pendingPrivate = goal.privateCompute && (['pending', 'unknown'].includes(goal.privateCompute.reservationStatus)
+      || ['not-started', 'required', 'retiring', 'unknown'].includes(goal.privateCompute.cleanupStatus));
+    if (goal.status === 'running' || goal.status === 'pausing' || goal.status === 'stopping'
+      || company(goal) && goal.status === 'queued' && pendingPrivate) {
       goal.status = 'interrupted'; goal.error = 'Previous execution was interrupted. Its outcome needs reconciliation before more work can run.';
       goal.recoveryHold = true;
+    }
+    if (company(goal)) {
+      // Source and remote readiness are observations, not durable authority.
+      goal.execution = { requested: 'company', readiness: 'blocked', reason: goal.recoveryHold
+        ? 'The previous work needs reconciliation.' : goal.status === 'completed'
+          ? 'The work has ended.' : 'The crew needs a fresh readiness check.',
+        verifiedWorkers: 0, verifiedChildConversations: 0 };
     }
   }
   // Provider availability is observed afresh; saved login summaries are never authority.
@@ -58,7 +86,9 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
   const speech = voice || createVoice({ dataDir });
   const allowances = budgets || createBudgets({ dataDir });
   const persist = () => {
-    state.swarm = { admissionPaused: Boolean(state.swarm?.admissionPaused), status: jobs.size ? 'working' : state.goals.some(g => g.recoveryHold) ? 'needs-attention' : state.swarm?.admissionPaused ? 'paused' : 'idle' };
+    state.swarm = { admissionPaused: Boolean(state.swarm?.admissionPaused), status: jobs.size
+      ? [...jobs.values()].some(job => job.phase === 'executing') ? 'working' : 'checking'
+      : state.goals.some(g => g.recoveryHold) ? 'needs-attention' : state.swarm?.admissionPaused ? 'paused' : 'idle' };
     const temp = `${statePath}.${owner}.tmp`;
     writeFileSync(temp, JSON.stringify(state, null, 2), { mode: 0o600 }); renameSync(temp, statePath);
   };
@@ -128,7 +158,17 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
   }
   function onEvent(event) {
     const goal = event.goalId ? state.goals.find(g => g.id === event.goalId) : undefined;
+    if (event.type === 'company' && (!goal || !company(goal))) return;
+    let publicEvent = event;
     if (goal) {
+      if (event.type === 'company' && company(goal)) {
+        for (const key of ['verifiedWorkers', 'verifiedChildConversations']) {
+          const limit = key === 'verifiedWorkers' ? 12 : 120;
+          if (Number.isInteger(event[key]) && event[key] >= 0 && event[key] <= limit) goal.execution[key] = event[key];
+        }
+        publicEvent = { type: 'company', goalId: goal.id,
+          verifiedWorkers: goal.execution.verifiedWorkers, verifiedChildConversations: goal.execution.verifiedChildConversations };
+      }
       if (event.type === 'reservation') reserveUsage(goal, event.reservation);
       if (event.type === 'task' && event.task) {
         const index = goal.tasks.findIndex(t => t.id === event.task.id);
@@ -146,9 +186,9 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
       }
       goal.updatedAt = now();
     }
-    events.emit('event', copy(event)); publish();
+    events.emit('event', copy(publicEvent)); publish();
   }
-  const coordinator = swarm || new SwarmCoordinator({ providers: manager, onEvent, dataDir: path.join(dataDir, 'swarm'), sourceBinding: fleetSource, fleet: process.env.SEAGULLED_DISABLE_FLEET === '1' ? undefined : 'auto' });
+  const coordinator = swarm || new SwarmCoordinator({ providers: manager, onEvent, dataDir: path.join(dataDir, 'swarm'), sourceBinding: fleetSource, sourceProvider, fleet: process.env.SEAGULLED_DISABLE_FLEET === '1' ? undefined : 'auto' });
   // Test/integration injection supports the same event sink without a mock-only runtime branch.
   if (swarm?.setEventHandler) swarm.setEventHandler(onEvent);
   const privateLifecycle = () => typeof manager.privateComputeEnable === 'function'
@@ -233,17 +273,34 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
     }
     const selectedId = goal.privateH100 ? 'private-h100' : goal.providerId || (state.preferredProviderId !== 'private-h100' ? state.preferredProviderId : undefined);
     const provider = state.providers.find(p => p.connected && p.available && (goal.privateH100 || p.id !== 'private-h100') && (!selectedId || p.id === selectedId));
-    if (!provider && !(goal.privateH100 && privateLifecycle())) { goal.error = goal.privateH100 ? 'Private H100 inference is not ready yet.' : 'Connect a provider and I’ll get the team started.'; publish(); return; }
+    if (!provider && !(goal.privateH100 && privateLifecycle())) {
+      goal.error = goal.privateH100 ? 'Private H100 inference is not ready yet.' : 'Connect a provider before work can start.';
+      if (company(goal)) goal.execution = { requested: 'company', readiness: 'blocked', reason: companyReasons.provider, verifiedWorkers: 0, verifiedChildConversations: 0 };
+      publish(); return;
+    }
     goal.providerId = goal.privateH100 ? 'private-h100' : provider.id;
-    goal.error = undefined; goal.status = 'running'; goal.updatedAt = now();
+    goal.error = undefined; goal.status = company(goal) ? 'queued' : 'running'; goal.updatedAt = now();
+    if (company(goal)) goal.execution = { requested: 'company', readiness: 'checking', verifiedWorkers: 0, verifiedChildConversations: 0 };
     const controller = new AbortController();
-    const job = { controller, usageEvents: 0, promise: null };
+    const job = { controller, usageEvents: 0, promise: null, phase: company(goal) ? 'preflight' : 'executing' };
     jobs.set(goal.id, job); publish();
     job.promise = (async () => {
       try {
+        if (company(goal)) {
+          if (typeof coordinator.prepareCompany !== 'function') throw Object.assign(new Error('Company admission is unavailable.'), { code: 'COMPANY_UNAVAILABLE', reasonCode: 'unavailable', outcome: 'not_applied' });
+          job.sourceAdmission = await coordinator.prepareCompany(copy(goal), { signal: controller.signal, stage: 'source' });
+          if (controller.signal.aborted) throw Object.assign(new Error('Company preparation was cancelled.'), { name: 'AbortError' });
+        }
         await preparePrivate(goal, job);
         if (controller.signal.aborted) throw Object.assign(new Error('Goal execution was cancelled.'), { name: 'AbortError' });
-        const result = await coordinator.execute({ goal: copy(goal), signal: controller.signal });
+        if (company(goal)) {
+          job.admission = await coordinator.prepareCompany(copy(goal), { signal: controller.signal, stage: 'ready', priorAdmission: job.sourceAdmission });
+          if (controller.signal.aborted) throw Object.assign(new Error('Company preparation was cancelled.'), { name: 'AbortError' });
+          goal.execution.readiness = 'ready'; delete goal.execution.reason; publish();
+          goal.status = 'running'; goal.execution.readiness = 'working';
+          job.phase = 'executing'; publish();
+        }
+        const result = await coordinator.execute({ goal: copy(goal), signal: controller.signal, ...(company(goal) ? { admission: job.admission } : {}) });
         // The coordinator emits each terminal receipt once. Aggregates may include
         // prior checkpoints and are never charged again after a resume.
         if (controller.signal.aborted) {
@@ -260,14 +317,27 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
         if (typeof manager.publicState === 'function') state.providers = manager.publicState();
         if (e.usage && !e.usageRecorded) recordUsage(goal, e.usage);
         if (controller.signal.aborted && !e.unknown && e.code !== 'UNKNOWN') goal.status = goal.status === 'stopping' ? 'stopped' : 'paused';
+        else if (company(goal) && e.code === 'COMPANY_UNAVAILABLE' && !e.unknown && e.outcome === 'not_applied') {
+          const reason = companyReasons[e.reasonCode] || companyReasons.unavailable;
+          goal.status = job.phase === 'preflight' ? 'queued' : 'paused'; goal.error = reason;
+          goal.execution.readiness = 'blocked'; goal.execution.reason = reason;
+          if (!closed) message('todd', reason, goal.id);
+        }
         else {
           goal.status = e.unknown || ['UNKNOWN', 'SWARM_RECOVERY_HOLD'].includes(e.code) ? 'interrupted' : 'failed';
           goal.recoveryHold = goal.status === 'interrupted';
-          goal.error = e.message || 'The team could not finish this goal.';
+          goal.error = company(goal) && job.phase === 'preflight'
+            ? goal.recoveryHold ? 'The previous work needs reconciliation.' : 'The crew could not finish getting ready.'
+            : e.message || 'The team could not finish this goal.';
           if (!closed) message('todd', `The team hit a blocker: ${goal.error}`, goal.id);
         }
       } finally {
         await retirePrivate(goal, job);
+        if (company(goal) && !['queued', 'running'].includes(goal.status)) {
+          goal.execution.readiness = 'blocked';
+          goal.execution.reason = goal.status === 'completed' ? 'The work has ended.'
+            : goal.recoveryHold ? 'The previous work needs reconciliation.' : 'The work is held.';
+        }
         if (goal.status === 'completed' && job.completionText && !state.conversation.some(m => m.goalId === goal.id && m.text === job.completionText)) message('todd', job.completionText, goal.id);
         jobs.delete(goal.id); goal.updatedAt = now(); publish();
       }
@@ -346,16 +416,19 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
       if (options.budget !== undefined && options.budgetUsd !== undefined) throw new Error('Choose one budget currency.');
       if (options.privateH100 !== undefined && typeof options.privateH100 !== 'boolean') throw new Error('Private inference must be on or off.');
       if (options.providerId === 'private-h100' && options.privateH100 !== true) throw new Error('Enable private inference to use H100.');
+      const requestedMode = mode(options.executionMode ?? executionMode);
       const maxWorkers = capacity(options.maxWorkers, 5, 6), conversationsPerWorker = conversations(options);
       const budget = await allowances.resolve(options.budget, options.budgetUsd ?? DEFAULT_BUDGET_USD);
       if (!state.providers.length) await this.discover();
       if (closed) throw new Error('This session has closed.');
       const goal = { id: id('goal'), text: text.trim(), status: 'queued', budgetUsd: budget.allowanceUsd, budget, spentUsd: 0,
         providerId: options.privateH100 === true ? 'private-h100' : options.providerId || (state.preferredProviderId !== 'private-h100' ? state.preferredProviderId : null) || null,
-        privateH100: options.privateH100 === true, workerTopologyVersion: 2, maxWorkers, conversationsPerWorker, agentsPerWorker: conversationsPerWorker - 1, tasks: [], createdAt: now(), updatedAt: now(),
+        privateH100: options.privateH100 === true, executionMode: requestedMode,
+        execution: { requested: requestedMode, readiness: 'blocked', verifiedWorkers: 0, verifiedChildConversations: 0 },
+        workerTopologyVersion: 2, maxWorkers, conversationsPerWorker, agentsPerWorker: conversationsPerWorker - 1, tasks: [], createdAt: now(), updatedAt: now(),
         context: state.conversation.slice(-12).map(m => ({ role: m.role, text: m.text })) };
       state.goals.push(goal); message('user', goal.text, goal.id);
-      message('todd', state.providers.some(p => p.available && p.connected) ? 'Got it. I’m putting the team on this. I’ll check what they bring back.' : 'Got it. Connect your provider once and I’ll put the team on this.', goal.id);
+      message('todd', requestedMode === 'company' ? 'Your goal is saved; I’m checking whether the crew is ready.' : 'Your local diagnostic goal is saved.', goal.id);
       publish(); start(goal); return copy(goal);
     },
     async updateGoal(goalId, patch) {
@@ -416,7 +489,7 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
         if (goal.recoveryHold) throw new Error('This run has an uncertain outcome. Its recovery hold cannot be cleared by a stop button.');
         if (job) {
           goal.status = action === 'stop' ? 'stopping' : 'pausing';
-          if (action === 'pause') job.pauseRequested = true;
+          if (action === 'pause') { job.pauseRequested = true; if (job.phase === 'preflight') job.controller.abort(); }
           else job.controller.abort();
           publish();
           // Pausing returns promptly while the current accepted call settles.

@@ -69,7 +69,7 @@ test('real runtime, provider and coordinator contracts settle fixture GPU reques
     },
   });
   const previous = process.env.SEAGULLED_DISABLE_FLEET; process.env.SEAGULLED_DISABLE_FLEET = '1';
-  const runtime = createRuntime({ dataDir, providers });
+  const runtime = createRuntime({ executionMode: 'local', dataDir, providers });
   t.after(async () => {
     await runtime.close();
     if (previous === undefined) delete process.env.SEAGULLED_DISABLE_FLEET; else process.env.SEAGULLED_DISABLE_FLEET = previous;

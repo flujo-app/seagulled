@@ -43,6 +43,9 @@
       <div class="budget-controls"><input id="budget-amount" type="number" min="0.01" step="0.01" placeholder="Default" inputmode="decimal" aria-label="Goal budget amount"><select id="budget-currency" aria-label="Budget currency"><option value="USD">USD</option><option value="EUR">EUR</option><option value="GBP">GBP</option><option value="COP">COP</option><option value="CAD">CAD</option><option value="AUD">AUD</option></select></div>
       <div class="budget-presets" role="group" aria-label="USD budget steps"><button type="button" data-budget-usd="25">$25</button><button type="button" data-budget-usd="50" aria-pressed="true">$50</button><button type="button" data-budget-usd="100">$100</button><button type="button" data-budget-usd="500">$500</button><button type="button" data-budget-usd="1000">$1000</button></div>
       <small id="budget-note" class="budget-note" aria-live="polite"></small>
+      <label class="setting-label" for="goal-provider">Goal provider</label>
+      <select id="goal-provider" aria-label="Goal provider"><option value="">Choose a connected provider</option></select>
+      <small id="goal-provider-note" class="budget-note">Choose an inference provider for this goal. The company starts when its workers are ready.</small>
       <label class="setting-label" for="workers">Workers <output id="workers-value">5</output></label><input id="workers" type="range" min="1" max="6" value="5">
       <label class="setting-label" for="conversations">Conversations per worker <output id="conversations-value">5</output></label><input id="conversations" type="range" min="1" max="10" value="5">
       <label class="private-h100-switch" for="private-h100"><span>Private H100 + Qwen</span><input id="private-h100" type="checkbox"></label>

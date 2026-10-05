@@ -107,6 +107,51 @@ test('a legacy profile cannot supply the product source or redirect its verified
   }
 });
 
+test('a real loopback model catalog must contain the exact model ID before readiness', async () => {
+  let catalog = '{}';
+  const server = http.createServer((request, response) => {
+    const pathname = new URL(request.url, 'http://local').pathname;
+    if (pathname === '/api/workspaces') {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ workspaces: [] }));
+    } else if (pathname === '/v1/models') {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(catalog);
+    } else { response.writeHead(404); response.end(); }
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-catalog-shape-'));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const profile = path.join(root, 'profile.json');
+  writeFileSync(profile, JSON.stringify({ supervisor: { origin },
+    provisioner: { kind: 'fly', flujoCloudPath: root },
+    model: { name: 'exact-model', baseUrl: `${origin}/v1`, apiKey: 'fixture',
+      provider: 'openai', adapter: 'openai' } }));
+  const previous = process.env.SEAGULLED_FLEET_PROFILE;
+  const previousKey = process.env.OPENAI_API_KEY;
+  process.env.SEAGULLED_FLEET_PROFILE = profile;
+  delete process.env.OPENAI_API_KEY;
+  try {
+    for (catalog of ['null', '{}', '{"data":null}', '{"data":[]}',
+      '{"data":[{"name":"exact-model"}]}', '<html>not a catalog</html>']) {
+      const status = await fleetDiagnosticStatus({ dataDir: root });
+      assert.equal(status.available, false, `catalog ${catalog} cannot qualify model identity`);
+      assert.equal(status.modelIdentityVerified, undefined);
+    }
+    catalog = '{"data":[{"id":"another-model"},{"id":"exact-model"}]}';
+    const ready = await fleetDiagnosticStatus({ dataDir: root });
+    assert.equal(ready.available, true);
+    assert.equal(ready.modelIdentityVerified, true);
+  } finally {
+    if (previous === undefined) delete process.env.SEAGULLED_FLEET_PROFILE;
+    else process.env.SEAGULLED_FLEET_PROFILE = previous;
+    if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousKey;
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('product fleet requires one bound private source and checks the SDK proof before any workspace call', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'seagulled-bound-source-'));
   const dataDir = path.join(root, 'swarm');
@@ -181,6 +226,7 @@ test('product fleet requires one bound private source and checks the SDK proof b
       appRoot: sourceAppRoot };
     const ready = await status(sourceBinding);
     assert.equal(ready.available, true);
+    assert.equal(ready.modelIdentityVerified, true, 'the exact model catalog was checked');
     assert.equal('config' in ready, false);
     assert.equal(JSON.stringify(ready).includes(root), false, 'private paths remain backend-only');
     assert.deepEqual(globalThis.__seagulledSourceFixture.input, { source: sourceOrigin });

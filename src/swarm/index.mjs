@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { homedir } from 'node:os';
 import { Registry } from '../../upstream/swarm-teams/fleet/registry.mjs';
-import { fleetStatus, flyAccountLease, flyUnavailable, goalCapacity, runFleetLeaf } from './fleet.mjs';
+import { boundFleetSource, fleetStatus, flyAccountLease, flyUnavailable, goalCapacity, runFleetLeaf } from './fleet.mjs';
 
 export const TODD_PERSONA = `You are Todd, the lead of a bounded team: busy, blunt, dryly funny, and good at checking actual work. Translate the user's goal into concrete assignments, inspect the developer and reviewer results supplied to you, and revise the plan when evidence warrants it. The host application handles delegation. Do not invoke Codex collaboration, spawn agents, or attempt tool calls yourself; answer only with the requested JSON or prose. Never claim that a plan, fixture, estimate, or proposed change is a completed real-world action. State uncertainty and remaining work plainly. In user-facing prose name downloadable files by filename, without host paths, commands, or ports.`;
 
@@ -9,6 +9,35 @@ const MAX_CALLS = 6;
 const PRIVATE_REQUEST_RESERVE_USD = 2.50;
 const trim = (value, length = 64_000) => String(value ?? '').slice(0, length);
 const finite = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+const COMPANY_REASON = Object.freeze({
+  source: 'The product-owned local source is unavailable for the company.',
+  account: 'A verified personal Fly account is unavailable for the company.',
+  provider: 'The selected provider has no verified company route.',
+  capacity: 'The requested company size is outside the supported limits.',
+  budget: 'The goal allowance cannot admit this company.',
+  unavailable: 'The owned company is unavailable; no local substitute was run.',
+});
+const companyUnavailable = (reasonCode) => Object.assign(new Error(COMPANY_REASON[reasonCode]), {
+  code: 'COMPANY_UNAVAILABLE', reasonCode, publicDetail: COMPANY_REASON[reasonCode], outcome: 'not_applied',
+});
+const companyStamp = (goal) => JSON.stringify({ id: goal.id, text: goal.text,
+  providerId: goal.providerId, budgetUsd: goal.budgetUsd, spentUsd: goal.spentUsd,
+  maxWorkers: goal.maxWorkers, conversationsPerWorker: goal.conversationsPerWorker,
+  agentsPerWorker: goal.agentsPerWorker, privateH100: goal.privateH100,
+  executionMode: goal.executionMode, workerTopologyVersion: goal.workerTopologyVersion });
+const sameFlyAccount = (left, right) => left?.orgSlug === right?.orgSlug
+  && left?.flyctlPath === right?.flyctlPath && left?.flyConfigDir === right?.flyConfigDir;
+const sourceFields = Object.freeze(['cloudSdkRoot', 'sourceOrigin', 'sourceInstanceDir', 'sourceDataRoot', 'sourceAppRoot']);
+const completeSourceBinding = (binding) => Boolean(binding
+  && sourceFields.every((key) => typeof binding[key] === 'string' && binding[key]));
+const sameSourceBinding = (left, right) => completeSourceBinding(left) && completeSourceBinding(right)
+  && sourceFields.every((key) => left[key] === right[key]);
+const companyTopologyMatches = (record, { maxWorkers, conversationsPerWorker, agentsPerWorker }) =>
+  record?.requestedWorkers === maxWorkers
+  && record?.requestedConversationsPerWorker === conversationsPerWorker
+  && record?.requestedAgentsPerWorker === agentsPerWorker;
+const companyIdentityMatches = (record, goal, capacity) => companyTopologyMatches(record, capacity)
+  && record?.companyProviderId === goal.providerId && record?.text === goal.text;
 const aborted = (signal) => {
   if (signal?.aborted) throw Object.assign(new Error('Goal execution was cancelled.'), { name: 'AbortError' });
 };
@@ -40,7 +69,7 @@ const usageOf = (value) => {
 /** Durable, bounded provider team. The registry is stored in the caller's private dataDir. */
 export class SwarmCoordinator {
   constructor({ providers, onEvent = () => undefined, dataDir, fleet = 'off', fleetRunner = runFleetLeaf,
-    sourceBinding } = {}) {
+    sourceBinding, sourceProvider, sourceInspector = boundFleetSource, readyInspector = fleetStatus } = {}) {
     if (!providers || typeof providers.run !== 'function') throw new Error('SwarmCoordinator needs a ProviderManager.');
     this.providers = providers;
     this.onEvent = onEvent;
@@ -49,18 +78,133 @@ export class SwarmCoordinator {
     this.fleetRunner = fleetRunner;
     this.sourceBinding = sourceBinding && typeof sourceBinding === 'object'
       ? Object.freeze({ ...sourceBinding }) : null;
+    this.sourceProvider = sourceProvider ?? (async () => this.sourceBinding);
+    this.sourceInspector = sourceInspector;
+    this.readyInspector = readyInspector;
+    this.companySources = new Map();
+    this.companyAdmissions = new Map();
     this.registry = new Registry(path.join(this.dataDir, 'swarm', 'registry.json'));
     this.active = new Set();
   }
 
   emit(event) { this.onEvent(event); }
-  async fleetStatus(providerId) {
+  async fleetStatus(providerId, goalId) {
     const fleetRoute = typeof this.providers.fleetRoute === 'function'
-      ? await this.providers.fleetRoute(providerId) : { available: false };
+      ? await this.providers.fleetRoute(providerId, goalId) : { available: false };
     const flyAccount = fleetRoute.available === true ? await flyAccountLease(this.providers) : null;
     if (fleetRoute.available === true && !flyAccount) return { available: false, detail: flyUnavailable };
-    return fleetStatus({ dataDir: this.dataDir, providerId, fleetRoute, flyAccount,
+    return fleetStatus({ dataDir: this.dataDir, providerId, goalId, fleetRoute, flyAccount,
       sourceBinding: this.sourceBinding });
+  }
+
+  /** Two read-only stages. The returned leases remain backend-only and are never persisted. */
+  async prepareCompany(goal, { signal, stage, priorAdmission } = {}) {
+    if (!goal || typeof goal.id !== 'string' || !/^[\w-]{1,100}$/.test(goal.id)
+      || goal.executionMode !== 'company' || goal.workerTopologyVersion !== 2
+      || typeof goal.providerId !== 'string' || !goal.providerId) throw companyUnavailable('unavailable');
+    if (Object.values(this.registry.state.runs).some((run) => run.goalId === goal.id
+      && ['running', 'unknown'].includes(run.state))) {
+      throw Object.assign(new Error('This goal has an uncertain provider call. Inspect its saved task before starting more work.'),
+        { code: 'UNKNOWN', unknown: true });
+    }
+    const priorGoal = this.registry.state.goals[goal.id];
+    if (priorGoal && (priorGoal.executionMode !== 'company' || priorGoal.workerTopologyVersion !== 2)) {
+      throw companyUnavailable('unavailable');
+    }
+    let capacity;
+    try { capacity = goalCapacity(goal); }
+    catch { throw companyUnavailable('capacity'); }
+    if (priorGoal && !companyIdentityMatches(priorGoal, goal, capacity)
+      && (priorGoal.state === 'done' || Object.values(this.registry.state.runs).some((run) =>
+        run.goalId === goal.id && run.sandbox?.kind === 'fly'))) throw companyUnavailable('unavailable');
+    if (!finite(goal.budgetUsd) || !finite(goal.spentUsd ?? 0)
+      || goal.budgetUsd <= (goal.spentUsd ?? 0)) throw companyUnavailable('budget');
+    aborted(signal);
+    if (this.fleet !== 'auto') throw companyUnavailable('unavailable');
+    if (stage === 'source') {
+      this.companySources.delete(goal.id);
+      this.companyAdmissions.delete(goal.id);
+      const flyAccount = await flyAccountLease(this.providers, signal);
+      aborted(signal);
+      if (!flyAccount) throw companyUnavailable('account');
+      let supplied;
+      try { supplied = await this.sourceProvider({ goalId: goal.id, signal }); }
+      catch (error) {
+        if (signal?.aborted || error?.name === 'AbortError') { aborted(signal); throw error; }
+        throw companyUnavailable('source');
+      }
+      aborted(signal);
+      let checked;
+      try { checked = await this.sourceInspector({ dataDir: this.dataDir, sourceBinding: supplied,
+        flyAccount, signal, deadlineAt: Date.now() + 30_000 }); }
+      catch (error) {
+        aborted(signal);
+        if (error?.name === 'AbortError') throw error;
+        throw companyUnavailable('source');
+      }
+      aborted(signal);
+      if (!checked?.available || !completeSourceBinding(checked.binding)
+        || checked.binding.sourceOrigin !== supplied?.sourceOrigin) {
+        throw companyUnavailable('source');
+      }
+      const lease = Object.freeze({ kind: 'company-source', goalId: goal.id, providerId: goal.providerId,
+        sourceBinding: Object.freeze({ ...checked.binding }), flyAccount: Object.freeze({ ...flyAccount }) });
+      this.companySources.set(goal.id, lease);
+      return lease;
+    }
+    if (stage !== 'ready') throw companyUnavailable('unavailable');
+    const sourceLease = this.companySources.get(goal.id);
+    if (!sourceLease || sourceLease !== priorAdmission || sourceLease.providerId !== goal.providerId) {
+      throw companyUnavailable('source');
+    }
+    this.companyAdmissions.delete(goal.id);
+    const flyAccount = await flyAccountLease(this.providers, signal);
+    aborted(signal);
+    if (!flyAccount || !sameFlyAccount(flyAccount, sourceLease.flyAccount)) throw companyUnavailable('account');
+    let source;
+    try { source = await this.sourceInspector({ dataDir: this.dataDir,
+      sourceBinding: sourceLease.sourceBinding, flyAccount, signal, deadlineAt: Date.now() + 30_000 }); }
+    catch (error) {
+      aborted(signal);
+      if (error?.name === 'AbortError') throw error;
+      throw companyUnavailable('source');
+    }
+    aborted(signal);
+    if (!source?.available || !sameSourceBinding(source.binding, sourceLease.sourceBinding)) {
+      throw companyUnavailable('source');
+    }
+    let route;
+    try { route = await this.providers.fleetRoute?.(goal.providerId, goal.id); }
+    catch (error) {
+      if (signal?.aborted || error?.name === 'AbortError') { aborted(signal); throw error; }
+      throw companyUnavailable('provider');
+    }
+    aborted(signal);
+    if (route?.available !== true || route.providerId !== goal.providerId
+      || goal.providerId === 'private-h100' && route.leaseGoalId !== goal.id) {
+      throw companyUnavailable('provider');
+    }
+    let state;
+    try { state = await this.readyInspector({ dataDir: this.dataDir, providerId: goal.providerId,
+      goalId: goal.id, fleetRoute: route, flyAccount, sourceBinding: sourceLease.sourceBinding,
+      signal, deadlineAt: Date.now() + 30_000 }); }
+    catch (error) {
+      aborted(signal);
+      if (error?.name === 'AbortError') throw error;
+      throw companyUnavailable('provider');
+    }
+    aborted(signal);
+    if (!state.available || typeof route.model?.name !== 'string' || !route.model.name) {
+      throw companyUnavailable('provider');
+    }
+    const verifiedModel = state.modelIdentityVerified === true && /^[\w./:-]{1,160}$/.test(route.model.name)
+      ? Object.freeze({ providerId: goal.providerId, name: route.model.name }) : null;
+    const lease = Object.freeze({ kind: 'company-ready', goalId: goal.id, stamp: companyStamp(goal),
+      sourceBinding: sourceLease.sourceBinding, flyAccount: sourceLease.flyAccount,
+      ...(verifiedModel ? { verifiedModel } : {}),
+      fleetRoute: Object.freeze({ ...route, model: Object.freeze({ ...route.model }) }) });
+    this.companyAdmissions.set(goal.id, lease);
+    return lease;
   }
 
   tasks(goalId) {
@@ -84,6 +228,27 @@ export class SwarmCoordinator {
     }, tasks: this.tasks(goalId) };
   }
 
+  /** Terminal company history requires the completed original Worker hierarchy receipt. */
+  companyProof(goalId, record) {
+    return Object.values(this.registry.state.runs).some((run) => {
+      const sandbox = run.sandbox;
+      const workers = sandbox?.workerCount;
+      return run.goalId === goalId && run.role === 'developer' && run.state === 'completed'
+        && sandbox?.kind === 'fly' && sandbox.verification === 'original-worker-hierarchy-v1'
+        && sandbox.retired === true && sandbox.cleanupConfirmed === true
+        && sandbox.bootCleanupConfirmed === true && sandbox.relayCleanupConfirmed === true
+        && sandbox.relayUsed === (record.requestedWorkers > 1)
+        && Number.isInteger(workers) && workers >= record.requestedWorkers
+        && workers <= (sandbox.relayUsed ? Math.min(12, 2 * record.requestedWorkers) : record.requestedWorkers)
+        && sandbox.initialWorkerCount === record.requestedWorkers
+        && sandbox.localConversationCount === workers * record.requestedAgentsPerWorker
+        && sandbox.conversationCountVerified === workers * record.requestedConversationsPerWorker
+        && Array.isArray(sandbox.teamLeadRuns) && sandbox.teamLeadRuns.length === record.requestedWorkers
+        && sandbox.teamLeadRuns.every((id) => typeof id === 'string' && /^[\w-]{1,100}$/.test(id))
+        && new Set(sandbox.teamLeadRuns).size === record.requestedWorkers;
+    });
+  }
+
   providerAvailable(providerId) {
     const state = this.providers.publicState?.();
     if (!Array.isArray(state)) return;
@@ -93,26 +258,66 @@ export class SwarmCoordinator {
   }
 
   /** A new execution never replays a previously accepted provider call. */
-  async execute({ goal, signal } = {}) {
+  async execute({ goal, signal, admission } = {}) {
     if (!goal || typeof goal.id !== 'string' || !/^[\w-]{1,100}$/.test(goal.id) || !trim(goal.text).trim()) throw new Error('A goal id and text are required.');
     if (goal.text.length > 10_000) throw new Error('This goal is too long for the connected provider. Shorten it to 10,000 characters.');
     if (!finite(goal.budgetUsd) || goal.budgetUsd <= 0 || !finite(goal.spentUsd ?? 0)) throw new Error('A positive goal budget and valid spend are required.');
     if (!goal.providerId) throw new Error('Connect a provider before starting this goal.');
     const { maxWorkers, conversationsPerWorker, agentsPerWorker } = goalCapacity(goal);
+    const company = goal.executionMode === 'company' && goal.workerTopologyVersion === 2;
     if (this.active.has(goal.id)) throw new Error('This goal is already running.');
     const saved = this.registry.state.goals[goal.id];
-    if (saved?.state === 'done') return this.summary(goal.id, saved.result);
     const priorRuns = Object.values(this.registry.state.runs).filter((run) => run.goalId === goal.id);
     if (priorRuns.some((run) => ['running', 'unknown'].includes(run.state))) {
       throw Object.assign(new Error('This goal has an uncertain provider call. Inspect its saved task before starting more work.'), { code: 'UNKNOWN', unknown: true });
     }
-    this.providerAvailable(goal.providerId);
+    if (company && saved && (saved.executionMode !== 'company' || saved.workerTopologyVersion !== 2)
+      || !company && saved?.executionMode === 'company') throw companyUnavailable('unavailable');
+    if (saved?.state === 'done') {
+      if (company && (!companyIdentityMatches(saved, goal, { maxWorkers, conversationsPerWorker, agentsPerWorker })
+        || !this.companyProof(goal.id, saved))) throw companyUnavailable('unavailable');
+      return this.summary(goal.id, saved.result);
+    }
+    if (goal.executionMode !== undefined && !['company', 'local'].includes(goal.executionMode)
+      || goal.executionMode === 'company' && !company
+      || goal.workerTopologyVersion === 2 && !['company', 'local'].includes(goal.executionMode)) {
+      throw companyUnavailable('unavailable');
+    }
+    if (company) {
+      if (saved && !companyIdentityMatches(saved, goal, { maxWorkers, conversationsPerWorker, agentsPerWorker })
+        && priorRuns.some((run) => run.sandbox?.kind === 'fly')) throw companyUnavailable('unavailable');
+      if (!admission || admission !== this.companyAdmissions.get(goal.id)
+        || admission.kind !== 'company-ready' || admission.goalId !== goal.id
+        || admission.stamp !== companyStamp(goal)) throw companyUnavailable('unavailable');
+      this.companyAdmissions.delete(goal.id);
+      this.companySources.delete(goal.id);
+    }
+    try { this.providerAvailable(goal.providerId); }
+    catch (error) { if (company) throw companyUnavailable('provider'); throw error; }
     aborted(signal);
     if (goal.spentUsd >= goal.budgetUsd) throw new Error('The goal budget is exhausted.');
 
     const record = saved ?? this.registry.createGoal({ id: goal.id, text: goal.text, limits: {
       maxWorkers, maxChildren: maxWorkers, maxDepth: 1, maxActiveRuns: 1,
     } });
+    if (!saved) {
+      record.executionMode = company ? 'company' : 'local';
+      record.workerTopologyVersion = goal.workerTopologyVersion ?? 1;
+      if (company) {
+        record.companyProviderId = goal.providerId;
+        record.requestedWorkers = maxWorkers;
+        record.requestedConversationsPerWorker = conversationsPerWorker;
+        record.requestedAgentsPerWorker = agentsPerWorker;
+      }
+      this.registry.save();
+    }
+    if (saved && company && !companyIdentityMatches(record, goal, { maxWorkers, conversationsPerWorker, agentsPerWorker })) {
+      record.companyProviderId = goal.providerId;
+      record.requestedWorkers = maxWorkers;
+      record.requestedConversationsPerWorker = conversationsPerWorker;
+      record.requestedAgentsPerWorker = agentsPerWorker;
+      this.registry.save();
+    }
     if (saved && (record.limits.maxWorkers !== maxWorkers || record.limits.maxChildren !== maxWorkers)) {
       record.limits.maxWorkers = maxWorkers; record.limits.maxChildren = maxWorkers; this.registry.save();
     }
@@ -160,25 +365,25 @@ export class SwarmCoordinator {
       try {
         // Stream usage is deliberately ignored here. Only the terminal receipt is counted.
         let result;
-        if (role === 'developer' && this.fleet === 'auto' && !fleetUsed) {
-          const route = typeof this.providers.fleetRoute === 'function'
-            ? await this.providers.fleetRoute(goal.providerId, goal.id) : { available: false };
+        if (role === 'developer' && company) {
+          if (fleetUsed) throw companyUnavailable('unavailable');
+          const route = admission.fleetRoute;
           if (route?.available === true && route.providerId === goal.providerId) {
             const remoteGoal = { ...goal, maxWorkers, agentsPerWorker,
               ...(conversationsPerWorker <= 10 ? { conversationsPerWorker } : {}) };
             const remote = await this.fleetRunner({ goal: remoteGoal, task: `ASSIGNMENT:\n${task}\n\nWork in your isolated sandbox. Report what was actually run and checked, plus paths and limits.`,
               dataDir: this.dataDir, signal, maxUsd: remaining, fleetRoute: route,
-              flyAccount: await flyAccountLease(this.providers, signal),
-              sourceBinding: this.sourceBinding,
+              flyAccount: admission.flyAccount,
+              sourceBinding: admission.sourceBinding,
               reservationId: `${run.id}-fly`,
               reserveCloud: (reservation) => this.emit({ type: 'reservation', goalId: goal.id, reservation }),
+              onCompany: ({ verifiedWorkers, verifiedChildConversations }) => this.emit({ type: 'company',
+                goalId: goal.id, verifiedWorkers, verifiedChildConversations }),
               onStatus: (text) => this.emit({ type: 'task', goalId: goal.id,
                 task: { id: run.id, role, status: 'running', phase: trim(text, 200) } }) });
-            if (remote.available) { result = remote; fleetUsed = true; }
-          } else {
-            this.emit({ type: 'task', goalId: goal.id,
-              task: { id: run.id, role, status: 'running', phase: 'The selected provider has no qualified Fly route; continuing locally.' } });
-          }
+            if (remote?.available !== true) throw companyUnavailable('unavailable');
+            result = remote; fleetUsed = true;
+          } else throw companyUnavailable('provider');
         }
         if (!result) {
           if (goal.providerId === 'private-h100') {
@@ -240,6 +445,7 @@ export class SwarmCoordinator {
     };
 
     const finish = (answer, completed = true) => {
+      if (company && !this.companyProof(goal.id, this.registry.goal(goal.id))) throw companyUnavailable('unavailable');
       this.registry.finishGoal(goal.id, trim(answer, 200_000));
       if (!completed) { this.registry.goal(goal.id).completed = false; this.registry.save(); }
       return this.summary(goal.id, this.registry.goal(goal.id).result);
@@ -256,8 +462,8 @@ export class SwarmCoordinator {
         }
         if (last.task === 'Plan the goal') {
           const plan = parseObject(last.output);
-          if (plan?.done === true) return finish(plan.response || last.output);
-          const assignment = trim(plan?.tasks?.[0]?.task || goal.text, 2000);
+          if (plan?.done === true && !company) return finish(plan.response || last.output);
+          const assignment = trim(company && plan?.done === true ? goal.text : plan?.tasks?.[0]?.task || goal.text, 2000);
           await call('developer', assignment, `You are a developer delegated by Todd. Work on this bounded assignment and report concrete output, evidence, limits, and remaining work.\n\nGOAL:\n${goal.text}\n\nASSIGNMENT:\n${assignment}`);
           continue;
         }
@@ -282,7 +488,7 @@ export class SwarmCoordinator {
           const answer = critique?.response || last.output;
           if (critique?.done === true) return finish(answer);
           if (calls >= MAX_CALLS - 1) return finish(answer, false);
-          const assignment = trim(critique.nextTask || 'Address the reviewer findings.', 2000);
+          const assignment = trim(critique?.nextTask || 'Address the reviewer findings.', 2000);
           await call('developer', assignment, `You are Todd's developer. Address this corrective task. Report concrete output, evidence, limits, and remaining work.\n\nGOAL:\n${goal.text}\n\nTASK:\n${assignment}\n\nLEAD CRITIQUE:\n${trim(last.output, 1200)}`);
           continue;
         }

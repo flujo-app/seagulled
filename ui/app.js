@@ -5,7 +5,7 @@ import {MoviePlayer} from './movie-player.mjs';
 import movieManifest from './movie-manifest.json' with {type:'json'};
 
 const $=id=>document.getElementById(id);
-const elements=Object.fromEntries(['movie','frame','movie-video','movie-status','narration-status','action','action-icon','voice-level','advanced-toggle','live-status','todd-audio','setup-dialog','advanced-dialog','fly-state','modal-state','fly-connect','modal-connect','inference-state','provider-setup','setup-error','setup-continue','budget-amount','budget-currency','budget-note','workers','workers-value','conversations','conversations-value','private-h100','private-h100-status','text-fallback','fallback-goal','fallback-go','pause-all','resume-all','stop-all','work-details','goal-details','provider-details','spend-details','provider-connect-details','provider-choice','provider-guidance','provider-model-row','provider-model','provider-key-row','provider-key','provider-storage-note','provider-worker-row','provider-worker-consent','provider-connect','provider-disconnect','advanced-error'].map(id=>[id,$(id)]));
+const elements=Object.fromEntries(['movie','frame','movie-video','movie-status','narration-status','action','action-icon','voice-level','advanced-toggle','live-status','todd-audio','setup-dialog','advanced-dialog','fly-state','modal-state','fly-connect','modal-connect','inference-state','provider-setup','setup-error','setup-continue','budget-amount','budget-currency','budget-note','goal-provider','goal-provider-note','workers','workers-value','conversations','conversations-value','private-h100','private-h100-status','text-fallback','fallback-goal','fallback-go','pause-all','resume-all','stop-all','work-details','goal-details','provider-details','spend-details','provider-connect-details','provider-choice','provider-guidance','provider-model-row','provider-model','provider-key-row','provider-key','provider-storage-note','provider-worker-row','provider-worker-consent','provider-connect','provider-disconnect','advanced-error'].map(id=>[id,$(id)]));
 const allowedCurrencies=new Set(['USD','EUR','GBP','COP','CAD','AUD']);
 const providerModels={openai:['gpt-6.1-sol','gpt-6-luna','gpt-6-astra'],anthropic:['claude-sonnet-5-5']};
 const supportedProviders=new Set(['codex','claude','openai','anthropic']);
@@ -121,7 +121,33 @@ function appendGoalEditor(card,goal){
   });details.append(form);details.addEventListener('toggle',()=>{if(!details.open&&details.isConnected)renderDetails();});card.append(details);
 }
 function providerState(id){return state.providers?.find(item=>item.id===id)||null;}
-function ordinaryInference(){return state.providers?.find(item=>item.connected===true&&item.available===true&&item.id!=='private-h100')||null;}
+function eligibleProviders(){return state.providers?.filter(item=>supportedProviders.has(item.id)&&item.connected===true&&item.available===true)||[];}
+function ordinaryInference(){return eligibleProviders()[0]||null;}
+function renderGoalProvider(){
+  const select=elements['goal-provider'],previous=select.value,eligible=eligibleProviders();
+  select.replaceChildren();const empty=node('option','Choose a connected provider');empty.value='';select.append(empty);
+  for(const provider of eligible){const option=node('option',provider.name||provider.id);option.value=provider.id;select.append(option);}
+  select.value=eligible.some(provider=>provider.id===previous)?previous
+    :eligible.some(provider=>provider.id===state.preferredProviderId)?state.preferredProviderId
+    :eligible.length===1?eligible[0].id:'';
+  select.disabled=elements['private-h100'].checked||eligible.length===0;
+  elements['goal-provider-note'].textContent=elements['private-h100'].checked?'Private H100 is selected for this goal; no ordinary provider is sent.'
+    :select.value?`${eligible.find(provider=>provider.id===select.value)?.name||select.value} is connected locally. Company readiness is checked separately.`
+    :'Choose a connected provider. The goal can be saved while company readiness is checked.';
+}
+function companyStatus(goal){
+  const execution=goal.execution;if(execution?.requested!=='company')return null;
+  if(terminal.has(goal.status))return `Company goal ${goal.status}.`;
+  if(execution.readiness==='blocked')return `Company waiting: ${typeof execution.reason==='string'&&execution.reason.trim()?execution.reason:'A required worker route is unavailable.'}`;
+  if(execution.readiness==='working'){
+    const counts=[];
+    if(Number.isInteger(execution.verifiedWorkers)&&execution.verifiedWorkers>0)counts.push(`${execution.verifiedWorkers} completed worker run${execution.verifiedWorkers===1?'':'s'} verified`);
+    if(Number.isInteger(execution.verifiedChildConversations)&&execution.verifiedChildConversations>0)counts.push(`${execution.verifiedChildConversations} completed child conversation${execution.verifiedChildConversations===1?'':'s'} verified`);
+    return `Company is working.${counts.length?` ${counts.join(' · ')}.`:''}`;
+  }
+  if(execution.readiness==='ready')return 'Company is ready for admission. Worker count is not verified yet.';
+  return 'Company readiness is being checked. Worker count is not verified yet.';
+}
 const quoteMaxAgeMs=48*60*60*1000;
 function validSpendQuote(quote,currency){
   if(currency==='USD'||quote?.currency!==currency||quote?.quoteSource!=='https://www.exchangerate-api.com'||!Number.isFinite(quote.usdPerUnit)||quote.usdPerUnit<=0)return false;
@@ -179,6 +205,7 @@ function renderProviderForm(){
   elements['provider-disconnect'].hidden=!connected;elements['provider-disconnect'].disabled=providerBusy;
 }
 function renderDetails(){
+  renderGoalProvider();
   const privateRoute=state.providers?.find(provider=>provider.id==='private-h100');
   elements['private-h100-status'].textContent=elements['private-h100'].checked
     ? privateRoute?.ready===true&&privateRoute?.connected===true&&privateRoute?.available===true
@@ -187,12 +214,13 @@ function renderDetails(){
     :'Off. Enabling it at Go may create paid H100 resources and permit isolated Workers to use the newly owned bearer.';
   const providers=elements['provider-details'];providers.replaceChildren();
   const ready=state.providers?.filter(provider=>provider.available&&provider.connected&&(provider.id!=='private-h100'||elements['private-h100'].checked))||[];
-  providers.append(node('p',ready.length?`${ready.map(provider=>provider.name||provider.id).join(', ')} available. First execution still needs verification.`:'No inference provider is ready. A goal may remain queued.'));
+  providers.append(node('p',ready.length?`${ready.map(provider=>provider.name||provider.id).join(', ')} connected locally. Company readiness is checked separately.`:'No inference provider is ready. A goal may remain queued.'));
   for(const provider of state.providers||[]){if(provider.id!=='modal'&&provider.id!=='private-h100'&&!provider.connected)continue;providers.append(node('p',`${provider.name||provider.id}: ${provider.detail||'Status unknown.'}`));}
   renderSpend();
   const host=elements['goal-details'];const editing=host.querySelector('.goal-editor[open]');
   if(!editing){host.replaceChildren();for(const goal of [...(state.goals||[])].reverse().slice(0,12)){
     const card=node('section',undefined,'goal-detail');card.append(node('strong',goal.text||'Goal'),node('small',`${goal.status||'queued'}${goal.privateH100===true?' · private H100 + Qwen requested':''} · ${budgetLine(goal)} · ${Number(goal.spentUsd||0).toFixed(2)} USD tracked${Number(goal.pendingUsd)>0?` · ${Number(goal.pendingUsd).toFixed(2)} USD pending`:''}`));
+    const executionStatus=companyStatus(goal);if(executionStatus)card.append(node('p',executionStatus,'company-status'));
     if(goal.budget?.quoteSource==='https://www.exchangerate-api.com'&&goal.budget?.quoteAsOf){const source=node('small',`FX quote ${new Date(goal.budget.quoteAsOf).toLocaleString()} · Source: `);const link=node('a','ExchangeRate-API');link.href=goal.budget.quoteSource;link.target='_blank';link.rel='noopener noreferrer';source.append(link);card.append(source);}
     if(!terminal.has(goal.status))appendGoalEditor(card,goal);
     if(goal.error)card.append(node('p',goal.error));
@@ -226,7 +254,7 @@ function renderAuth(){for(const id of ['fly','modal']){const item=auth[id];$(`${
   const provider=ordinaryInference();
   elements['inference-state'].textContent=!authReady()?'Finish Fly and Modal sign-in first.'
     : elements['private-h100'].checked?'Private H100 is requested; inference is checked at Go.'
-    : provider?`${provider.name||provider.id} is connected; first execution verifies inference.`
+    : provider?`${provider.name||provider.id} is connected locally; company readiness is checked separately.`
     :'Connect a supported inference provider, or continue with a queued goal.';
   elements['setup-continue'].disabled=!authReady()||authBusy;
   elements['setup-continue'].textContent=authReady()&&!provider&&!elements['private-h100'].checked?'Continue with queued goal':'Continue';
@@ -289,11 +317,18 @@ async function beginListening(){if(goalSubmitting||mode==='listening'||voiceWait
     if(epoch!==inputEpoch)return;
     const sentence=oneSentence(result?.text);
     if(!sentence){setMode('ready');openFallback('Please give Todd one sentence.');if(typeof result?.text==='string')elements['fallback-goal'].value=result.text.slice(0,4000);return;}
-    pendingGoal=sentence;setMode('go');announce('Goal understood. Starting work.');
+    pendingGoal=sentence;setMode('go');announce('Goal understood. Saving it for the company.');
     clearTimeout(goTimer);goTimer=setTimeout(()=>void submitGoal(),350);
   }).catch(error=>{if(epoch!==inputEpoch||errorMessage(error)==='Listening canceled.')return;setMode('ready');openFallback(errorMessage(error));}).finally(()=>{if(epoch===inputEpoch)capturePending=false;});
 }
-function goalOptions(){if(!elements['budget-amount'].value.trim())throw new Error('Enter a budget amount.');return budgetOptions({amount:elements['budget-amount'].value,currency:elements['budget-currency'].value,workers:elements.workers.value,conversations:elements.conversations.value,privateH100:elements['private-h100'].checked});}
+function goalOptions(){
+  if(!elements['budget-amount'].value.trim())throw new Error('Enter a budget amount.');
+  const options=budgetOptions({amount:elements['budget-amount'].value,currency:elements['budget-currency'].value,workers:elements.workers.value,conversations:elements.conversations.value,privateH100:elements['private-h100'].checked});
+  options.executionMode='company';
+  const providerId=elements['goal-provider'].value;
+  if(!options.privateH100&&eligibleProviders().some(provider=>provider.id===providerId))options.providerId=providerId;
+  return options;
+}
 async function submitGoal(){if(goalSubmitting||!pendingGoal)return;if(!authReady()){showSetup();return;}
   clearTimeout(goTimer);const text=pendingGoal,epoch=inputEpoch,requestedCurrency=elements['budget-currency'].value;
   goalSubmitting=true;elements['fallback-go'].disabled=true;setMode('submitting');
@@ -308,7 +343,7 @@ async function submitGoal(){if(goalSubmitting||!pendingGoal)return;if(!authReady
     if(pendingGoal===text)pendingGoal=null;
     if(elements['fallback-goal'].value.trim()===text)elements['fallback-goal'].value='';
     try{await refresh();elements['advanced-dialog'].close();}catch{showError('Goal was accepted, but its latest status could not load.');}
-    announce('Todd has your goal.');setMode('ready');
+    announce('Todd saved your goal.');setMode('ready');
   }catch(error){setMode('go');if(goalPostStarted||epoch===inputEpoch)showError(errorMessage(error));}
   finally{goalPostStarted=false;goalSubmitting=false;elements['fallback-go'].disabled=false;}
 }
@@ -373,6 +408,7 @@ elements['setup-continue'].addEventListener('click',()=>{if(!authReady())return;
 elements['provider-setup'].addEventListener('click',()=>{if(!authReady())return;providerSetupPending=true;elements['setup-dialog'].close();renderDetails();if(!elements['advanced-dialog'].open)elements['advanced-dialog'].showModal();elements['provider-connect-details'].open=true;elements['provider-choice'].focus();void refreshProviders();});
 for(const id of ['fly','modal'])$(`${id}-connect`).addEventListener('click',()=>void connectAccount(id));
 elements['provider-choice'].addEventListener('change',renderProviderForm);
+elements['goal-provider'].addEventListener('change',renderGoalProvider);
 elements['provider-key'].addEventListener('input',renderProviderForm);
 elements['provider-worker-consent'].addEventListener('change',renderProviderForm);
 elements['provider-connect'].addEventListener('click',()=>void connectProvider());

@@ -33,7 +33,7 @@ test('goal budgets and capacity persist, and invalid limits are rejected before 
   const dataDir = folder(t); let discoveries = 0;
   const providers = { discover: async () => { discoveries++; return []; }, publicState: () => [] };
   const budgets = createBudgets({ dataDir, clock, fetchImpl: async () => new Response(JSON.stringify(quote())) });
-  const runtime = createRuntime({ dataDir, providers, budgets, swarm: {} });
+  const runtime = createRuntime({ executionMode: 'local', dataDir, providers, budgets, swarm: {} });
   t.after(() => runtime.close());
   for (const options of [{ maxWorkers: 7 }, { agentsPerWorker: 11 }, { maxWorkers: '3' }, { agentsPerWorker: 0 }]) await assert.rejects(runtime.chat('Build a planner.', options));
   assert.equal(discoveries, 0); assert.equal(runtime.snapshot().goals.length, 0);
@@ -41,7 +41,7 @@ test('goal budgets and capacity persist, and invalid limits are rejected before 
   assert.equal(goal.budgetUsd, 5); assert.equal(goal.maxWorkers, 2); assert.equal(goal.agentsPerWorker, 4);
   await runtime.updateGoal(goal.id, { maxWorkers: 1, budget: { amount: 9, currency: 'EUR' } });
   await runtime.close();
-  const reopened = createRuntime({ dataDir, providers, budgets, swarm: {} });
+  const reopened = createRuntime({ executionMode: 'local', dataDir, providers, budgets, swarm: {} });
   t.after(() => reopened.close());
   const saved = reopened.snapshot().goals[0];
   assert.equal(saved.maxWorkers, 1); assert.equal(saved.agentsPerWorker, 4); assert.equal(saved.budget.currency, 'EUR'); assert.equal(saved.budgetUsd, 10);
@@ -63,7 +63,7 @@ test('currency edits fence the current run before waiting for a quote and never 
     if (signal.aborted) throw Object.assign(new Error('Paused at receipt.'), { name: 'AbortError' });
     secondDispatches++; return { text: 'Unexpected second dispatch.' };
   } };
-  const runtime = createRuntime({ dataDir, providers, budgets, swarm });
+  const runtime = createRuntime({ executionMode: 'local', dataDir, providers, budgets, swarm });
   t.after(async () => { await runtime.close(); rmSync(dataDir, { force: true, recursive: true }); });
   const goal = await runtime.chat('Build safely.');
   const editing = runtime.updateGoal(goal.id, { budget: { amount: 20000, currency: 'COP' } });

@@ -31,7 +31,7 @@ test('fullscreen stage keeps text in dialogs and sends one bounded goal after ac
     if(route==='/api/events'){res.writeHead(200,{'Content-Type':'text/event-stream'});res.write(': ready\n\n');streams.add(res);req.on('close',()=>streams.delete(res));return;}
     if(route==='/api/state'){send(200,state);return;}
     if(route==='/api/budget/default'){const currency=new URL(req.url,'http://localhost').searchParams.get('currency');send(200,currency==='COP'?{amount:200000,currency:'COP',allowanceUsd:50,usdPerUnit:0.00025,quoteAsOf:fxQuoteAsOf,quoteSource:'https://www.exchangerate-api.com'}:{amount:50,currency:'USD',allowanceUsd:50,usdPerUnit:1,quoteAsOf:null,quoteSource:null});return;}
-    if(route==='/api/test/state'&&req.method==='POST'){const next=await readJson(req);if(next.spend)state.spend=next.spend;if(next.quoteAsOf)fxQuoteAsOf=next.quoteAsOf;if(next.voice){voiceTranscribe=next.voice.transcribe;voiceReady=next.voice.ready;}if(next.todd)state.conversation.push({id:`t${state.conversation.length}`,role:'todd',text:next.todd,at:new Date().toISOString()});publish();send(200,{ok:true});return;}
+    if(route==='/api/test/state'&&req.method==='POST'){const next=await readJson(req);if(next.spend)state.spend=next.spend;if(next.quoteAsOf)fxQuoteAsOf=next.quoteAsOf;if(next.execution&&state.goals[0])state.goals[0].execution=next.execution;if(next.voice){voiceTranscribe=next.voice.transcribe;voiceReady=next.voice.ready;}if(next.todd)state.conversation.push({id:`t${state.conversation.length}`,role:'todd',text:next.todd,at:new Date().toISOString()});publish();send(200,{ok:true});return;}
     if(route==='/api/test/speech-state'){send(200,{requests:speechRequests,voiceCapabilityCalls});return;}
     if(route==='/api/test/release-speech'&&req.method==='POST'){const held=heldSpeech.shift();if(!held){send(409,{error:'No speech request is pending.'});return;}held.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify({mimeType:'audio/wav',dataBase64:speechWav}));send(200,{released:true});return;}
     if(route==='/api/auth/state'){send(200,auth);return;}
@@ -45,7 +45,7 @@ test('fullscreen stage keeps text in dialogs and sends one bounded goal after ac
     if(route.startsWith('/api/providers/')&&req.method==='DELETE'){const id=route.split('/').at(-1),item=state.providers.find(provider=>provider.id===id);item.connected=false;item.available=false;item.fleetEligible=false;publish();send(200,item);return;}
     if(route==='/api/chat'){
       goalCall=await readJson(req);state.conversation.push({id:'u1',role:'user',text:goalCall.text,at:new Date().toISOString()});
-      state.goals.push({id:'g1',text:goalCall.text,status:'running',privateH100:goalCall.privateH100,spentUsd:0,budgetUsd:5,budget:{amount:25000,currency:'COP',allowanceUsd:5,usdPerUnit:0.0002,quoteAsOf:'2026-10-05T00:00:00.000Z',quoteSource:'https://www.exchangerate-api.com'},tasks:[{id:'t1',role:'developer',status:'running',text:'Building the prototype'}]});
+      state.goals.push({id:'g1',text:goalCall.text,status:'running',privateH100:goalCall.privateH100,execution:{requested:'company',readiness:'working',verifiedWorkers:2,verifiedChildConversations:3},spentUsd:0,budgetUsd:5,budget:{amount:25000,currency:'COP',allowanceUsd:5,usdPerUnit:0.0002,quoteAsOf:'2026-10-05T00:00:00.000Z',quoteSource:'https://www.exchangerate-api.com'},tasks:[{id:'t1',role:'developer',status:'running',text:'Building the prototype'}]});
       state.swarm.status='working';publish();send(202,state.goals[0]);return;
     }
     if(route==='/api/goals/g1'&&req.method==='PATCH'){editCall=await readJson(req);Object.assign(state.goals[0],editCall);publish();send(200,state.goals[0]);return;}
@@ -97,6 +97,8 @@ test('fullscreen stage keeps text in dialogs and sends one bounded goal after ac
   await page.getByRole('button',{name:'Connect account'}).click();
   await page.getByText('Codex is connected locally; remote five-by-five staffing remains unverified.').waitFor();
   assert.deepEqual(providerCalls[2],{id:'codex',method:'subscription'});
+  await page.getByLabel('Goal provider').selectOption('codex');
+  await page.getByText('Codex is connected locally. Company readiness is checked separately.').waitFor();
   await page.locator('#budget-amount').fill('321000');
   await page.request.post(`http://127.0.0.1:${server.address().port}/api/test/state`,{headers:{Authorization:`Bearer ${token}`},data:{spend:{reportedUsd:1.25,estimatedUsd:0.5,pendingUsd:0.75}}});
   await page.waitForFunction(()=>document.getElementById('spend-details').textContent.includes('Estimated COP equivalents: 5.000 COP of provider-reported USD · 2.000 COP of estimated USD · 3.000 COP of pending USD.'));
@@ -120,6 +122,7 @@ test('fullscreen stage keeps text in dialogs and sends one bounded goal after ac
   await page.getByLabel('Workers 5').fill('4');
   await page.getByLabel('Conversations per worker 5').fill('2');
   await page.getByLabel('Private H100 + Qwen').check();
+  assert.equal(await page.getByLabel('Goal provider').isDisabled(),true);
   await page.getByText('At Go, this may create paid H100 resources and permit isolated Workers to use the newly owned bearer; this route is not verified yet.').waitFor();
   await page.getByLabel('Voice is unavailable. Enter one sentence here.').fill('Build the game. Then ship it.');
   await page.getByRole('button',{name:'Go',exact:true}).click();
@@ -128,14 +131,19 @@ test('fullscreen stage keeps text in dialogs and sends one bounded goal after ac
   await page.getByLabel('Voice is unavailable. Enter one sentence here.').fill('Build the game.');
   await page.getByRole('button',{name:'Go',exact:true}).click();
   await page.locator('#movie[data-scene="work"]').waitFor();
-  assert.deepEqual(goalCall,{text:'Build the game.',budget:{amount:25000,currency:'COP'},maxWorkers:4,conversationsPerWorker:2,privateH100:true});
+  assert.deepEqual(goalCall,{text:'Build the game.',budget:{amount:25000,currency:'COP'},maxWorkers:4,conversationsPerWorker:2,privateH100:true,executionMode:'company'});
   await page.getByRole('button',{name:'Open advanced controls'}).click();
   await page.getByText('No approved Todd movie clips are installed.',{exact:false}).waitFor();
   await page.getByText('Narration: Michael (preset) local preset.').waitFor();
   await page.getByText('Provider and spend').click();
-  await page.getByText('Codex, OpenAI API, Anthropic API available. First execution still needs verification.').waitFor();
+  await page.getByText('Codex, OpenAI API, Anthropic API connected locally. Company readiness is checked separately.').waitFor();
   await page.getByText('1.25 USD provider-reported · 0.50 USD estimated · 0.75 USD pending.', {exact:false}).waitFor();
   await page.getByText('Work details').click();
+  await page.getByText('Company is working. 2 completed worker runs verified · 3 completed child conversations verified.').waitFor();
+  await page.request.post(`http://127.0.0.1:${server.address().port}/api/test/state`,{headers:{Authorization:`Bearer ${token}`},data:{execution:{requested:'company',readiness:'blocked',reason:'Native worker gateway is unavailable.'}}});
+  await page.getByText('Company waiting: Native worker gateway is unavailable.').waitFor();
+  await page.request.post(`http://127.0.0.1:${server.address().port}/api/test/state`,{headers:{Authorization:`Bearer ${token}`},data:{execution:{requested:'company',readiness:'working',verifiedWorkers:0,verifiedChildConversations:0}}});
+  await page.getByText('Company is working.',{exact:true}).waitFor();
   assert.equal(await page.getByRole('link',{name:'ExchangeRate-API'}).getAttribute('href'),'https://www.exchangerate-api.com');
   await page.getByText('Edit goal').click();
   await page.locator('.goal-edit-form textarea').fill('Build the improved game.');
