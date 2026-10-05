@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { mkdtempSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fleetStatus, runFleetLeaf } from '../src/swarm/fleet.mjs';
@@ -47,6 +48,15 @@ test('disabled model preflight makes no boot workspace or Fly intent', async () 
     assert.equal(result.available, false);
     assert.equal(existsSync(path.join(root, 'fleet', 'fictional-goal')), false);
     assert.deepEqual(requests, ['/api/workspaces', '/v1/models', '/api/workspaces', '/v1/models']);
+    const fingerprint = createHash('sha256').update(origin).digest('hex').slice(0, 24);
+    const holds = path.join(root, 'fleet'); mkdirSync(holds);
+    writeFileSync(path.join(holds, `source-admission-${fingerprint}.json`), JSON.stringify({ state: 'held' }));
+    const held = await fleetStatus({ dataDir: root });
+    assert.equal(held.available, false);
+    assert.match(held.detail, /held after a confirmed failure/);
+    assert.equal((await runFleetLeaf({ goal: { id: 'another-goal', text: 'fictional' }, task: 'fictional',
+      dataDir: root, maxUsd: 2 })).available, false);
+    assert.equal(requests.length, 4, 'a held source is not re-probed or mutated');
   } finally {
     if (previous === undefined) delete process.env.SEAGULLED_FLEET_PROFILE;
     else process.env.SEAGULLED_FLEET_PROFILE = previous;

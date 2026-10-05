@@ -16,6 +16,8 @@ The isolated Fly path creates its own controller, intent journal, boot workspace
 
 The initial actual Fly attempt provisioned a worker and submitted a team run, but its configured Modal workspace was disabled (HTTP 404). It produced no successful model answer. The exact worker app and isolated boot workspace were removed; its original failed run is retained privately. Preflight now checks availability before provisioning. This failed run is separate from deterministic fixtures and native-provider acceptance.
 
+A later isolated workspace creation returned HTTP 500 before any Fly provisioning or model submission. Exact-name readback found no surviving workspace. A durable source admission hold prevents new goals from repeating that failed mutation and lets the automatic route use native providers. The FLUJO owner is investigating the source failure; a successful cloud model run remains unqualified.
+
 Native subscription usage is counted separately from dollar billing. Published API token rates produce labeled estimates, not invoices. Unknown cloud cost reserves the remaining logical allowance and holds further metered work; subscription review may inspect existing results. Dollar controls are admission and output limits, not a qualified all-in Fly/Modal invoice guarantee. Pending allowance cannot be erased by reducing a budget.
 
 Claude sign-in was discovered, but this host's native subscription execution was denied. The separate Anthropic key route is implemented and fixture tested. Antigravity is detected when installed; unattended execution was not established and is not offered as working. Modal inference setup accepts an inference Proxy Token; an ordinary account token is insufficient.

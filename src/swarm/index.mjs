@@ -48,7 +48,7 @@ export class SwarmCoordinator {
   }
 
   emit(event) { this.onEvent(event); }
-  fleetStatus() { return fleetStatus(); }
+  fleetStatus() { return fleetStatus({ dataDir: this.dataDir }); }
 
   tasks(goalId) {
     return Object.values(this.registry.state.runs).filter((run) => run.goalId === goalId).map((run) => ({

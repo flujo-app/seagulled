@@ -11,6 +11,16 @@ const legacyProfilePath = () => path.join(process.env.SWARM_TEAMS_HOME || path.j
 const profilePath = () => process.env.SEAGULLED_FLEET_PROFILE || legacyProfilePath();
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const unknown = (message) => Object.assign(new Error(message), { code: 'UNKNOWN', unknown: true });
+const sourceFingerprint = (origin) => createHash('sha256').update(new URL(origin).origin.toLowerCase()).digest('hex').slice(0, 24);
+const holdPath = (dataDir, origin) => path.join(dataDir, 'fleet', `source-admission-${sourceFingerprint(origin)}.json`);
+const sourceHold = (dataDir, origin) => dataDir && existsSync(holdPath(dataDir, origin));
+function recordSourceHold(dataDir, origin, workspace, reason) {
+  const target = holdPath(dataDir, origin);
+  mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+  if (existsSync(target)) return;
+  writeFileSync(target, JSON.stringify({ version: 1, sourceFingerprint: sourceFingerprint(origin), workspace,
+    reason, observedAt: new Date().toISOString(), state: 'held' }), { flag: 'wx', mode: 0o600 });
+}
 
 async function modelProbe(model) {
   try {
@@ -29,7 +39,7 @@ async function modelProbe(model) {
 }
 
 /** Read-only discovery. No existing controller, registry, relay or worker is adopted. */
-async function inspectFleet() {
+async function inspectFleet({ dataDir } = {}) {
   const location = profilePath();
   if (!existsSync(location)) return { available: false, detail: 'No local FLUJO fleet profile was found.' };
   let config;
@@ -48,6 +58,9 @@ async function inspectFleet() {
     || !existsSync(config.provisioner.flujoCloudPath) || !config.model?.name || !config.model?.baseUrl || !config.model?.apiKey
     || !config.supervisor?.origin) {
     return { available: false, detail: 'The local FLUJO fleet profile lacks a compatible Fly provisioner and model.' };
+  }
+  if (sourceHold(dataDir, config.supervisor.origin)) {
+    return { available: false, detail: 'Local FLUJO workspace creation is held after a confirmed failure. Native provider work remains available.' };
   }
   try {
     const origin = new URL(config.supervisor.origin);
@@ -76,15 +89,15 @@ async function inspectFleet() {
   return { available: false, detail: `The configured FLUJO model endpoint is unavailable (${original.detail}); no working API fallback was found.` };
 }
 
-export async function fleetStatus() {
-  const { config, ...publicState } = await inspectFleet();
+export async function fleetStatus({ dataDir } = {}) {
+  const { config, ...publicState } = await inspectFleet({ dataDir });
   return publicState;
 }
 
 /** One owned Fly leaf, with no existing fleet writer or Machine adoption. */
 export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, onStatus = () => undefined }) {
   if (!goal || typeof goal.id !== 'string' || !/^[\w-]{1,100}$/.test(goal.id)) throw new Error('A safe goal id is required for isolated fleet work.');
-  const discovered = await inspectFleet();
+  const discovered = await inspectFleet({ dataDir });
   if (!discovered.available) return { available: false, detail: discovered.detail };
   const config = discovered.config;
   const bootWorkspace = `seagulled-${goal.id.slice(-12)}-boot`;
@@ -112,6 +125,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, onStat
   let result;
   let artifacts = [];
   let delivered;
+  let workspaceAbsent = false;
   try {
     onStatus('Preparing an isolated FLUJO boot workspace.');
     bootCreated = true; // A partial install is still our workspace and needs cleanup.
@@ -169,9 +183,21 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, onStat
         cleanupConfirmed = !retirement.cleanupUnconfirmed?.length;
       } catch { /* Preserve the original registry and uncertain cleanup. */ }
     }
-    record({ state: remoteAccepted ? result?.state === 'failed' && cleanupConfirmed ? 'run-failed' : 'unknown' : 'failed-before-dispatch',
+    if (!remoteAccepted && /^POST \/api\/workspaces failed \(HTTP 500\)/.test(String(error.message))) {
+      try {
+        workspaceAbsent = !(await boot.workspaces()).includes(bootWorkspace);
+      } catch { workspaceAbsent = false; }
+      if (workspaceAbsent) {
+        bootCreated = false;
+        bootCleanupConfirmed = true; // GET confirmed no workspace remains; setup may have rolled back a partial directory.
+        recordSourceHold(dataDir, config.supervisor.origin, bootWorkspace, 'Workspace creation returned HTTP 500; exact-name readback found no workspace.');
+      }
+    }
+    record({ state: workspaceAbsent ? 'preflight-not-applied'
+      : remoteAccepted ? result?.state === 'failed' && cleanupConfirmed ? 'run-failed' : 'unknown' : 'failed-before-dispatch',
       flyCleanupConfirmed: cleanupConfirmed,
       error: String(error.message).slice(0, 500) });
+    if (workspaceAbsent) return { available: false, detail: 'Local FLUJO could not create an isolated workspace. Native provider work remains available.' };
     if (remoteAccepted && !cleanupConfirmed) throw Object.assign(unknown(`${error.message} Fly cleanup is unconfirmed; do not submit replacement work.`), { usage });
     if (remoteAccepted && result?.state === 'failed') {
       throw Object.assign(new Error('The isolated Fly team failed. Its worker was retired; inspect the saved run for the provider error.'), { outcome: 'failed', usage });
