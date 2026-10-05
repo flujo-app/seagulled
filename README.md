@@ -1,6 +1,7 @@
 # seagulled
+<img width="1024" height="559" alt="image" src="https://github.com/user-attachments/assets/06f52b10-7bd4-40a1-a5a6-7a0beaacb651" />
 
-Talk to Todd. He delegates your goal to a team, checks what they bring back, and occasionally tears the plan apart.
+Talk to Todd. He delegates your goal to a team, checks what they bring back, and occasionally comes in and shits on everything.
 
 Seagulled is an Electron desktop app and CLI for the FLUJO ecosystem. The conversation is the front door. Goals, budgets and work details stay within reach; infrastructure stays behind the scenes.
 
