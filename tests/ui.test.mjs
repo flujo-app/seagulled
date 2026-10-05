@@ -9,7 +9,7 @@ import {chromium} from '@playwright/test';
 const root=join(dirname(fileURLToPath(import.meta.url)),'..');
 const ui=join(root,'ui');
 const token='ui-test-token';
-const state={version:1,conversation:[],goals:[],providers:[{id:'claude',name:'Claude',available:true,connected:false,methods:['subscription'],detail:'Native sign-in found'},{id:'openai',name:'OpenAI API',available:false,connected:false,methods:['key'],detail:'Requires an API key'},{id:'modal',name:'Modal inference',available:false,connected:false,methods:['key'],detail:'Requires a Modal inference Proxy Token'}],spend:{usd:1.2,pendingUsd:1.25,unknownCalls:1,subscriptionCalls:0},swarm:{status:'idle'}};
+const state={version:1,conversation:[],goals:[],providers:[{id:'claude',name:'Claude',available:true,connected:false,methods:['subscription'],detail:'Native sign-in found',fleetSupported:false,fleetEligible:false},{id:'openai',name:'OpenAI API',available:false,connected:false,methods:['key'],detail:'Requires an API key',fleetSupported:true,fleetEligible:false},{id:'modal',name:'Modal inference',available:false,connected:false,methods:['key'],detail:'Requires a Modal inference Proxy Token and an available endpoint model. Modal account tokens are not inference tokens.',fleetSupported:false,fleetEligible:false,fleetDetail:'Modal inference is available locally, but its FLUJO worker adapter is unqualified.'}],spend:{usd:1.2,pendingUsd:1.25,unknownCalls:1,subscriptionCalls:0},swarm:{status:'idle'}};
 const clients=new Set();
 let lastConnection;
 let lastChat;
@@ -27,7 +27,7 @@ test('browser fallback connects, chats, edits goals, and controls work',async t=
     if(path==='/api/state'){res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify(state));return;}
     if(path==='/api/providers/discover'){res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify(state.providers));return;}
     if(path==='/api/providers/connect'){
-      lastConnection=await readJson(req);const provider=state.providers.find(item=>item.id===lastConnection.id);provider.connected=true;provider.available=true;sendState();res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify(provider));return;
+      lastConnection=await readJson(req);const provider=state.providers.find(item=>item.id===lastConnection.id);provider.connected=true;provider.available=true;provider.fleetEligible=provider.fleetSupported && lastConnection.fleetAllowed===true;provider.fleetDetail=provider.fleetEligible?'Worker credential transfer authorized; FLUJO inference remains unverified.':provider.fleetDetail;sendState();res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify(provider));return;
     }
     if(path==='/api/chat'){
       lastChat=await readJson(req);const {text,budgetUsd}=lastChat;state.conversation.push({id:'m1',role:'user',text,at:new Date().toISOString()},{id:'m2',role:'todd',text:'Consider it delegated. I will keep watch.',at:new Date().toISOString()},{id:'m3',role:'team',text:'INTERNAL TASK STATUS',at:new Date().toISOString()});state.goals.push({id:'g1',text,status:'running',budgetUsd,spentUsd:0.4,pendingUsd:1.25,billingPending:true,providerId:'claude',tasks:[{id:'t1',role:'developer',status:'running',text:'Working',result:'Made the requested draft.',artifacts:[{path:'result.txt',sha256:'fixture',bytes:17}]}]});sendState();res.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify(state));return;
@@ -101,15 +101,38 @@ test('browser fallback connects, chats, edits goals, and controls work',async t=
   assert.equal(await readFile(await download.path(),'utf8'),'artifact contents');
   await page.getByRole('button',{name:/provider connected/}).click();
   await page.getByRole('button',{name:/OpenAI API Requires an API key/}).click();
+  assert.equal(await page.locator('#worker-disclosure').isVisible(),true);
+  assert.match(await page.locator('#worker-disclosure').innerText(),/isolated FLUJO workers/);
+  assert.match(await page.locator('#worker-disclosure').innerText(),/Cloud execution and billing require separate qualification/);
   await page.getByLabel('API key').fill('test-key-not-a-secret');
   await page.getByRole('button',{name:'Connect',exact:true}).click();
   await page.getByText('2 providers connected').waitFor();
-  assert.deepEqual(lastConnection,{id:'openai',method:'key',key:'test-key-not-a-secret'});
+  assert.deepEqual(lastConnection,{id:'openai',method:'key',key:'test-key-not-a-secret',fleetAllowed:true});
   assert.equal((await page.locator('body').innerText()).includes('test-key-not-a-secret'),false);
   await page.getByRole('button',{name:/providers connected/}).click();
+  await page.getByText('Worker route permitted; live execution unverified.').waitFor();
+  state.providers.push({id:'anthropic',name:'Anthropic API',available:true,connected:true,methods:['key'],detail:'Requires an API key',fleetSupported:true,fleetEligible:false,fleetDetail:'Connect again and allow this key for isolated FLUJO workers.'});sendState();
+  await page.getByRole('button',{name:/Anthropic API/}).click();
+  await page.getByRole('button',{name:'Allow worker use'}).waitFor();
+  assert.equal(await page.locator('#worker-disclosure').isVisible(),true);
+  assert.equal(await page.getByLabel('API key').getAttribute('required'),null);
+  await page.getByRole('button',{name:'Allow worker use'}).click();
+  assert.deepEqual(lastConnection,{id:'anthropic',method:'key',fleetAllowed:true});
+  await page.getByRole('button',{name:/providers connected/}).click();
   await page.getByRole('button',{name:/Modal inference Requires a Modal inference Proxy Token/}).click();
-  await page.getByText(/ordinary account token will not work/).waitFor();
+  assert.match(await page.locator('#connect-detail').innerText(),/Modal account tokens are not inference tokens/);
   await page.getByLabel('Modal inference Proxy Token').waitFor();
+  assert.equal(await page.locator('#worker-disclosure').isVisible(),false);
+  assert.equal(await page.locator('#key-local-help').isVisible(),true);
+  assert.equal((await page.locator('#provider-dialog').innerText()).includes('Modal runs isolated workers after connection'),false);
+  await page.getByLabel('Modal inference Proxy Token').fill('wk-demo.ws-demo');
+  await page.getByRole('button',{name:'Connect',exact:true}).click();
+  assert.deepEqual(lastConnection,{id:'modal',method:'key',key:'wk-demo.ws-demo'});
+  await page.getByRole('button',{name:/providers connected/}).click();
+  await page.getByText(/Modal inference is available locally, but its FLUJO worker adapter is unqualified/).waitFor();
+  await page.getByRole('button',{name:/Modal inference/}).click();
+  assert.equal(await page.locator('#key-field').isVisible(),false);
+  await page.getByRole('button',{name:'Disconnect',exact:true}).waitFor();
   await page.getByRole('button',{name:'Close'}).click();
   await page.setViewportSize({width:390,height:760});
   await page.getByRole('button',{name:'Show goals'}).click();

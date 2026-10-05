@@ -1,5 +1,6 @@
 // FlowSpecs for the swarm-team template. Compiled by FLUJO's own /api/flow/compile,
 // so they stay valid FLUJO flows that can be opened and edited in the FlowBuilder.
+import { specialistAgentServers, specialistInstructions } from './specialists.mjs';
 
 export const FLOW_NAMES = Object.freeze({ agent: 'swarm_agent', team: 'swarm_team', supervisor: 'swarm_supervisor' });
 
@@ -104,18 +105,36 @@ export function bootSpec(model) {
 }
 
 /** Build the three specs for the servers that are actually connected in the target workspace. */
-export function buildSpecs({ model, availableServers, limits = {} }) {
+export function buildSpecs({ model, availableServers, limits = {}, specialists } = {}) {
   const agentTurns = Number.isInteger(limits.agentTurns) ? Math.min(Math.max(limits.agentTurns, 1), 200) : 200;
   const leadTurns = Number.isInteger(limits.leadTurns) ? Math.min(Math.max(limits.leadTurns, 1), 600) : 600;
-  const concurrency = Number.isInteger(limits.concurrency) ? Math.min(Math.max(limits.concurrency, 1), 10) : 10;
+  const requestedConcurrency = Number.isInteger(limits.concurrency) ? Math.min(Math.max(limits.concurrency, 1), 10) : 10;
   if (!model) throw new Error('A model id is required.');
+  const roleGuide = specialists ? specialistInstructions(specialists, model) : '';
+  const agentAvailable = specialists ? specialistAgentServers(specialists, model, availableServers) : availableServers;
+  // One existing subflow gate controls all local role briefs. Team leads
+  // count as one of each Worker's ten total conversations.
+  const concurrency = specialists
+    ? Math.min(requestedConcurrency, specialists.topologyTarget.specialistSubflowsPerWorker)
+    : requestedConcurrency;
+  const teamBody = specialists
+    ? TEAM_BODY.replace('up to 10 at a time', `up to ${concurrency} at a time`)
+      .replace('team of up to 10 agents', `team of up to ${concurrency} specialists`)
+      .replace('more than 10 agents', `more than ${concurrency} specialists`)
+      .replace('Name 3 to 10 genuinely different approaches', `Name up to ${concurrency} genuinely different approaches`)
+    : TEAM_BODY;
+  const agentPrompt = specialists
+    ? `${AGENT_PROMPT}\n\n${roleGuide}\nIf your brief has an unknown or missing ROLE_ID, ask your parent before using tools.`
+    : AGENT_PROMPT;
+  const teamPrompt = specialists ? `${TEAM_PROMPT.replace(TEAM_BODY, teamBody)}\n\n${roleGuide}` : TEAM_PROMPT;
+  const supervisorPrompt = specialists ? `${SUPERVISOR_PROMPT.replace(TEAM_BODY, teamBody)}\n\n${roleGuide}` : SUPERVISOR_PROMPT;
   const agent = {
     name: FLOW_NAMES.agent,
     description: 'Generic self-improving swarm agent: one sandboxed worker conversation with bash, filesystem, browser, FLUJO self-management and the team board.',
     nodes: [
-      { key: 'start', type: 'start', label: 'Start', prompt: AGENT_PROMPT },
+      { key: 'start', type: 'start', label: 'Start', prompt: agentPrompt },
       { key: 'agent', type: 'process', label: 'Agent', description: 'Does one self-contained task hands-on and reports evidence.',
-        model, prompt: 'Do the task you were given. Follow your operating rules.', servers: servers(AGENT_TOOLS, availableServers), maxTurns: agentTurns },
+        model, prompt: 'Do the task you were given. Follow your operating rules.', servers: servers(AGENT_TOOLS, agentAvailable), maxTurns: agentTurns },
       { key: 'finish', type: 'finish' },
     ],
     edges: [{ from: 'start', to: 'agent' }, { from: 'agent', to: 'finish' }],
@@ -134,7 +153,7 @@ export function buildSpecs({ model, availableServers, limits = {} }) {
   });
   return [
     agent,
-    team(FLOW_NAMES.team, 'Swarm team lead: runs up to 10 collaborating agents in this Worker and can delegate branches to child Workers.', TEAM_PROMPT, LEAD_TOOLS),
-    team(FLOW_NAMES.supervisor, 'Swarm supervisor: root of the Worker tree; builds the swarm for a goal and steers it to a verified result.', SUPERVISOR_PROMPT, SUPERVISOR_TOOLS),
+    team(FLOW_NAMES.team, `Swarm team lead: runs up to ${concurrency} collaborating agents in this Worker and can delegate branches to child Workers.`, teamPrompt, LEAD_TOOLS),
+    team(FLOW_NAMES.supervisor, 'Swarm supervisor: root of the Worker tree; builds the swarm for a goal and steers it to a verified result.', supervisorPrompt, SUPERVISOR_TOOLS),
   ];
 }

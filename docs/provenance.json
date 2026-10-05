@@ -64,14 +64,22 @@
     "durable usage receipts",
     "bounded run timeout",
     "before-retirement output capture and recovery holds",
-    "Codex model installation without unsupported creativity"
+    "Codex model installation without unsupported creativity",
+    "optional specialist briefs through existing shared subflow gates",
+    "controller forwarding of caller-supplied goal identities"
   ],
   "factoryExtraction": {
     "sourceCommit": "510b733f8af0305bb2969592fe25cc73549306a4",
     "originalPath": "src/receipts.mjs",
     "path": "upstream/factory/receipts.mjs",
     "sha256": "d1e4ff13538cc2ebbd1f0b11759887ec606253e7310fc2da83406d9d4c4f687c",
-    "scope": "pure operational receipt validator; no runtime state"
+    "scope": "pure operational receipt allowlist projection; caller verifies bytes and hashes; no runtime state"
+  },
+  "specialistSuccessor": {
+    "privateEngineCommit": "78fd985fdf52140a7e8857a172d3f111fd350b83",
+    "pullRequest": "https://github.com/flujo-app/iambrokeplshlp/pull/59",
+    "scope": "optional existing-flow specialist briefs and stable controller goal identity",
+    "merged": false
   },
   "lifecycleSuccessor": {
     "privateEngineCommit": "4b0363e",

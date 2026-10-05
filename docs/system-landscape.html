@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Seagulled system landscape</title><style>
+*{box-sizing:border-box}body{margin:0;background:#f8fafc;color:#0f172a;font:16px/1.55 system-ui,Segoe UI,sans-serif}header{padding:26px 32px 18px;background:#0f172a;color:#f8fafc}h1{margin:0;font-size:28px}header p{margin:6px 0;color:#cbd5e1}.tabs{display:flex;gap:8px;padding:16px 32px;border-bottom:1px solid #cbd5e1;background:white;flex-wrap:wrap}.tabs button,.toolbar button,.toolbar a{font:inherit;padding:8px 14px;border:1px solid #cbd5e1;border-radius:8px;background:white;color:#334155;cursor:pointer;text-decoration:none}.tabs button[aria-selected=true]{background:#2563eb;color:white;border-color:#2563eb}.panel{display:none}.panel.active{display:block}.toolbar{display:flex;gap:8px;align-items:center;padding:12px 32px;flex-wrap:wrap}.toolbar span{font-size:14px;color:#64748b}.viewport{overflow:auto;border-top:1px solid #e2e8f0;background:#eef2f6;height:min(78vh,1100px)}.viewport svg{display:block;height:auto;max-width:none;margin:auto}article{max-width:1280px;padding:28px 32px;margin:auto}h2{font-size:24px;margin:0 0 12px}h3{margin:24px 0 8px}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}.card{background:white;border:1px solid #cbd5e1;border-radius:12px;padding:20px}.card p{margin-bottom:0}.status{display:inline-block;border-radius:6px;padding:3px 8px;font-size:13px;font-weight:600;background:#ecfdf5;color:#065f46}.status.amber{background:#fffbeb;color:#92400e}table{border-collapse:collapse;width:100%;background:white}th,td{text-align:left;vertical-align:top;border:1px solid #e2e8f0;padding:14px}th{background:#eef2ff}td:first-child{font-weight:700;color:#1d4ed8;white-space:nowrap}.tablewrap{overflow:auto}a{color:#1d4ed8}code{font-size:.92em}li{margin:7px 0}.notice{padding:14px 18px;border-left:4px solid #d97706;background:#fffbeb;margin-bottom:20px}.tree{font:15px/1.75 ui-monospace,Consolas,monospace;white-space:pre;overflow:auto;padding:20px;background:#0f172a;color:#e2e8f0;border-radius:12px}footer{padding:18px 32px;color:#64748b;font-size:14px}@media print{header,.tabs,.toolbar,footer{display:none}.panel{display:block!important}.viewport{height:auto;overflow:visible}.viewport svg{width:100%!important}article{break-before:page}}
+</style></head><body><header><h1>Seagulled system landscape</h1><p>Machine, instance, workspace, MCP, authentication and ownership boundaries · 5 October 2026</p></header><nav class="tabs" aria-label="Diagram views" role="tablist"><button role="tab" aria-selected="true" aria-controls="landscape" id="tab-landscape" data-panel="landscape">Landscape</button><button role="tab" aria-selected="false" aria-controls="authentication" id="tab-authentication" data-panel="authentication">Authentication</button><button role="tab" aria-selected="false" aria-controls="swarm" id="tab-swarm" data-panel="swarm">Swarm & limits</button><button role="tab" aria-selected="false" aria-controls="evidence" id="tab-evidence" data-panel="evidence">Evidence & scope</button></nav>
+<section class="panel active" id="landscape" role="tabpanel" aria-labelledby="tab-landscape"><div class="toolbar"><button id="fit">Fit</button><button id="minus" aria-label="Zoom out">−</button><button id="plus" aria-label="Zoom in">+</button><button id="actual">100%</button><a href="system-landscape.svg" download>Download SVG</a><a href="system-landscape.mmd" download>Mermaid source</a><span>Scroll to inspect the map. Authentication labels link conceptually to the A1–A8 key.</span></div><div class="viewport"><svg xmlns="http://www.w3.org/2000/svg" width="1880" height="1460" viewBox="0 0 1880 1460" role="img" aria-labelledby="title desc"><title id="title">Seagulled system landscape</title><desc id="desc">Nested machine, process, FLUJO workspace, MCP, external service and Git boundaries. Cloud execution is implemented but not qualified as a complete live run. Authentication labels A1 through A8 map to the companion authentication table. This is a source-derived architecture, not a live machine inventory.</desc><defs><marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8" fill="#475569"/></marker><marker id="amber" markerWidth="9" markerHeight="9" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8" fill="#b45309"/></marker></defs><g font-family="Segoe UI, Arial, sans-serif">
+<rect x="0" y="0" width="1880" height="1460" rx="0" fill="#f8fafc" stroke="#f8fafc" stroke-width="2" />
+<text x="40" y="53" font-size="33" fill="#0f172a" font-weight="700">SEAGULLED / SYSTEM LANDSCAPE</text>
+<text x="40" y="89" font-size="21" fill="#475569" font-weight="400">Machines → processes → FLUJO instances → workspaces → agents &amp; MCPs</text>
+<text x="40" y="120" font-size="16" fill="#64748b" font-weight="400">Source-derived • 5 October 2026 • logical endpoints only • machine counts and live inventory not observed</text>
+<rect x="40" y="155" width="1050" height="900" rx="14" fill="#eef6ff" stroke="#2563eb" stroke-width="2" />
+<text x="65" y="193" font-size="23" fill="#1e40af" font-weight="700">MACHINE L · Local desktop / controller host</text>
+<text x="65" y="220" font-size="16" fill="#475569" font-weight="400">One runtime authority; this host must remain online for the current fleet path.</text>
+<rect x="70" y="250" width="230" height="165" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="2" />
+<text x="90" y="283" font-size="21" fill="#0f172a" font-weight="600">Desktop renderer</text>
+<text x="90" y="315" font-size="16" fill="#334155" font-weight="400">Sandboxed Electron UI</text>
+<text x="90" y="340" font-size="16" fill="#334155" font-weight="400">Preload bridge · A1</text>
+<text x="90" y="365" font-size="16" fill="#334155" font-weight="400">Goals / budgets / controls</text>
+<rect x="70" y="450" width="230" height="120" rx="14" fill="#ffffff" stroke="#94a3b8" stroke-width="2" />
+<text x="90" y="484" font-size="21" fill="#0f172a" font-weight="600">CLI / browser dev</text>
+<text x="90" y="516" font-size="16" fill="#334155" font-weight="400">Loopback HTTP + SSE</text>
+<text x="90" y="541" font-size="16" fill="#334155" font-weight="400">Session bearer · A2</text>
+<rect x="340" y="250" width="710" height="320" rx="14" fill="#ffffff" stroke="#2563eb" stroke-width="2" />
+<text x="360" y="282" font-size="17" fill="#1e40af" font-weight="700">TRUSTED APPLICATION PROCESS</text>
+<rect x="370" y="305" width="650" height="73" rx="14" fill="#eff6ff" stroke="#bfdbfe" stroke-width="2" />
+<text x="390" y="335" font-size="21" fill="#0f172a" font-weight="600">Runtime + authenticated local API</text>
+<text x="390" y="360" font-size="17" fill="#334155" font-weight="400">Persist state · edit goals · pause / stop · cancellation · events</text>
+<rect x="370" y="410" width="300" height="132" rx="14" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="2" />
+<text x="390" y="442" font-size="21" fill="#065f46" font-weight="600">SwarmCoordinator</text>
+<text x="390" y="472" font-size="16" fill="#334155" font-weight="400">Todd → developer → reviewer</text>
+<text x="390" y="497" font-size="16" fill="#334155" font-weight="400">Durable runs + admission limits</text>
+<text x="390" y="522" font-size="16" fill="#334155" font-weight="400">≤ 6 provider calls per goal</text>
+<rect x="700" y="410" width="320" height="132" rx="14" fill="#f5f3ff" stroke="#c4b5fd" stroke-width="2" />
+<text x="720" y="442" font-size="21" fill="#5b21b6" font-weight="600">ProviderManager</text>
+<text x="720" y="472" font-size="16" fill="#334155" font-weight="400">Native Codex / Claude · A3</text>
+<text x="720" y="497" font-size="16" fill="#334155" font-weight="400">OpenAI / Anthropic keys · A4</text>
+<text x="720" y="522" font-size="16" fill="#334155" font-weight="400">Modal inference proxy token · A4</text>
+<rect x="70" y="650" width="430" height="350" rx="14" fill="#ffffff" stroke="#0891b2" stroke-width="2" />
+<text x="90" y="683" font-size="22" fill="#155e75" font-weight="600">FLUJO L · Local source instance</text>
+<text x="90" y="711" font-size="16" fill="#334155" font-weight="400">Loopback mode · A5 · private local profile</text>
+<rect x="90" y="735" width="390" height="115" rx="14" fill="#ecfeff" stroke="#67e8f9" stroke-width="2" />
+<text x="110" y="767" font-size="20" fill="#155e75" font-weight="600">Owned boot workspace</text>
+<text x="110" y="795" font-size="16" fill="#334155" font-weight="400">Model binding + tool-free swarm_boot</text>
+<text x="110" y="820" font-size="16" fill="#334155" font-weight="400">Snapshot source for isolated Fly workers</text>
+<rect x="90" y="870" width="390" height="85" rx="14" fill="#f8fafc" stroke="#cbd5e1" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="110" y="901" font-size="17" fill="#334155" font-weight="600">Workspace-mode teams (upstream option)</text>
+<text x="110" y="928" font-size="16" fill="#334155" font-weight="400">Separate flows / MCPs; shared host filesystem</text>
+<text x="90" y="981" font-size="15" fill="#155e75" font-weight="400">Workspaces are logical boundaries, not separate machines.</text>
+<rect x="540" y="650" width="265" height="200" rx="14" fill="#ffffff" stroke="#059669" stroke-width="2" />
+<text x="560" y="683" font-size="21" fill="#065f46" font-weight="600">Fleet controller</text>
+<text x="560" y="715" font-size="16" fill="#334155" font-weight="400">Local HTTP + fleet MCP</text>
+<text x="560" y="742" font-size="16" fill="#334155" font-weight="400">Operator bearer · A6</text>
+<text x="560" y="769" font-size="16" fill="#334155" font-weight="400">Per-worker fleet bearer · A6</text>
+<text x="560" y="796" font-size="16" fill="#334155" font-weight="400">Registry · shared board</text>
+<text x="560" y="823" font-size="16" fill="#334155" font-weight="400">Reservations / recovery holds</text>
+<rect x="540" y="910" width="265" height="90" rx="14" fill="#ffffff" stroke="#b45309" stroke-width="2" />
+<text x="560" y="941" font-size="21" fill="#92400e" font-weight="600">Host transport</text>
+<text x="560" y="969" font-size="16" fill="#334155" font-weight="400">Fly proxy + relay poller · A7</text>
+<rect x="840" y="650" width="210" height="350" rx="14" fill="#fff7ed" stroke="#f59e0b" stroke-width="2" />
+<text x="858" y="683" font-size="18" fill="#92400e" font-weight="700">PRIVATE STORAGE</text>
+<text x="858" y="718" font-size="16" fill="#334155" font-weight="400">~/.seagulled</text>
+<text x="858" y="744" font-size="16" fill="#334155" font-weight="400">Conversation / goals</text>
+<text x="858" y="770" font-size="16" fill="#334155" font-weight="400">Provider workspaces</text>
+<text x="858" y="796" font-size="16" fill="#334155" font-weight="400">Artifacts + receipts</text>
+<text x="858" y="822" font-size="16" fill="#334155" font-weight="400">Run / fleet journals</text>
+<text x="858" y="848" font-size="16" fill="#334155" font-weight="400">Runtime lock / session</text>
+<text x="858" y="886" font-size="17" fill="#92400e" font-weight="700">AUTH STORES</text>
+<text x="858" y="914" font-size="15" fill="#334155" font-weight="400">OS-encrypted API keys</text>
+<text x="858" y="939" font-size="15" fill="#334155" font-weight="400">Provider-owned logins</text>
+<text x="858" y="964" font-size="15" fill="#334155" font-weight="400">Fly / clone credentials</text>
+<text x="858" y="984" font-size="16" fill="#92400e" font-weight="700">Outside public Git</text>
+<rect x="1130" y="155" width="710" height="900" rx="14" fill="#fffbeb" stroke="#b45309" stroke-width="2" stroke-dasharray="9 6"/>
+<text x="1155" y="193" font-size="22" fill="#92400e" font-weight="700">FLY PRIVATE NETWORK · isolated product resources</text>
+<text x="1155" y="220" font-size="16" fill="#92400e" font-weight="400">Optional path · complete live cloud deliverable remains unqualified</text>
+<rect x="1160" y="250" width="650" height="125" rx="14" fill="#ffffff" stroke="#d97706" stroke-width="2" stroke-dasharray="7 4"/>
+<text x="1180" y="283" font-size="22" fill="#92400e" font-weight="600">MACHINE R · Owned relay (multi-worker path only)</text>
+<text x="1180" y="313" font-size="17" fill="#334155" font-weight="400">HTTP queue; forwards worker authorization to the local fleet controller.</text>
+<text x="1180" y="339" font-size="17" fill="#334155" font-weight="400">Private network + host Fly proxy; relay poll/respond secret · A7</text>
+<rect x="1160" y="460" width="310" height="480" rx="14" fill="#ffffff" stroke="#b45309" stroke-width="2" stroke-dasharray="7 4"/>
+<text x="1178" y="493" font-size="18" fill="#92400e" font-weight="700">MACHINE A · Team worker</text>
+<text x="1178" y="521" font-size="17" fill="#334155" font-weight="400">Own sandbox + volume</text>
+<rect x="1175" y="542" width="280" height="283" rx="14" fill="#ecfeff" stroke="#0891b2" stroke-width="2" />
+<text x="1190" y="574" font-size="19" fill="#155e75" font-weight="600">FLUJO A · worker instance</text>
+<text x="1190" y="601" font-size="16" fill="#334155" font-weight="400">HTTP control bearer · A5</text>
+<rect x="1190" y="620" width="250" height="185" rx="14" fill="#ffffff" stroke="#67e8f9" stroke-width="2" />
+<text x="1205" y="650" font-size="19" fill="#155e75" font-weight="600">Worker workspace</text>
+<text x="1205" y="679" font-size="15" fill="#334155" font-weight="400">swarm_team → swarm_agent</text>
+<text x="1205" y="704" font-size="15" fill="#334155" font-weight="400">Subflows share this filesystem</text>
+<text x="1205" y="729" font-size="15" fill="#334155" font-weight="400">Model adapter · A3 / A4</text>
+<text x="1205" y="754" font-size="15" fill="#334155" font-weight="400">Conversations / KV / flow state</text>
+<text x="1205" y="779" font-size="15" fill="#334155" font-weight="400">Deliverables in owned directory</text>
+<rect x="1175" y="842" width="280" height="78" rx="14" fill="#f5f3ff" stroke="#a78bfa" stroke-width="2" />
+<text x="1190" y="870" font-size="16" fill="#5b21b6" font-weight="700">WORKSPACE MCP CLIENTS</text>
+<text x="1190" y="895" font-size="15" fill="#5b21b6" font-weight="400">bash · filesystem · flujo · browser*</text>
+<rect x="1500" y="460" width="310" height="480" rx="14" fill="#ffffff" stroke="#b45309" stroke-width="2" stroke-dasharray="7 4"/>
+<text x="1518" y="493" font-size="18" fill="#92400e" font-weight="700">MACHINE B · Child worker (optional)</text>
+<text x="1518" y="521" font-size="17" fill="#334155" font-weight="400">Own sandbox + volume</text>
+<rect x="1515" y="542" width="280" height="283" rx="14" fill="#ecfeff" stroke="#0891b2" stroke-width="2" />
+<text x="1530" y="574" font-size="19" fill="#155e75" font-weight="600">FLUJO B · worker instance</text>
+<text x="1530" y="601" font-size="16" fill="#334155" font-weight="400">HTTP control bearer · A5</text>
+<rect x="1530" y="620" width="250" height="185" rx="14" fill="#ffffff" stroke="#67e8f9" stroke-width="2" />
+<text x="1545" y="650" font-size="19" fill="#155e75" font-weight="600">Worker workspace</text>
+<text x="1545" y="679" font-size="15" fill="#334155" font-weight="400">swarm_team → swarm_agent</text>
+<text x="1545" y="704" font-size="15" fill="#334155" font-weight="400">Subflows share this filesystem</text>
+<text x="1545" y="729" font-size="15" fill="#334155" font-weight="400">Model adapter · A3 / A4</text>
+<text x="1545" y="754" font-size="15" fill="#334155" font-weight="400">Conversations / KV / flow state</text>
+<text x="1545" y="779" font-size="15" fill="#334155" font-weight="400">Deliverables in owned directory</text>
+<rect x="1515" y="842" width="280" height="78" rx="14" fill="#f5f3ff" stroke="#a78bfa" stroke-width="2" />
+<text x="1530" y="870" font-size="16" fill="#5b21b6" font-weight="700">WORKSPACE MCP CLIENTS</text>
+<text x="1530" y="895" font-size="15" fill="#5b21b6" font-weight="400">bash · filesystem · flujo · browser*</text>
+<text x="1160" y="973" font-size="17" fill="#92400e" font-weight="600">fleet MCP → relay → host controller · A6</text>
+<text x="1160" y="1001" font-size="15" fill="#334155" font-weight="400">* MCPs bind only when enabled; browser and extra servers are optional.</text>
+<text x="1160" y="1027" font-size="15" fill="#334155" font-weight="400">Each worker starts its own bundled MCP servers; fleet is remote.</text>
+<path d="M300 340 H370" fill="none" stroke="#475569" stroke-width="2.5"  marker-end="url(#arrow)"/>
+<text x="310" y="328" font-size="14" fill="#475569" font-weight="700">A1</text>
+<path d="M300 504 H320 V365 H370" fill="none" stroke="#475569" stroke-width="2.5"  marker-end="url(#arrow)"/>
+<text x="310" y="533" font-size="14" fill="#475569" font-weight="700">A2</text>
+<path d="M500 378 V410" fill="none" stroke="#475569" stroke-width="2.5"  marker-end="url(#arrow)"/>
+<path d="M850 378 V410" fill="none" stroke="#475569" stroke-width="2.5"  marker-end="url(#arrow)"/>
+<path d="M670 477 H700" fill="none" stroke="#475569" stroke-width="2.5"  marker-end="url(#arrow)"/>
+<path d="M470 542 V600 H285 V650" fill="none" stroke="#b45309" stroke-width="2.5" stroke-dasharray="7 5" marker-end="url(#amber)"/>
+<text x="82" y="619" font-size="15" fill="#92400e" font-weight="400">Optional boot / clone preparation · A5</text>
+<path d="M650 542 V650" fill="none" stroke="#b45309" stroke-width="2.5" stroke-dasharray="7 5" marker-end="url(#amber)"/>
+<text x="662" y="617" font-size="15" fill="#92400e" font-weight="400">Optional fleet</text>
+<path d="M980 570 V650" fill="none" stroke="#475569" stroke-width="2.5"  marker-end="url(#arrow)"/>
+<text x="990" y="608" font-size="14" fill="#334155" font-weight="400">persist</text>
+<path d="M672 850 V910" fill="none" stroke="#b45309" stroke-width="2.5" stroke-dasharray="7 5" marker-end="url(#amber)"/>
+<path d="M805 944 H820 V590 H1110 V415 H1485 V375" fill="none" stroke="#b45309" stroke-width="2.5" stroke-dasharray="7 5" marker-end="url(#amber)"/>
+<text x="849" y="579" font-size="15" fill="#92400e" font-weight="400">Relay polling through Fly proxy · A7</text>
+<path d="M1315 460 V375" fill="none" stroke="#b45309" stroke-width="2.5" stroke-dasharray="7 5" marker-end="url(#amber)"/>
+<text x="1182" y="442" font-size="15" fill="#92400e" font-weight="400">fleet requests · A6</text>
+<path d="M1655 460 V375" fill="none" stroke="#b45309" stroke-width="2.5" stroke-dasharray="7 5" marker-end="url(#amber)"/>
+<text x="1530" y="442" font-size="15" fill="#92400e" font-weight="400">fleet requests · A6</text>
+<text x="40" y="1098" font-size="17" fill="#475569" font-weight="700">EXTERNAL SERVICE &amp; OWNERSHIP BOUNDARIES</text>
+<rect x="40" y="1110" width="610" height="142" rx="14" fill="#ffffff" stroke="#8b5cf6" stroke-width="2" />
+<text x="60" y="1143" font-size="22" fill="#5b21b6" font-weight="600">Model / subscription providers</text>
+<text x="60" y="1175" font-size="17" fill="#334155" font-weight="400">OpenAI / Codex · Anthropic / Claude · Modal inference</text>
+<text x="60" y="1201" font-size="17" fill="#334155" font-weight="400">Native login or API / proxy token · A3 / A4</text>
+<text x="60" y="1227" font-size="17" fill="#334155" font-weight="400">Desktop adapters and FLUJO model adapters are distinct paths.</text>
+<rect x="680" y="1110" width="350" height="142" rx="14" fill="#ffffff" stroke="#b45309" stroke-width="2" />
+<text x="700" y="1143" font-size="22" fill="#92400e" font-weight="600">Fly control plane</text>
+<text x="700" y="1175" font-size="17" fill="#334155" font-weight="400">ManagedCloud + Fly CLI · A7</text>
+<text x="700" y="1201" font-size="17" fill="#334155" font-weight="400">Provision / proxy / exec / retire</text>
+<text x="700" y="1227" font-size="17" fill="#334155" font-weight="400">Exact owned app + Machine IDs</text>
+<rect x="1060" y="1110" width="360" height="142" rx="14" fill="#ffffff" stroke="#8b5cf6" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="1080" y="1143" font-size="22" fill="#5b21b6" font-weight="600">Additional MCP services</text>
+<text x="1080" y="1175" font-size="17" fill="#334155" font-weight="400">Optional workspace installations</text>
+<text x="1080" y="1201" font-size="17" fill="#334155" font-weight="400">Service-specific auth · A8</text>
+<text x="1080" y="1227" font-size="17" fill="#334155" font-weight="400">Bindings / availability conditional</text>
+<rect x="1450" y="1110" width="390" height="142" rx="14" fill="#f1f5f9" stroke="#94a3b8" stroke-width="2" />
+<text x="1470" y="1143" font-size="21" fill="#475569" font-weight="600">Existing owner-managed fleets</text>
+<text x="1470" y="1175" font-size="17" fill="#334155" font-weight="400">Separate resources / credentials</text>
+<text x="1470" y="1201" font-size="17" fill="#334155" font-weight="400">No automatic adoption by Seagulled</text>
+<text x="1470" y="1227" font-size="17" fill="#334155" font-weight="400">Live inventory not established here</text>
+<path d="M1020 478 H1100 V1072 H345 V1110" fill="none" stroke="#475569" stroke-width="2.5"  marker-end="url(#arrow)"/>
+<text x="70" y="1068" font-size="15" fill="#5b21b6" font-weight="400">Model requests · A3 / A4</text>
+<path d="M680 1000 V1036 H855 V1110" fill="none" stroke="#b45309" stroke-width="2.5" stroke-dasharray="7 5" marker-end="url(#amber)"/>
+<text x="872" y="1074" font-size="15" fill="#92400e" font-weight="400">Fly management · A7</text>
+<path d="M1315 940 V1080 H500 V1110" fill="none" stroke="#b45309" stroke-width="2.5" stroke-dasharray="7 5" marker-end="url(#amber)"/>
+<text x="1160" y="1068" font-size="15" fill="#92400e" font-weight="400">Worker model requests · A3 / A4</text>
+<rect x="40" y="1290" width="1840" height="120" rx="14" fill="#0f172a" stroke="#0f172a" stroke-width="2" />
+<text x="62" y="1321" font-size="19" fill="#f8fafc" font-weight="700">PUBLIC GIT / RELEASE BOUNDARY</text>
+<text x="62" y="1352" font-size="18" fill="#e2e8f0" font-weight="400">Source, templates, sanitized receipts, docs, Electron / CLI packages; recovered swarm baseline: f9d372a.</text>
+<text x="62" y="1381" font-size="17" fill="#cbd5e1" font-weight="400">Excluded: secrets, login caches, conversations, runtime databases, account state, private links and live resource identities.</text>
+<text x="40" y="1441" font-size="15" fill="#64748b" font-weight="400">Solid boundaries: source-established components. Amber dashed paths: optional / unqualified cloud execution. A1–A8: authentication key in companion HTML.</text>
+</g></svg></div></section>
+<section class="panel" id="authentication" role="tabpanel" aria-labelledby="tab-authentication"><article><h2>Authentication crosses distinct boundaries</h2><p>Eight scopes are shown separately. No credential values, private service addresses or resource IDs are included.</p><div class="tablewrap"><table><thead><tr><th>ID</th><th>Boundary</th><th>Mechanism</th><th>Custody / scope</th></tr></thead><tbody><tr><td>A1</td><td>Electron UI → trusted main process</td><td>Restricted preload IPC; sender must be the active app window. Renderer is sandboxed with context isolation.</td><td>Main process. The desktop uses IPC directly; it does not receive model credentials.</td></tr><tr><td>A2</td><td>CLI / development browser → local API</td><td>Per-process bearer; loopback bind; Host and Origin checks. SSE and artifact reads are also authenticated.</td><td>Private session metadata. Browser bootstrap removes its URL fragment after initialization.</td></tr><tr><td>A3</td><td>Provider adapter → native Codex / Claude</td><td>Provider-owned native login state. Sign-in stays with the native tool.</td><td>Provider account boundary. Desktop discovery does not copy login tokens. Optional clone attempts use a separate trusted FLUJO transfer path; remote refresh remains unqualified.</td></tr><tr><td>A4</td><td>Desktop or FLUJO model adapter → model API</td><td>OpenAI / Anthropic API key, or Modal inference Proxy Token. These are separate from subscription and Modal account authentication.</td><td>Desktop: memory / environment, or Electron safeStorage encrypted files when available. FLUJO: private model binding and trusted snapshot path.</td></tr><tr><td>A5</td><td>Fleet controller → FLUJO HTTP API</td><td>Local source uses loopback mode without an explicit client bearer. Fly worker API uses its worker control bearer through a private Fly proxy. Workspace selected separately.</td><td>Private flujo-cloud credential store for owned workers. A workspace selector is routing, not an authentication credential.</td></tr><tr><td>A6</td><td>Operator / worker → fleet controller MCP</td><td>Operator bearer for management; distinct per-worker fleet bearer identifies the actor for fleet operations and board access.</td><td>Private registry / controller state. Relay forwards worker authorization; fleet actor checks happen at the host controller.</td></tr><tr><td>A7</td><td>Host → Fly control plane / relay</td><td>Fly login authenticates management and private proxy access. A separate relay secret authenticates poll/respond, not worker fleet requests.</td><td>Fly CLI state plus private owned resource journals. Exact ownership checked before retirement. Relay uses private networking with no public service configured.</td></tr><tr><td>A8</td><td>Workspace MCP client → optional external tools</td><td>Each service has its own authentication and configured tool allowlist; discovery does not establish successful execution.</td><td>Tool/service configuration outside Git. Actual extra server inventory was not inspected.</td></tr></tbody></table></div></article></section>
+<section class="panel" id="swarm" role="tabpanel" aria-labelledby="tab-swarm"><article><h2>Agent identity, active runs and Machines are separate counts</h2><div class="cards"><div class="card"><span class="status">Native path live verified</span><h3>Desktop provider team</h3><p>Todd lead → developer → independent reviewer → Todd conclusion. Native Codex has a live receipt. At most six provider calls are admitted per goal; the provider registry uses one active run at a time.</p></div><div class="card"><span class="status amber">Cloud path unqualified</span><h3>Product FLUJO / Fly path</h3><p>The controller enrolls an external root in the local boot workspace and delegates to a Fly team worker. The source does not establish a running FLUJO supervisor flow on that root. Worker flows run teams and local agent subflows.</p></div><div class="card"><span class="status amber">Proposed profile</span><h3>100 logical specialists</h3><p>The optional profile in COORDINATION.md reuses the existing flows and one shared gate. Its target is ten Machines, each one lead plus nine specialists (100 fleet conversations), with root supervision separate. It does not establish live capacity.</p></div></div><h3>Recovered engine topology</h3><div class="tree">Logical supervisor / controller root
+├─ Worker A = separate Fly Machine + volume + FLUJO instance
+│  ├─ team lead conversation: swarm_team
+│  ├─ local agent conversations: swarm_agent subflows
+│  ├─ local MCP servers: bash, filesystem, flujo, optional browser
+│  └─ fleet MCP: remote relay → host controller / shared board
+└─ Worker B = optional separate child Machine
+   └─ independent filesystem; findings shared through the board
+
+Workspace-only provisioner (alternative in recovered source)
+└─ several workspaces on one FLUJO instance / Machine
+   └─ separate flows / conversations / MCP entries; same host filesystem</div><h3>Effective limits in this checkout</h3><ul><li>Provider route: ≤ 6 admitted calls per goal, goal worker bound 1–6, maxActiveRuns 1.</li><li>Diagnostic native-Codex cloud selection (disabled for normal product goals): controller worker cap 1; no relay. This branch is not qualified as a working remote subscription team.</li><li>Product API-model cloud selection: configured worker cap clamped to 1–6 (default 3); relay created only if cap &gt; 1. Depth and children are bounded, with maxActiveRuns 2.</li><li>The fleet worker cap excludes the enrolled local root. Fly workers consume that child-worker bound; the separate relay Machine is outside the worker roster.</li><li>Product worker flow settings: agentTurns 6, leadTurns 12, local subflow concurrency 1. Recovered generic template default is up to 10 local agents; the product override is the applicable bound.</li><li>Unknown run, spend, capture or cleanup outcomes retain original identities and can hold further admission. A stop request is not a receipt proving remote cancellation.</li></ul></article></section>
+<section class="panel" id="evidence" role="tabpanel" aria-labelledby="tab-evidence"><article><h2>Architecture evidence and current qualification</h2><div class="notice">This diagram was derived from the checked-out source and sanitized acceptance notes. It is not a live deployment inventory. No service startup, provider execution, account-state inspection, resource creation or deployment was performed to make it.</div><div class="cards"><div class="card"><h3>Local desktop</h3><p>Sandboxed renderer, trusted runtime, loopback API, provider manager, persistent conversation / goals and a bounded provider team. Native Codex artifact generation and independent review are live verified in the release notes.</p></div><div class="card"><h3>Local FLUJO instances</h3><p>The configured loopback source is an optional dependency. A separate isolated diagnostic instance was used and stopped according to acceptance notes. Instance identifiers, addresses and present liveness are not established here.</p></div><div class="card"><h3>Cloud / provider availability</h3><p>An isolated Fly worker reached ready but its team conversation failed. Complete cloud output, tool-enabled FLUJO/Codex compatibility, cloned refresh and PC-off continuation remain unqualified. Claude subscription execution was denied on the validation host; API routes have deterministic fixtures. Antigravity unattended execution is unsupported.</p></div><div class="card"><h3>MCP inventory</h3><p>bash, filesystem, flujo and optional browser are bundled workspace servers. fleet is a streamable HTTP MCP endpoint implemented by the local controller and reached through the relay where available. Extra MCPs and their accounts are conditional; no real inventory was read.</p></div></div><h3>Trust and data boundaries</h3><ul><li>The local computer boundary encloses all host processes, including local MCP subprocesses when used. Their accessible files follow configured allowed paths; a workspace alone does not provide OS isolation.</li><li>The remote Machine boundary encloses its FLUJO instance, worker workspace, own MCP processes and volume. Agents in one worker share its filesystem. Sibling Fly workers do not share a filesystem.</li><li>The fleet registry / board is host-authoritative. Workers reach it using actor credentials. A relay transports requests, preserving worker authorization for the controller.</li><li>The cloud clone path crosses a trust boundary using the upstream private snapshot mechanism. Credential stores stay outside Git; the diagram does not claim remote login refresh is safe or qualified.</li><li>Reported, estimated, unknown and subscription usage remain separate. Estimated spend is not billed spend; deterministic fixtures are not live provider runs.</li><li>Existing production fleets remain under their owners. This diagram does not imply their adoption or new authority over them.</li></ul><h3>Source references</h3><ul><li><a href="../electron/main.mjs">electron/main.mjs</a> — Electron isolation, IPC, runtime and key store wiring</li><li><a href="../electron/credentials.mjs">electron/credentials.mjs</a> — OS-encrypted provider credential storage</li><li><a href="../src/server.mjs">src/server.mjs</a> — Loopback API, bearer, origin and host checks</li><li><a href="../src/runtime.mjs">src/runtime.mjs</a> — Runtime ownership, persistent state and cancellation</li><li><a href="../src/providers/index.mjs">src/providers/index.mjs</a> — Native providers, key routes and availability</li><li><a href="../src/swarm/index.mjs">src/swarm/index.mjs</a> — Durable bounded provider team and optional fleet route</li><li><a href="../src/swarm/fleet.mjs">src/swarm/fleet.mjs</a> — Boot workspace, worker caps, controller and lifecycle</li><li><a href="../src/swarm/relay.mjs">src/swarm/relay.mjs</a> — Owned relay Machine and host proxy</li><li><a href="../upstream/swarm-teams/fleet/provisioners.mjs">upstream/swarm-teams/fleet/provisioners.mjs</a> — Workspace versus Machine isolation; clone / proxy path</li><li><a href="../upstream/swarm-teams/fleet/controller.mjs">upstream/swarm-teams/fleet/controller.mjs</a> — Fleet MCP, operator and actor authorization</li><li><a href="../upstream/swarm-teams/fleet/relay.mjs">upstream/swarm-teams/fleet/relay.mjs</a> — Request forwarding and relay authentication</li><li><a href="../upstream/swarm-teams/template/flows.mjs">upstream/swarm-teams/template/flows.mjs</a> — Flow hierarchy and MCP tool bindings</li><li><a href="../upstream/swarm-teams/install.mjs">upstream/swarm-teams/install.mjs</a> — Worker-local MCP servers and fleet binding</li><li><a href="RC-ACCEPTANCE.md">RC-ACCEPTANCE.md</a> — Live validation limits and blocked diagnostics</li><li><a href="../COORDINATION.md">COORDINATION.md</a> — Proposed specialist profile and shared limits</li></ul><p>Recovered swarm baseline: <code>f9d372a</code>. <a href="system-landscape.svg">Standalone SVG</a> · <a href="system-landscape.mmd">Editable Mermaid diagram</a></p></article></section><footer>Public-safe logical architecture. Public Git carries source and sanitized artifacts; credentials, conversations, runtime data and private links remain outside it.</footer><script>
+const tabs=[...document.querySelectorAll('[data-panel]')];const panels=[...document.querySelectorAll('.panel')];tabs.forEach(tab=>tab.addEventListener('click',()=>{tabs.forEach(t=>t.setAttribute('aria-selected',String(t===tab)));panels.forEach(p=>p.classList.toggle('active',p.id===tab.dataset.panel));if(tab.dataset.panel==='landscape')fit();}));const view=document.querySelector('.viewport');const map=view.querySelector('svg');let width=1880;function setWidth(w){width=Math.max(500,Math.min(5000,w));map.style.width=width+'px';}function fit(){setWidth(view.clientWidth);}document.querySelector('#fit').onclick=fit;document.querySelector('#minus').onclick=()=>setWidth(width/1.25);document.querySelector('#plus').onclick=()=>setWidth(width*1.25);document.querySelector('#actual').onclick=()=>setWidth(1880);fit();
+</script></body></html>

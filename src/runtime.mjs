@@ -68,14 +68,17 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm } =
     return goal;
   };
   function recordUsage(goal, usage = {}) {
-    const cost = Number(usage.costUsd);
-    const kind = usage.costKind || 'unknown';
+    const cost = usage.costUsd;
+    const monetary = Number.isFinite(cost) && cost >= 0;
+    const suppliedKind = usage.costKind;
+    const kind = suppliedKind === 'subscription' ? 'subscription'
+      : monetary && ['reported', 'estimated'].includes(suppliedKind) ? suppliedKind : 'unknown';
     if (Number.isFinite(usage.reservedUsd) && usage.reservedUsd > 0) {
       goal.pendingUsd = (goal.pendingUsd || 0) + usage.reservedUsd;
       state.spend.pendingUsd = (state.spend.pendingUsd || 0) + usage.reservedUsd;
       goal.billingPending = true;
     }
-    if (Number.isFinite(cost) && cost >= 0 && ['reported', 'estimated'].includes(kind)) {
+    if (monetary && ['reported', 'estimated'].includes(kind)) {
       goal.spentUsd = Math.round((goal.spentUsd + cost) * 1e9) / 1e9;
       state.spend.usd = Math.round((state.spend.usd + cost) * 1e9) / 1e9;
       const field = kind === 'reported' ? 'reportedUsd' : 'estimatedUsd';
@@ -117,7 +120,8 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm } =
     if (closed || jobs.has(goal.id) || goal.recoveryHold || goal.status !== 'queued') return;
     if (state.swarm.admissionPaused) { goal.error = 'The team is paused. Resume the team to start new work.'; publish(); return; }
     if (state.goals.some(g => g.recoveryHold)) { goal.error = 'A previous run needs reconciliation. New work is held.'; publish(); return; }
-    const provider = state.providers.find(p => p.connected && p.available && (!goal.providerId || p.id === goal.providerId));
+    const selectedId = goal.providerId || state.preferredProviderId;
+    const provider = state.providers.find(p => p.connected && p.available && (!selectedId || p.id === selectedId));
     if (!provider) { goal.error = 'Connect a provider and I’ll get the team started.'; publish(); return; }
     goal.providerId = provider.id;
     goal.error = undefined; goal.status = 'running'; goal.updatedAt = now();
@@ -180,7 +184,9 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm } =
     },
     async connect(payload) {
       await manager.connect(payload);
-      state.providers = manager.publicState(); publish();
+      state.providers = manager.publicState();
+      if (state.providers.some(p => p.id === payload.id && p.connected)) state.preferredProviderId = payload.id;
+      publish();
       for (const goal of state.goals) if (goal.status === 'queued') start(goal);
       return copy(state.providers);
     },
@@ -188,7 +194,9 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm } =
       const running = state.goals.filter(g => g.providerId === providerId && jobs.has(g.id));
       for (const goal of running) { goal.status = 'pausing'; jobs.get(goal.id).controller.abort(); }
       await Promise.all(running.map(g => jobs.get(g.id)?.promise));
-      await manager.disconnect(providerId); state.providers = manager.publicState(); publish();
+      await manager.disconnect(providerId);
+      if (state.preferredProviderId === providerId) delete state.preferredProviderId;
+      state.providers = manager.publicState(); publish();
       return copy(state.providers);
     },
     async chat(text, options = {}) {
@@ -196,7 +204,7 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm } =
       if (typeof text !== 'string' || !text.trim() || text.length > 50000) throw new Error('Tell Todd your goal in 1–50,000 characters.');
       if (!state.providers.length) await this.discover();
       const goal = { id: id('goal'), text: text.trim(), status: 'queued', budgetUsd: amount(options.budgetUsd ?? 5), spentUsd: 0,
-        providerId: options.providerId || null, maxWorkers: 6, tasks: [], createdAt: now(), updatedAt: now(),
+        providerId: options.providerId || state.preferredProviderId || null, maxWorkers: 6, tasks: [], createdAt: now(), updatedAt: now(),
         context: state.conversation.slice(-12).map(m => ({ role: m.role, text: m.text })) };
       state.goals.push(goal); message('user', goal.text, goal.id);
       message('todd', state.providers.some(p => p.available && p.connected) ? 'Got it. I’m putting the team on this. I’ll check what they bring back.' : 'Got it. Connect your provider once and I’ll put the team on this.', goal.id);

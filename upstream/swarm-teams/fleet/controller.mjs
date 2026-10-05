@@ -41,7 +41,7 @@ export class Controller {
    * @param publicUrl     URL under which Workers reach this controller
    * @param provisioner   { provision(worker, fleet) -> target, retire(target), connect?(target) }
    */
-  constructor({ registryPath, operatorToken, publicUrl, remoteUrl, provisioner, runTimeoutMs, beforeRetire,
+  constructor({ registryPath, operatorToken, publicUrl, remoteUrl, provisioner, runTimeoutMs, beforeRetire, specialists,
     log = () => undefined }) {
     if (!operatorToken || operatorToken.length < 32) throw new Error('operatorToken must be at least 32 characters.');
     this.releaseOwner = claimController(registryPath);
@@ -57,6 +57,7 @@ export class Controller {
     this.log = log;
     this.runTimeoutMs = runTimeoutMs;
     this.beforeRetire = beforeRetire;
+    this.specialists = specialists;
     this.provisioning = new Map(); // workerId -> Promise<target>
     this.settled = new Map();      // runId -> Promise (in-flight runs)
   }
@@ -72,8 +73,8 @@ export class Controller {
   }
 
   /** Create a goal; its supervisor runs on an existing FLUJO (an always-on worker). */
-  async createGoal({ text, limits, supervisor, model, start = true }) {
-    const goal = this.registry.createGoal({ text, limits });
+  async createGoal({ id, text, limits, supervisor, model, start = true }) {
+    const goal = this.registry.createGoal({ id, text, limits });
     const { worker, token } = this.registry.reserve({ goalId: goal.id, role: 'supervisor', name: 'supervisor' });
     // An always-on Fly worker is reached through a private proxy and talks back through the relay.
     const onFly = Boolean(supervisor.app);
@@ -83,7 +84,8 @@ export class Controller {
     let connection;
     try {
       connection = await this.connect(target);
-      await installTemplate(connection.client, { model, fleet: this.fleetFor(token, { remote: onFly }), browser: supervisor.browser !== false });
+      await installTemplate(connection.client, { model, fleet: this.fleetFor(token, { remote: onFly }),
+        browser: supervisor.browser !== false, specialists: this.specialists });
     } catch (error) {
       this.registry.markFailed(worker.id, error.message);
       throw error;
@@ -124,7 +126,7 @@ export class Controller {
     const provisioning = (async () => {
       try {
         const target = await this.provisioner.provision(worker, this.fleetFor(token),
-          { isLeaf: worker.depth >= this.registry.goal(worker.goalId).limits.maxDepth });
+          { isLeaf: worker.depth >= this.registry.goal(worker.goalId).limits.maxDepth, specialists: this.specialists });
         this.registry.enroll(worker.id, target);
         return target;
       } catch (error) {

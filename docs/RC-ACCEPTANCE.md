@@ -1,8 +1,8 @@
 # RC acceptance
 
-Seagulled 0.1.0-rc.3 is a Windows Electron app and a Node CLI with a shared durable conversation, goals, controls, provider setup and bounded team coordinator. The full live company across Fly workers is still unqualified.
+Seagulled 0.1.0-rc.4 is a Windows Electron app and a Node CLI with a shared durable conversation, goals, controls, provider setup and bounded team coordinator. The full live company across Fly workers is still unqualified.
 
-The candidate is checked with 79 automated cases. Packaged Electron startup, renderer isolation, provider discovery, shared CLI access and shutdown are separate release gates; the CLI archive runs independently. Package auditing excludes private-state entries. These checks do not replace live cloud qualification.
+The candidate is checked with 95 automated cases. Packaged Electron startup, renderer isolation, provider discovery, shared CLI access and shutdown are separate release gates; the CLI archive runs independently. Package auditing excludes private-state entries. These checks do not replace live cloud qualification.
 
 ## Qualified paths
 
@@ -17,11 +17,15 @@ The candidate is checked with 79 automated cases. Packaged Electron startup, ren
 
 ## Cloud and provider scope
 
-The isolated Fly path creates its own controller, intent journal and boot workspace. With independently usable API credentials, the recovered worker-tree engine can create up to three workers by default, at depth two, with an owned relay for remote delegation. This company path is implemented and fixture tested, but has not completed a live multi-worker acceptance run. Keyless Codex subscription mode permits one Fly worker, with a successful local boot call required before cloning. It does not qualify concurrent copies of one subscription login.
+The selected goal provider now supplies the backend worker route. OpenAI Responses and Anthropic API connections can permit credential use by isolated FLUJO workers after the setup disclosure. Older discovered connections remain local until permission is granted. Public provider state distinguishes supported worker routing and permission from verified inference; no keys appear in it. Legacy fleet profiles supply tooling metadata without replacing the selected provider. Confirmed account quota holds survive a model-name change. Modal inference and native subscription connections remain local-only in the product until their remote execution paths are qualified.
+
+The isolated Fly path creates its own controller, intent journal and boot workspace. With independently usable API credentials, the recovered worker-tree engine can create up to three workers by default, at depth two, with an owned relay for remote delegation. This company path is implemented and fixture tested, but has not completed a live multi-worker acceptance run. The separate diagnostic keyless Codex route permits one Fly worker after a successful local boot call; it remains disabled for normal product goals. It does not qualify concurrent copies of one subscription login.
+
+An optional specialist prompt profile reuses the same three team FlowSpecs and one shared subflow gate. Its declared target is ten Machines, each one lead and nine specialist conversations, with root supervision separately counted. The ordinary template retains its ten-child limit, and Seagulled's smaller product caps are unchanged. Role briefs share the installed model and connected tools; they do not create independent permissions or extra scheduler capacity. This target has not been live qualified.
 
 Final worker files must be saved under the designated `seagulled-output` directory. Completed workers with missing or incomplete capture retain their exact sandbox and hold new admission; failed calls retain a failure receipt and may retire without claiming delivered files. Captured outputs are private, with common credential names and linked files rejected. A renamed secret could still be generated inside this directory; filename checks do not establish secret-free content. Existing fleet writers, workers, provider identities and paid reservations are not adopted.
 
-The initial actual Fly attempt provisioned a worker and submitted a team run, but its configured Modal workspace was disabled (HTTP 404). It produced no successful model answer. The exact worker app and isolated boot workspace were removed; its original failed run is retained privately. Preflight now checks availability before provisioning. This failed run is separate from deterministic fixtures and native-provider acceptance.
+The initial actual Fly attempt provisioned a worker and submitted a team run, but its configured Modal workspace was disabled (HTTP 404). It produced no successful model answer. The exact worker app and isolated boot workspace were removed; its original failed run is retained privately. Preflight checks tooling and model catalogs before provisioning; catalog availability is not inference proof. This failed run is separate from deterministic fixtures and native-provider acceptance.
 
 A later isolated workspace creation returned HTTP 500 before any Fly provisioning or model submission. Exact-name readback found no surviving workspace. A durable source admission hold prevents new goals from repeating that failed mutation and lets the automatic route use native providers. The FLUJO owner is investigating the source failure; a successful cloud model run remains unqualified.
 
@@ -31,7 +35,7 @@ A later bounded subscription attempt used the existing FLUJO encrypted snapshot 
 
 A new local-only tool-enabled team diagnostic was prepared to distinguish tool-free boot from full team compatibility. Automatic command review blocked startup of its fresh isolated FLUJO source, including a managed foreground alternative. Neither command executed; no diagnostic workspace, conversation, model call or Fly resource was created. No further launcher workaround was attempted. Tool-enabled FLUJO/Codex team compatibility remains unqualified.
 
-Native subscription usage is counted separately from dollar billing. Published API token rates produce labeled estimates, not invoices. Unknown cloud cost reserves the remaining logical allowance and holds further metered work; subscription review may inspect existing results. Dollar controls are admission and output limits, not a qualified all-in Fly/Modal invoice guarantee. Pending allowance cannot be erased by reducing a budget.
+Native subscription usage is counted separately from dollar billing. Published API token rates produce labeled estimates, not invoices. Missing or invalid monetary receipts remain unpriced, including after reopening; only a finite numeric zero can establish a measured $0 receipt. Unknown cloud cost reserves the remaining logical allowance and holds further metered work. Dollar controls are admission and output limits, not a qualified all-in Fly/Modal invoice guarantee. Pending allowance cannot be erased by reducing a budget. FLUJO's current flow usage events contain a placeholder zero cost; it is not accepted as a billing receipt.
 
 Claude sign-in was discovered, but this host's native subscription execution was denied. The separate Anthropic key route is implemented and fixture tested. Antigravity is detected when installed; unattended execution was not established and is not offered as working. Modal inference setup accepts an inference Proxy Token; an ordinary account token is insufficient.
 

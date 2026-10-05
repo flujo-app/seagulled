@@ -1,6 +1,7 @@
 // Installs the swarm-team template into one FLUJO workspace. Idempotent and additive:
 // it creates or updates only its own model row, its `fleet` MCP server and its three flows.
 import { bootSpec, buildSpecs, FLOW_NAMES } from './template/flows.mjs';
+import { validateSpecialists } from './template/specialists.mjs';
 
 export const MODEL_ID = 'swarm-model';
 
@@ -10,7 +11,8 @@ export const MODEL_ID = 'swarm-model';
  *                 or { id } to bind the flows to a model that already exists in the workspace
  * @param fleet    { url, token } of the fleet controller's MCP endpoint, so agents can reach the swarm
  */
-export async function installTemplate(client, { model, fleet, browser = true, bootOnly = false, enableBundled = false, limits } = {}) {
+export async function installTemplate(client, { model, fleet, browser = true, bootOnly = false, enableBundled = false, limits, specialists } = {}) {
+  if (specialists) validateSpecialists(specialists, model?.id || MODEL_ID);
   const created = await client.ensureWorkspace();
   if (enableBundled) {
     // A cloned Worker arrives with its bundled tool servers switched off; start the Worker's own.
@@ -51,7 +53,7 @@ export async function installTemplate(client, { model, fleet, browser = true, bo
   }
   const availableServers = servers.filter((server) => !server.disabled).map((server) => server.name);
   const flows = [];
-  for (const spec of buildSpecs({ model: modelId, availableServers, limits })) flows.push(await client.saveFlowSpec(spec));
+  for (const spec of buildSpecs({ model: modelId, availableServers, limits, specialists })) flows.push(await client.saveFlowSpec(spec));
   return { workspace: client.workspace, workspaceCreated: created, modelId, availableServers,
     flows: Object.fromEntries(flows.map((flow) => [flow.name, flow.id])), names: FLOW_NAMES };
 }

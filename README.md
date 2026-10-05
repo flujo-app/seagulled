@@ -6,7 +6,7 @@ Seagulled is an Electron desktop app and CLI for the FLUJO ecosystem. The conver
 
 ## Start
 
-Download the Windows portable app from [Releases](https://github.com/flujo-app/seagulled/releases). Open it and tell Todd what you want done. Existing supported provider sign-ins are discovered locally. When a connection is needed, choose a provider in the setup dialog. Native login remains with the provider; API keys are handled by the local trusted process.
+Download the Windows portable app from [Releases](https://github.com/flujo-app/seagulled/releases). Open it and tell Todd what you want done. Existing supported provider sign-ins are discovered locally. When a connection is needed, choose a provider in the setup dialog. Native login remains with the provider. API keys are encrypted locally in the desktop app; supported worker use requires the permission shown during connection. Connection and worker eligibility do not establish successful inference or cloud execution.
 
 Use the goal sidebar to change a goal or its budget, pause, resume or stop. Task details show what was actually attempted. Spending updates as terminal provider usage arrives, with subscription and unpriced usage shown separately. Estimated amounts are not provider invoices.
 

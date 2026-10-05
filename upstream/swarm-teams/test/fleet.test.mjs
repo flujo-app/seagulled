@@ -99,6 +99,22 @@ test('registry survives a restart and marks in-flight runs unknown instead of re
   assert.equal(JSON.stringify(second.state).includes(token), false, 'bearers are stored only as hashes');
 });
 
+test('controller preserves an explicit goal id and rejects its collision before installing again', async () => {
+  const { flujo, controller, model, close } = await fixture();
+  try {
+    const supervisor = { origin: flujo.origin, workspace: 'default' };
+    const first = await controller.createGoal({ id: 'case-stable-123', text: 'First request',
+      supervisor, model, start: false });
+    assert.equal(first.goal.id, 'case-stable-123');
+    const previousGoals = Object.keys(controller.registry.state.goals);
+    const previousWorkers = Object.keys(controller.registry.state.workers);
+    await assert.rejects(controller.createGoal({ id: 'case-stable-123', text: 'Second request',
+      supervisor, model, start: false }), (error) => error.code === 'CONFLICT');
+    assert.deepEqual(Object.keys(controller.registry.state.goals), previousGoals);
+    assert.deepEqual(Object.keys(controller.registry.state.workers), previousWorkers);
+  } finally { await close(); }
+});
+
 test('flow specs wire only connected servers and keep ten parallel agents per team', () => {
   const [agent, team, supervisor] = buildSpecs({ model: 'm', availableServers: ['bash', 'filesystem', 'flujo', 'fleet'] });
   assert.deepEqual(agent.nodes[1].servers.map((server) => server.name), ['bash', 'filesystem', 'flujo', 'fleet']);

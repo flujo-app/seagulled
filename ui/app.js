@@ -191,6 +191,11 @@
   function methodId(method) {return typeof method==='string'?method:String(method?.id || method?.method || method?.name || '');}
   function methodLabel(method) {const id=methodId(method);return ({'api-key':'API key','key':'API key','oauth':'Sign in','native':'Use native login','native-login':'Use native login','cli':'Use native login','subscription':'Use native login'})[id] || id.replace(/[-_]/g,' ');}
   function supportedMethods(provider) {return (Array.isArray(provider.methods)?provider.methods:[]).filter(method=>methodId(method));}
+  function workerKeyProvider(provider) {return provider?.fleetSupported===true && supportedMethods(provider).some(method=>['key','api-key'].includes(methodId(method)));}
+  function providerAction(provider) {
+    if(!provider?.connected)return 'connect';
+    return workerKeyProvider(provider) && provider.available && !provider.fleetEligible ? 'allow-workers' : 'disconnect';
+  }
   function providerDetail(provider) {
     const detail=provider.detail || (provider.available?'Ready to connect':'Unavailable on this device');
     if(detail==='CLI not installed.')return 'Native provider client not installed on this device.';
@@ -205,7 +210,8 @@
       const choice=node('button','provider-choice'); choice.type='button';choice.disabled=!provider.connected && !methods.length;
       const left=node('span','');left.append(node('strong','',provider.name || provider.id));
       let description=providerDetail(provider);
-      if(provider.id.toLowerCase().includes('modal')) description=`${description} Modal runs isolated workers after connection.`;
+      if(provider.connected && provider.fleetEligible)description+=' Worker route permitted; live execution unverified.';
+      else if(provider.connected && provider.fleetDetail)description+=` ${provider.fleetDetail}`;
       left.append(node('small','',description));choice.append(left,node('span',provider.connected?'connected-tag':'',provider.connected?'Connected':'→'));
       choice.addEventListener('click',()=>selectProvider(provider.id));dom['provider-list'].append(choice);
     }
@@ -214,17 +220,19 @@
     selectedProvider=state.providers.find(p=>p.id===id);if(!selectedProvider)return;
     dom['provider-error'].hidden=true;dom['provider-list'].hidden=true;$('refresh-providers').hidden=true;dom['connect-panel'].hidden=false;
     dom['connect-title'].textContent=selectedProvider.name || selectedProvider.id;
-    dom['connect-detail'].textContent=providerDetail(selectedProvider)+(selectedProvider.id.toLowerCase().includes('modal')?' In Modal, create an inference Proxy Token. Paste that combined token below; an ordinary account token will not work. Todd will find an available endpoint model after connecting.':'');
+    dom['connect-detail'].textContent=providerDetail(selectedProvider)+(selectedProvider.id.toLowerCase().includes('modal')?' The app can call Modal inference directly; this does not enable isolated worker execution.':'');
     $('connect-key-label').textContent=selectedProvider.id.toLowerCase().includes('modal')?'Modal inference Proxy Token':'API key';
     const methods=supportedMethods(selectedProvider);
     dom['connect-method'].replaceChildren();for(const method of methods){const option=node('option','',methodLabel(method));option.value=methodId(method);dom['connect-method'].append(option);}
     dom['connect-model'].replaceChildren();const defaultOption=node('option','','Provider default');defaultOption.value='';dom['connect-model'].append(defaultOption);
     for(const model of selectedProvider.models || []) {const id=typeof model==='string'?model:String(model.id||model.name);const option=node('option','',id);option.value=id;dom['connect-model'].append(option);}
-    dom['model-field'].hidden=!selectedProvider.models?.length;
-    dom['connect-submit'].textContent=selectedProvider.connected?'Disconnect':'Connect';
+    const action=providerAction(selectedProvider);
+    dom['model-field'].hidden=action==='disconnect' || !selectedProvider.models?.length;
+    dom['connect-submit'].textContent=action==='allow-workers'?'Allow worker use':action==='disconnect'?'Disconnect':'Connect';
+    $('disconnect-provider').hidden=action!=='allow-workers';
     dom['connect-key'].value='';updateMethodFields();
   }
-  function updateMethodFields(){const id=dom['connect-method'].value;dom['key-field'].hidden=!['key','api-key'].includes(id);dom['connect-key'].required=!dom['key-field'].hidden;}
+  function updateMethodFields(){const id=dom['connect-method'].value;const action=providerAction(selectedProvider);$('method-field').hidden=action==='disconnect';dom['key-field'].hidden=action==='disconnect' || !['key','api-key'].includes(id);$('worker-disclosure').hidden=!workerKeyProvider(selectedProvider);$('key-local-help').hidden=workerKeyProvider(selectedProvider);dom['connect-key'].required=!dom['key-field'].hidden && action!=='allow-workers';dom['connect-key'].placeholder=action==='allow-workers'?'Use saved key or paste a new one':'Paste key';}
   function openProviders(){dom['provider-error'].hidden=true;dom['provider-list'].hidden=false;$('refresh-providers').hidden=false;dom['connect-panel'].hidden=true;renderProviderList();if(!dom['provider-dialog'].open)dom['provider-dialog'].showModal();}
   function resizePrompt(){dom.prompt.style.height='auto';dom.prompt.style.height=Math.min(dom.prompt.scrollHeight,150)+'px';}
   function scheduleRefresh(){if(eventTimer)return;eventTimer=setTimeout(async()=>{eventTimer=null;try{await refresh();}catch(error){showNotice(errorText(error));}},160);}
@@ -242,14 +250,16 @@
   dom['connect-method'].addEventListener('change',updateMethodFields);
   dom['connect-form'].addEventListener('submit',async event=>{
     event.preventDefault();if(!selectedProvider||connecting)return;
-    connecting=true;dom['connect-submit'].disabled=true;dom['connect-submit'].textContent=selectedProvider.connected?'Disconnecting…':dom['connect-method'].value==='subscription'?'Waiting for sign-in…':'Connecting…';dom['provider-error'].hidden=true;
+    const action=providerAction(selectedProvider);
+    connecting=true;dom['connect-submit'].disabled=true;dom['connect-submit'].textContent=action==='disconnect'?'Disconnecting…':dom['connect-method'].value==='subscription'?'Waiting for sign-in…':'Connecting…';dom['provider-error'].hidden=true;
     try{
-      if(selectedProvider.connected)await bridge.disconnect(selectedProvider.id);
-      else {const payload={id:selectedProvider.id,method:dom['connect-method'].value};if(!dom['key-field'].hidden)payload.key=dom['connect-key'].value.trim();if(!dom['model-field'].hidden && dom['connect-model'].value)payload.model=dom['connect-model'].value;await bridge.connect(payload);}
+      if(action==='disconnect')await bridge.disconnect(selectedProvider.id);
+      else {const payload={id:selectedProvider.id,method:dom['connect-method'].value};if(!dom['key-field'].hidden){const key=dom['connect-key'].value.trim();if(key)payload.key=key;if(workerKeyProvider(selectedProvider))payload.fleetAllowed=true;}if(!dom['model-field'].hidden && dom['connect-model'].value)payload.model=dom['connect-model'].value;await bridge.connect(payload);}
       dom['connect-key'].value='';await refresh();dom['provider-dialog'].close();clearNotice();
     }catch(error){dom['provider-error'].textContent=errorText(error);dom['provider-error'].hidden=false;}
-    finally{connecting=false;dom['connect-submit'].disabled=false;dom['connect-submit'].textContent=selectedProvider?.connected?'Disconnect':'Connect';}
+    finally{connecting=false;dom['connect-submit'].disabled=false;dom['connect-submit'].textContent=action==='allow-workers'?'Allow worker use':action==='disconnect'?'Disconnect':'Connect';}
   });
+  $('disconnect-provider').addEventListener('click',async()=>{if(!selectedProvider||connecting)return;connecting=true;try{await bridge.disconnect(selectedProvider.id);dom['connect-key'].value='';await refresh();dom['provider-dialog'].close();clearNotice();}catch(error){dom['provider-error'].textContent=errorText(error);dom['provider-error'].hidden=false;}finally{connecting=false;}});
   $('provider-back').addEventListener('click',()=>{dom['connect-panel'].hidden=true;dom['provider-list'].hidden=false;$('refresh-providers').hidden=false;dom['connect-key'].value='';});
   for(const action of ['pause','resume','stop'])$(`swarm-${action}`).addEventListener('click',()=>controlTeam(action));
   $('refresh-providers').addEventListener('click',async()=>{try{const discovered=await bridge.discover();if(discovered?.providers)applyState({...state,providers:discovered.providers});else await refresh();dom['provider-error'].hidden=true;}catch(error){dom['provider-error'].textContent=errorText(error);dom['provider-error'].hidden=false;}});

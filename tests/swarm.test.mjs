@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { SwarmCoordinator } from '../src/swarm/index.mjs';
@@ -121,15 +121,18 @@ test('six calls across a correction cycle end in Todd review without extra submi
   assert.equal(providers.calls.length, 6);
 });
 
-test('one isolated Fly developer receipt is reviewed locally and cloud allowance stays pending', async () => {
+test('one isolated Fly developer receipt holds further paid review while cloud allowance is unknown', async () => {
   const providers = manager([
     JSON.stringify({ done: false, tasks: [{ task: 'Measure a worker' }] }),
-    'Remote work was reviewed.',
-    JSON.stringify({ done: true, response: 'The worker was checked.' }),
   ]);
   const fleetCalls = [];
   const events = [];
-  const swarm = new SwarmCoordinator({ providers, dataDir: directory(), fleet: 'auto',
+  const dataDir = directory();
+  const privateKey = 'fictional-private-key-never-saved';
+  providers.fleetRoute = (providerId) => ({ available: true, providerId,
+    model: { name: 'fixture-model', baseUrl: 'http://127.0.0.1:1/v1', apiKey: privateKey,
+      provider: 'openai', adapter: 'openai-responses' }, verification: 'unverified', costPolicy: 'pending' });
+  const swarm = new SwarmCoordinator({ providers, dataDir, fleet: 'auto',
     fleetRunner: async (input) => {
       fleetCalls.push(input);
       return { available: true, text: 'Fly worker ran Node 22 and reported its output.',
@@ -137,10 +140,34 @@ test('one isolated Fly developer receipt is reviewed locally and cloud allowance
         sandbox: { kind: 'fly', workerId: 'fictional-fly-worker', retired: true, cleanupConfirmed: true },
         artifacts: [{ path: '/fictional/fly-result.txt', bytes: 42, sha256: 'a'.repeat(64), kind: 'run-result' }] };
     }, onEvent: (event) => events.push(event) });
-  const result = await swarm.execute({ goal: goal({ providerId: 'codex' }) });
+  await assert.rejects(swarm.execute({ goal: goal() }), /spend is unknown/);
   assert.equal(fleetCalls.length, 1);
-  assert.equal(result.tasks[1].sandbox.kind, 'fly');
-  assert.equal(result.tasks[1].artifacts[0].kind, 'run-result');
+  assert.equal(fleetCalls[0].fleetRoute.providerId, 'fictional');
+  assert.equal(readFileSync(path.join(dataDir, 'swarm', 'registry.json'), 'utf8').includes(privateKey), false);
+  assert.equal(swarm.tasks('goal-one')[1].sandbox.kind, 'fly');
+  assert.equal(swarm.tasks('goal-one')[1].artifacts[0].kind, 'run-result');
   assert.equal(events.find((event) => event.type === 'usage' && event.usage.billingPending)?.usage.reservedUsd, 4.8);
-  assert.deepEqual(providers.calls.map((call) => call.role), ['lead', 'reviewer', 'lead']);
+  assert.deepEqual(providers.calls.map((call) => call.role), ['lead']);
+});
+
+test('an unavailable or mismatched selected-provider route never invokes the fleet runner', async () => {
+  for (const route of [{ available: false, detail: 'not qualified' },
+    { available: true, providerId: 'other', model: { apiKey: 'wrong-provider-secret' } }]) {
+    const providers = manager([
+      JSON.stringify({ done: false, tasks: [{ task: 'Check locally' }] }),
+      'Local provider completed the task.', 'Local review completed.',
+      JSON.stringify({ done: true, response: 'Locally reviewed.' }),
+    ]);
+    providers.fleetRoute = () => route;
+    let fleetCalls = 0;
+    const events = [];
+    const swarm = new SwarmCoordinator({ providers, dataDir: directory(), fleet: 'auto',
+      fleetRunner: async () => { fleetCalls++; throw new Error('wrong provider route'); },
+      onEvent: (event) => events.push(event) });
+    const result = await swarm.execute({ goal: goal() });
+    assert.equal(result.completed, true);
+    assert.equal(fleetCalls, 0);
+    assert.deepEqual(providers.calls.map((call) => call.role), ['lead', 'developer', 'reviewer', 'lead']);
+    assert.ok(events.some((event) => event.type === 'task' && /continuing locally/.test(event.task.phase ?? '')));
+  }
 });

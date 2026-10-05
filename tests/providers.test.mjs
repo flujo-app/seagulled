@@ -64,6 +64,9 @@ test('Modal discovers a model with a Proxy Token and rejects account tokens', as
   await assert.rejects(manager.connect({ id: 'modal', method: 'key', key: 'ak-account-token' }), /Proxy Token/);
   const state = await manager.connect({ id: 'modal', method: 'key', key: 'wk-id.ws-secret' });
   assert.deepEqual(state.models, ['test.us-west.modal.direct']);
+  assert.equal(state.fleetSupported, false);
+  assert.equal(state.fleetEligible, false);
+  assert.equal(manager.fleetRoute('modal').available, false);
   assert.doesNotMatch(JSON.stringify(state), /ws-secret/);
 });
 
@@ -117,6 +120,77 @@ test('failed secure storage leaves API provider disconnected', async () => {
   const manager = new ProviderManager({ env: {}, credentialStore: { set: async () => { throw new Error('unavailable'); } } });
   await assert.rejects(manager.connect({ id: 'openai', method: 'key', key: 'test-key' }), /unavailable/);
   assert.equal(manager.publicState().find((item) => item.id === 'openai').connected, false);
+});
+
+test('fleet routes require explicit worker consent and expose only public eligibility', async () => {
+  const manager = new ProviderManager({ commandRunner: mockCommands, env: { OPENAI_API_KEY: 'env-secret' } });
+  await manager.discover();
+  assert.deepEqual(manager.fleetRoute('missing'), { available: false, detail: 'Unknown provider.' });
+  for (const id of ['codex', 'claude', 'antigravity', 'modal', 'openai', 'anthropic']) {
+    assert.equal(manager.fleetRoute(id).available, false, id);
+  }
+  for (const state of manager.publicState()) assert.equal(state.fleetSupported, ['openai', 'anthropic'].includes(state.id), state.id);
+  assert.equal(manager.publicState().find((item) => item.id === 'openai').fleetEligible, false);
+  await manager.connect({ id: 'openai', method: 'key', fleetAllowed: true });
+  assert.deepEqual(manager.fleetRoute('openai'), {
+    available: true,
+    providerId: 'openai',
+    model: { name: 'gpt-6.1-sol', baseUrl: 'https://api.openai.com/v1', provider: 'openai', adapter: 'openai-responses', apiKey: 'env-secret' },
+    verification: 'unverified',
+    costPolicy: 'pending',
+  });
+  assert.equal(manager.publicState().find((item) => item.id === 'openai').fleetEligible, true);
+  assert.doesNotMatch(JSON.stringify(manager.publicState()), /env-secret/);
+  await manager.connect({ id: 'anthropic', method: 'key', key: 'anthropic-secret', model: 'claude-sonnet-5-5', fleetAllowed: true });
+  assert.deepEqual(manager.fleetRoute('anthropic').model, {
+    name: 'claude-sonnet-5-5', baseUrl: 'https://api.anthropic.com', provider: 'anthropic', adapter: 'anthropic', apiKey: 'anthropic-secret',
+  });
+  await assert.rejects(manager.connect({ id: 'codex', method: 'subscription', fleetAllowed: true }), /not qualified/);
+  await assert.rejects(manager.connect({ id: 'modal', method: 'key', fleetAllowed: true }), /not qualified/);
+  await assert.rejects(manager.connect({ id: 'openai', method: 'key', fleetAllowed: 'true' }), /must be a boolean/);
+});
+
+test('worker consent reuses the connected key and model, persists only consent metadata, and can be revoked', async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'seagulled-provider-test-'));
+  const secrets = new Map();
+  const credentialStore = {
+    get: async (id) => secrets.get(id),
+    set: async (id, value) => { secrets.set(id, value); },
+    delete: async (id) => { secrets.delete(id); },
+  };
+  try {
+    const manager = new ProviderManager({ dataDir, commandRunner: mockCommands, env: {}, credentialStore });
+    await manager.connect({ id: 'openai', method: 'key', key: 'stored-secret', model: 'gpt-6-astra' });
+    assert.equal(manager.fleetRoute('openai').available, false);
+    await manager.connect({ id: 'openai', method: 'key', fleetAllowed: true });
+    assert.equal(manager.fleetRoute('openai').model.apiKey, 'stored-secret');
+    assert.equal(manager.fleetRoute('openai').model.name, 'gpt-6-astra');
+    const saved = await readFile(join(dataDir, 'connections.json'), 'utf8');
+    assert.deepEqual(JSON.parse(saved).openai, { method: 'key', model: 'gpt-6-astra', fleetAllowed: true });
+    assert.doesNotMatch(saved, /stored-secret/);
+    const restarted = new ProviderManager({ dataDir, commandRunner: mockCommands, env: {}, credentialStore });
+    await restarted.discover();
+    assert.equal(restarted.fleetRoute('openai').model.apiKey, 'stored-secret');
+    await restarted.connect({ id: 'openai', method: 'key', fleetAllowed: false });
+    assert.equal(restarted.fleetRoute('openai').available, false);
+    await restarted.disconnect('openai');
+    assert.equal(restarted.fleetRoute('openai').available, false);
+    assert.deepEqual(JSON.parse(await readFile(join(dataDir, 'connections.json'), 'utf8')).openai, { disabled: true });
+  } finally { await rm(dataDir, { recursive: true, force: true }); }
+});
+
+test('worker consent cannot revive a disconnected or blocked API connection without a supplied key', async () => {
+  const manager = new ProviderManager({ commandRunner: mockCommands, env: { OPENAI_API_KEY: 'env-secret' }, fetchImpl: async () => ({ status: 401, ok: false }) });
+  await assert.rejects(manager.connect({ id: 'openai', method: 'key', fleetAllowed: true }), /Connect this API provider/);
+  await manager.discover();
+  await manager.connect({ id: 'openai', method: 'key', fleetAllowed: true });
+  await assert.rejects(manager.run({ providerId: 'openai', prompt: 'Hi', maxUsd: 1 }), /rejected authentication/);
+  assert.equal(manager.fleetRoute('openai').available, false);
+  await assert.rejects(manager.connect({ id: 'openai', method: 'key', fleetAllowed: true }), /was blocked/);
+  await manager.connect({ id: 'openai', method: 'key', key: 'replacement-secret' });
+  assert.equal(manager.fleetRoute('openai').available, false);
+  await manager.disconnect('openai');
+  await assert.rejects(manager.connect({ id: 'openai', method: 'key', fleetAllowed: true }), /Connect this API provider/);
 });
 
 test('Codex developer writes only in owned workspace and returns artifact receipt', async () => {

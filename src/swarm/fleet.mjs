@@ -20,6 +20,24 @@ const sourceHold = (dataDir, origin) => dataDir && existsSync(holdPath(dataDir, 
 const modelFingerprint = (model) => createHash('sha256').update(`${model.baseUrl}\0${model.name}\0${model.apiKey}`).digest('hex').slice(0, 24);
 const modelHoldPath = (dataDir, model) => path.join(dataDir, 'fleet', `model-admission-${modelFingerprint(model)}.json`);
 const modelHold = (dataDir, model) => dataDir && existsSync(modelHoldPath(dataDir, model));
+const accountFingerprint = (model) => createHash('sha256').update(`${model.baseUrl}\0${model.apiKey}`).digest('hex').slice(0, 24);
+const accountHoldPath = (dataDir, model) => path.join(dataDir, 'fleet', `account-admission-${accountFingerprint(model)}.json`);
+function knownQuotaHold(dataDir, model) {
+  if (!dataDir || !model?.apiKey) return false;
+  if (existsSync(accountHoldPath(dataDir, model))) return true;
+  // A prior isolated OpenAI boot call returned the exact no-credits denial for
+  // gpt-4.1-mini. Preserve that account hold when the same key selects a new
+  // model name; a catalog listing is not evidence that credits were restored.
+  if (model.baseUrl !== 'https://api.openai.com/v1') return false;
+  const legacy = modelHoldPath(dataDir, { ...model, name: 'gpt-4.1-mini' });
+  try {
+    const bytes = readFileSync(legacy);
+    if (bytes.length > 8192) return false;
+    const receipt = JSON.parse(bytes.toString('utf8'));
+    return receipt?.state === 'held' && receipt.provider === 'openai-api'
+      && /no credits remaining|insufficient_quota/i.test(receipt.reason ?? '');
+  } catch { return false; }
+}
 const safeFailureField = (value) => typeof value === 'string' && /^[A-Za-z0-9_.-]{1,80}$/.test(value) ? value : undefined;
 export function conversationFailure(read) {
   const error = read?.body?.lastError;
@@ -39,16 +57,42 @@ function recordSourceHold(dataDir, origin, workspace, reason) {
     reason, observedAt: new Date().toISOString(), state: 'held' }), { flag: 'wx', mode: 0o600 });
 }
 
+/** Only a completed read of the original failed conversation may hold an account. */
+export function recordConfirmedQuotaHold({ dataDir, model, providerId, goalId, runId, read } = {}) {
+  const error = read?.body?.lastError;
+  const status = read?.body?.status;
+  const quotaCode = error?.httpStatus === 429 && error?.code === 'insufficient_quota';
+  const exactNoCredits = [402, 429].includes(error?.httpStatus)
+    && typeof error?.message === 'string' && /^no credits remaining[.!]?$/i.test(error.message.trim());
+  if (read?.status !== 200 || !['error', 'failed'].includes(status) || !(quotaCode || exactNoCredits)
+    || !dataDir || !model?.apiKey || !exactProductBinding(providerId, model)) return false;
+  const target = accountHoldPath(dataDir, model);
+  mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+  if (!existsSync(target)) {
+    try {
+      writeFileSync(target, JSON.stringify({ version: 1, state: 'held', accountFingerprint: accountFingerprint(model),
+        providerId, classification: 'confirmed_no_credits', source: 'original_fly_conversation',
+        goalId, runId, observedAt: new Date().toISOString() }), { flag: 'wx', mode: 0o600 });
+    } catch (error) { if (error?.code !== 'EEXIST') throw error; }
+  }
+  return true;
+}
+
 async function modelProbe(model) {
   try {
+    const anthropic = model.provider === 'anthropic' && model.adapter === 'anthropic';
     const base = model.baseUrl.endsWith('/') ? model.baseUrl : `${model.baseUrl}/`;
-    const response = await fetch(new URL('models', base), {
-      method: 'GET', headers: { Authorization: `Bearer ${model.apiKey}` },
+    const url = anthropic ? new URL(`v1/models/${encodeURIComponent(model.name)}`, base) : new URL('models', base);
+    const response = await fetch(url, {
+      method: 'GET', headers: anthropic
+        ? { 'x-api-key': model.apiKey, 'anthropic-version': '2023-06-01' }
+        : { Authorization: `Bearer ${model.apiKey}` },
       signal: AbortSignal.timeout(7000), redirect: 'error',
     });
     if (!response.ok) return { available: false, detail: `HTTP ${response.status}` };
     const catalogue = await response.json().catch(() => null);
-    if (Array.isArray(catalogue?.data) && !catalogue.data.some((entry) => entry?.id === model.name)) {
+    if (anthropic && catalogue?.id !== model.name) return { available: false, detail: 'model identity not confirmed' };
+    if (!anthropic && Array.isArray(catalogue?.data) && !catalogue.data.some((entry) => entry?.id === model.name)) {
       return { available: false, detail: 'model absent from catalog' };
     }
     return { available: true };
@@ -57,9 +101,29 @@ async function modelProbe(model) {
 
 const nativeCodex = (model) => model?.provider === 'codex' && model?.adapter === 'codex-cli'
   && typeof model.name === 'string' && model.name.length > 0 && !model.apiKey;
+const PRODUCT_BINDINGS = Object.freeze({
+  openai: { provider: 'openai', adapter: 'openai-responses', baseUrl: 'https://api.openai.com/v1' },
+  anthropic: { provider: 'anthropic', adapter: 'anthropic', baseUrl: 'https://api.anthropic.com' },
+});
+const exactProductBinding = (providerId, model) => {
+  const expected = PRODUCT_BINDINGS[providerId];
+  return Boolean(expected && model && Object.entries(expected).every(([field, value]) => model[field] === value));
+};
 
-/** Read-only discovery. No existing controller, registry, relay or worker is adopted. */
-async function inspectFleet({ dataDir } = {}) {
+/** Read-only discovery. Product calls require the selected provider's private route. */
+async function inspectFleet({ dataDir, providerId, fleetRoute, diagnostic = false } = {}) {
+  if (!diagnostic && (fleetRoute?.available !== true || fleetRoute.providerId !== providerId
+    || typeof providerId !== 'string' || !providerId)) {
+    return { available: false, detail: 'The selected provider has no Fly route. Local provider work remains available.' };
+  }
+  if (!diagnostic && (!exactProductBinding(providerId, fleetRoute.model)
+    || typeof fleetRoute.model.name !== 'string' || !fleetRoute.model.name
+    || typeof fleetRoute.model.apiKey !== 'string' || !fleetRoute.model.apiKey)) {
+    return { available: false, detail: 'The selected provider has no usable Fly model binding.' };
+  }
+  if (!diagnostic && (modelHold(dataDir, fleetRoute.model) || knownQuotaHold(dataDir, fleetRoute.model))) {
+    return { available: false, detail: 'The selected provider account has a saved no-credits hold. Local provider work remains available.' };
+  }
   const location = profilePath();
   if (!existsSync(location)) return { available: false, detail: 'No local FLUJO fleet profile was found.' };
   let config;
@@ -74,6 +138,7 @@ async function inspectFleet({ dataDir } = {}) {
         apiKey: config.token, contextWindow: config.contextLimit ?? config.maxModelLen } };
     } catch { return { available: false, detail: 'The local Fly tooling profile could not be read.' }; }
   }
+  if (!diagnostic) config = { ...config, model: fleetRoute.model };
   if (config?.provisioner?.kind !== 'fly' || !config.provisioner.flujoCloudPath
     || !existsSync(config.provisioner.flujoCloudPath) || !config.model?.name
     || (!nativeCodex(config.model) && (!config.model?.baseUrl || !config.model?.apiKey))
@@ -94,14 +159,21 @@ async function inspectFleet({ dataDir } = {}) {
     });
   } catch { return { available: false, detail: 'The local FLUJO source is unavailable.' }; }
   if (nativeCodex(config.model)) {
+    if (!diagnostic && fleetRoute.verification !== 'qualified') {
+      return { available: false, detail: 'The selected keyless Codex route is not qualified for Fly. Local provider work remains available.' };
+    }
     return { available: true, provider: 'codex-subscription-candidate',
-      detail: 'A keyless Codex model is configured. The isolated boot flow must confirm this login before any Fly worker is created; cloud execution is not yet qualified.', config };
+      detail: 'A keyless Codex model is configured. The isolated boot flow must confirm this login before any Fly worker is created; cloud execution is not yet qualified.',
+      ...(!diagnostic ? { providerId } : {}), config };
   }
   const original = await modelProbe(config.model);
   if (original.available) {
     return { available: true, provider: 'configured-model',
-      detail: 'Local FLUJO and an isolated Fly provisioning path are configured; live provisioning has not been verified.', config };
+      detail: 'Local FLUJO and the selected provider model catalog are configured; live Fly execution has not been verified.',
+      ...(!diagnostic ? { providerId } : {}), config };
   }
+  if (!diagnostic) return { available: false,
+    detail: `The selected provider model endpoint is unavailable (${original.detail}); local provider work remains available.` };
   const fallbackKey = process.env.OPENAI_API_KEY;
   if (fallbackKey) {
     const fallback = { name: 'gpt-4.1-mini', baseUrl: 'https://api.openai.com/v1', apiKey: fallbackKey,
@@ -117,15 +189,22 @@ async function inspectFleet({ dataDir } = {}) {
   return { available: false, detail: `The configured FLUJO model endpoint is unavailable (${original.detail}); no working API fallback was found.` };
 }
 
-export async function fleetStatus({ dataDir } = {}) {
-  const { config, ...publicState } = await inspectFleet({ dataDir });
+export async function fleetStatus({ dataDir, providerId, fleetRoute } = {}) {
+  const { config, ...publicState } = await inspectFleet({ dataDir, providerId, fleetRoute });
+  return publicState;
+}
+
+/** Explicit legacy-profile diagnostic; never used by a product goal. */
+export async function fleetDiagnosticStatus({ dataDir } = {}) {
+  const { config, ...publicState } = await inspectFleet({ dataDir, diagnostic: true });
   return publicState;
 }
 
 /** One owned Fly leaf, with no existing fleet writer or Machine adoption. */
-export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, onStatus = () => undefined }) {
+export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetRoute,
+  diagnostic = false, onStatus = () => undefined }) {
   if (!goal || typeof goal.id !== 'string' || !/^[\w-]{1,100}$/.test(goal.id)) throw new Error('A safe goal id is required for isolated fleet work.');
-  const discovered = await inspectFleet({ dataDir });
+  const discovered = await inspectFleet({ dataDir, providerId: goal.providerId, fleetRoute, diagnostic });
   if (!discovered.available) return { available: false, detail: discovered.detail };
   const config = discovered.config;
   const bootWorkspace = `seagulled-${goal.id.slice(-12)}-boot`;
@@ -250,15 +329,19 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, onStat
     }
     if (result.state !== 'completed') {
       let failureDiagnostic = { readStatus: null, conversationStatus: result.state };
+      let failureRead;
       let connection;
       try {
         const worker = controller.registry.worker(child.workerId);
         connection = await controller.connect(worker.target);
         const run = controller.registry.run(child.runId);
-        failureDiagnostic = conversationFailure(await connection.client.conversation(run.conversationId));
+        failureRead = await connection.client.conversation(run.conversationId);
+        failureDiagnostic = conversationFailure(failureRead);
       } catch { /* Preserve a bounded unavailable diagnostic; never replay the run. */ }
       finally { await connection?.close().catch(() => undefined); }
       record({ failureDiagnostic });
+      if (!diagnostic && failureRead) recordConfirmedQuotaHold({ dataDir, model: config.model,
+        providerId: goal.providerId, goalId: goal.id, runId: child.runId, read: failureRead });
       throw unknown(`Fly run ${child.runId} ended as ${result.state}. Its original record is retained.`);
     }
     const unfinished = Object.values(controller.registry.state.runs).filter((run) => run.goalId === goal.id
@@ -287,6 +370,9 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, onStat
         workerCount: controller.registry.tree(goal.id).filter((worker) => worker.depth > 0).length } };
     return delivered;
   } catch (error) {
+    if (typeof error?.message === 'string' && config.model.apiKey) {
+      error.message = error.message.replaceAll(config.model.apiKey, '[redacted]');
+    }
     const usage = remoteAccepted || !relayCleanupConfirmed ? { inputTokens: 0, outputTokens: 0, costUsd: null, costKind: 'unknown',
       reservedUsd: maxUsd, billingPending: true } : undefined;
     if (remoteAccepted && child && controller && !cleanupConfirmed) {

@@ -6,6 +6,7 @@ import {createRuntime, defaultDataDir} from '../src/runtime.mjs';
 import {createServer} from '../src/server.mjs';
 import {ProviderManager} from '../src/providers/index.mjs';
 import {createCredentialStore} from './credentials.mjs';
+import {validateConnectPayload} from './input.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const externalHosts = new Set(['modal.com','www.modal.com','auth.modal.com','anthropic.com','console.anthropic.com','claude.ai','openai.com','platform.openai.com','chatgpt.com','github.com','accounts.google.com']);
@@ -26,13 +27,6 @@ function assertString(value, label, max = 20000) {
   return value;
 }
 function assertId(value) { return assertString(value, 'ID', 128); }
-function assertPayload(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Connection details are invalid.');
-  const payload = {id:assertId(value.id), method:assertString(value.method,'Connection method',100)};
-  if (value.key !== undefined) payload.key=assertString(value.key,'API key',10000);
-  if (value.model !== undefined) payload.model=assertString(value.model,'Model',200);
-  return payload;
-}
 async function invoke(_event, method, args = []) {
   if (_event.sender !== mainWindow?.webContents || _event.sender.isDestroyed()) throw new Error('Request came from an unknown window.');
   if (!Array.isArray(args)) throw new Error('Request is invalid.');
@@ -68,7 +62,7 @@ async function invoke(_event, method, args = []) {
       return runtime.readArtifact(assertId(args[0]),assertId(args[1]),index);
     }
     case 'discover': return runtime.discover();
-    case 'connect': return runtime.connect(assertPayload(args[0]));
+    case 'connect': return runtime.connect(validateConnectPayload(args[0]));
     case 'disconnect': return runtime.disconnect(assertId(args[0]));
     default: throw new Error('Unknown request.');
   }

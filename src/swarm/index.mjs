@@ -48,7 +48,11 @@ export class SwarmCoordinator {
   }
 
   emit(event) { this.onEvent(event); }
-  fleetStatus() { return fleetStatus({ dataDir: this.dataDir }); }
+  async fleetStatus(providerId) {
+    const fleetRoute = typeof this.providers.fleetRoute === 'function'
+      ? await this.providers.fleetRoute(providerId) : { available: false };
+    return fleetStatus({ dataDir: this.dataDir, providerId, fleetRoute });
+  }
 
   tasks(goalId) {
     return Object.values(this.registry.state.runs).filter((run) => run.goalId === goalId).map((run) => ({
@@ -143,11 +147,18 @@ export class SwarmCoordinator {
         // Stream usage is deliberately ignored here. Only the terminal receipt is counted.
         let result;
         if (role === 'developer' && this.fleet === 'auto' && !fleetUsed) {
-          const remote = await this.fleetRunner({ goal, task: `ASSIGNMENT:\n${task}\n\nWork in your isolated sandbox. Report what was actually run and checked, plus paths and limits.`,
-            dataDir: this.dataDir, signal, maxUsd: remaining,
-            onStatus: (text) => this.emit({ type: 'task', goalId: goal.id,
-              task: { id: run.id, role, status: 'running', phase: trim(text, 200) } }) });
-          if (remote.available) { result = remote; fleetUsed = true; }
+          const route = typeof this.providers.fleetRoute === 'function'
+            ? await this.providers.fleetRoute(goal.providerId) : { available: false };
+          if (route?.available === true && route.providerId === goal.providerId) {
+            const remote = await this.fleetRunner({ goal, task: `ASSIGNMENT:\n${task}\n\nWork in your isolated sandbox. Report what was actually run and checked, plus paths and limits.`,
+              dataDir: this.dataDir, signal, maxUsd: remaining, fleetRoute: route,
+              onStatus: (text) => this.emit({ type: 'task', goalId: goal.id,
+                task: { id: run.id, role, status: 'running', phase: trim(text, 200) } }) });
+            if (remote.available) { result = remote; fleetUsed = true; }
+          } else {
+            this.emit({ type: 'task', goalId: goal.id,
+              task: { id: run.id, role, status: 'running', phase: 'The selected provider has no qualified Fly route; continuing locally.' } });
+          }
         }
         if (!result) result = await this.providers.run({ providerId: goal.providerId, prompt, signal, maxUsd: remaining,
           goalId: goal.id, role, onEvent: () => undefined });

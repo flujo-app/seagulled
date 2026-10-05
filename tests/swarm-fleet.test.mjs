@@ -6,11 +6,89 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
-import { conversationFailure, fleetStatus, runFleetLeaf } from '../src/swarm/fleet.mjs';
+import { conversationFailure, fleetStatus, fleetDiagnosticStatus, recordConfirmedQuotaHold, runFleetLeaf } from '../src/swarm/fleet.mjs';
 import { createOwnedRelay } from '../src/swarm/relay.mjs';
 import { buildSpecs } from '../upstream/swarm-teams/template/flows.mjs';
 import { Controller } from '../upstream/swarm-teams/fleet/controller.mjs';
 import { FlujoClient } from '../upstream/swarm-teams/lib/flujo-client.mjs';
+
+test('product Fly admission requires the exact selected provider binding before any probe or intent', async () => {
+  const dataDir = mkdtempSync(path.join(tmpdir(), 'seagulled-route-bound-'));
+  const valid = { available: true, providerId: 'openai',
+    model: { name: 'fixture-model', baseUrl: 'https://api.openai.com/v1', apiKey: 'fixture-key',
+      provider: 'openai', adapter: 'openai-responses' }, verification: 'unverified' };
+  for (const route of [undefined, { ...valid, providerId: 'anthropic' },
+    { ...valid, model: { ...valid.model, provider: 'anthropic' } },
+    { ...valid, model: { ...valid.model, adapter: 'anthropic' } },
+    { ...valid, model: { ...valid.model, baseUrl: 'https://alternate.example/v1' } }]) {
+    const status = await fleetStatus({ dataDir, providerId: 'openai', fleetRoute: route });
+    assert.equal(status.available, false);
+    const result = await runFleetLeaf({ goal: { id: 'route-bound', providerId: 'openai' },
+      task: 'fixture', dataDir, maxUsd: 2, fleetRoute: route });
+    assert.equal(result.available, false);
+    assert.equal(existsSync(path.join(dataDir, 'fleet')), false);
+  }
+});
+
+test('a saved no-credits account hold survives a model-name change without probing', async () => {
+  const dataDir = mkdtempSync(path.join(tmpdir(), 'seagulled-account-hold-'));
+  const fleetDir = path.join(dataDir, 'fleet'); mkdirSync(fleetDir);
+  const oldModel = { name: 'gpt-4.1-mini', baseUrl: 'https://api.openai.com/v1', apiKey: 'same-fixture-key' };
+  const fingerprint = createHash('sha256').update(`${oldModel.baseUrl}\0${oldModel.name}\0${oldModel.apiKey}`).digest('hex').slice(0, 24);
+  writeFileSync(path.join(fleetDir, `model-admission-${fingerprint}.json`),
+    JSON.stringify({ state: 'held', provider: 'openai-api', reason: 'no credits remaining' }));
+  const route = { available: true, providerId: 'openai',
+    model: { ...oldModel, name: 'another-model', provider: 'openai', adapter: 'openai-responses' } };
+  const status = await fleetStatus({ dataDir, providerId: 'openai', fleetRoute: route });
+  assert.equal(status.available, false);
+  assert.match(status.detail, /no-credits hold/);
+  assert.equal(existsSync(path.join(dataDir, 'fleet', 'route-bound')), false);
+});
+
+test('confirmed original quota denial holds the account across new goals and model names', async () => {
+  const dataDir = mkdtempSync(path.join(tmpdir(), 'seagulled-confirmed-quota-'));
+  const model = { name: 'first-model', baseUrl: 'https://api.openai.com/v1', apiKey: 'fixture-secret-key',
+    provider: 'openai', adapter: 'openai-responses' };
+  const read = { status: 200, body: { status: 'error', lastError: {
+    httpStatus: 429, code: 'insufficient_quota', message: 'sensitive provider body must not be stored' } } };
+  assert.equal(recordConfirmedQuotaHold({ dataDir, model, providerId: 'openai',
+    goalId: 'first-goal', runId: 'original-run', read }), true);
+  const accountPath = path.join(dataDir, 'fleet', `account-admission-${createHash('sha256')
+    .update(`${model.baseUrl}\0${model.apiKey}`).digest('hex').slice(0, 24)}.json`);
+  const saved = readFileSync(accountPath, 'utf8');
+  assert.equal(JSON.parse(saved).runId, 'original-run');
+  assert.equal(saved.includes(model.apiKey), false);
+  assert.equal(saved.includes(read.body.lastError.message), false);
+  const originalFetch = globalThis.fetch;
+  let fetches = 0;
+  globalThis.fetch = async () => { fetches++; throw new Error('account hold must precede fetch'); };
+  try {
+    for (const [goalId, name] of [['new-goal-one', 'other-model'], ['new-goal-two', 'third-model']]) {
+      const fleetRoute = { available: true, providerId: 'openai', model: { ...model, name } };
+      const status = await fleetStatus({ dataDir, providerId: 'openai', fleetRoute });
+      assert.equal(status.available, false);
+      assert.match(status.detail, /no-credits hold/);
+      const result = await runFleetLeaf({ goal: { id: goalId, providerId: 'openai' },
+        task: 'fixture', dataDir, maxUsd: 2, fleetRoute });
+      assert.equal(result.available, false);
+      assert.equal(existsSync(path.join(dataDir, 'fleet', goalId)), false);
+    }
+    assert.equal(fetches, 0);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('an ambiguous rate-limit response does not become a no-credits account hold', () => {
+  const dataDir = mkdtempSync(path.join(tmpdir(), 'seagulled-rate-limit-'));
+  const model = { name: 'fixture', baseUrl: 'https://api.openai.com/v1', apiKey: 'different-key',
+    provider: 'openai', adapter: 'openai-responses' };
+  for (const read of [
+    { status: 200, body: { status: 'error', lastError: { httpStatus: 429, code: 'rate_limit_exceeded' } } },
+    { status: 200, body: { status: 'running', lastError: { httpStatus: 429, code: 'insufficient_quota' } } },
+    { status: 503, body: { status: 'error', lastError: { httpStatus: 429, code: 'insufficient_quota' } } },
+  ]) assert.equal(recordConfirmedQuotaHold({ dataDir, model, providerId: 'openai',
+    goalId: 'original-goal', runId: 'original-run', read }), false);
+  assert.equal(existsSync(path.join(dataDir, 'fleet')), false);
+});
 
 test('workspace cleanup requires stable exact-name absence beyond an HTTP 200 deletion response', async () => {
   const client = new FlujoClient({ origin: 'http://127.0.0.1:1', workspace: 'owned-boot' });
@@ -55,30 +133,30 @@ test('disabled model preflight makes no boot workspace or Fly intent', async () 
   process.env.SEAGULLED_FLEET_PROFILE = profile;
   delete process.env.OPENAI_API_KEY;
   try {
-    const status = await fleetStatus();
+    const status = await fleetDiagnosticStatus();
     assert.equal(status.available, false);
     assert.match(status.detail, /HTTP 404/);
     assert.equal('config' in status, false, 'private profile never enters public state');
     const result = await runFleetLeaf({ goal: { id: 'fictional-goal', text: 'fictional' }, task: 'fictional',
-      dataDir: root, maxUsd: 2 });
+      dataDir: root, maxUsd: 2, diagnostic: true });
     assert.equal(result.available, false);
     assert.equal(existsSync(path.join(root, 'fleet', 'fictional-goal')), false);
     assert.deepEqual(requests, ['/api/workspaces', '/v1/models', '/api/workspaces', '/v1/models']);
     const fingerprint = createHash('sha256').update(origin).digest('hex').slice(0, 24);
     const holds = path.join(root, 'fleet'); mkdirSync(holds);
     writeFileSync(path.join(holds, `source-admission-${fingerprint}.json`), JSON.stringify({ state: 'held' }));
-    const held = await fleetStatus({ dataDir: root });
+    const held = await fleetDiagnosticStatus({ dataDir: root });
     assert.equal(held.available, false);
     assert.match(held.detail, /held after a confirmed failure/);
     assert.equal((await runFleetLeaf({ goal: { id: 'another-goal', text: 'fictional' }, task: 'fictional',
-      dataDir: root, maxUsd: 2 })).available, false);
+      dataDir: root, maxUsd: 2, diagnostic: true })).available, false);
     assert.equal(requests.length, 4, 'a held source is not re-probed or mutated');
     const accountData = path.join(root, 'held-account');
     const accountFleet = path.join(accountData, 'fleet'); mkdirSync(accountFleet, { recursive: true });
     process.env.OPENAI_API_KEY = 'fixture-key';
     const accountFingerprint = createHash('sha256').update('https://api.openai.com/v1\0gpt-4.1-mini\0fixture-key').digest('hex').slice(0, 24);
     writeFileSync(path.join(accountFleet, `model-admission-${accountFingerprint}.json`), JSON.stringify({ state: 'held' }));
-    const creditHeld = await fleetStatus({ dataDir: accountData });
+    const creditHeld = await fleetDiagnosticStatus({ dataDir: accountData });
     assert.equal(creditHeld.available, false);
     assert.match(creditHeld.detail, /no credits/);
     assert.deepEqual(requests.slice(4), ['/api/workspaces', '/v1/models'], 'credit hold avoids another API catalog request');
@@ -123,11 +201,11 @@ test('keyless Codex boot refusal stops before Fly provisioning and deletes its o
   const previous = process.env.SEAGULLED_FLEET_PROFILE;
   process.env.SEAGULLED_FLEET_PROFILE = profile;
   try {
-    const status = await fleetStatus({ dataDir: root });
+    const status = await fleetDiagnosticStatus({ dataDir: root });
     assert.equal(status.available, true);
     assert.equal(status.provider, 'codex-subscription-candidate');
     await assert.rejects(() => runFleetLeaf({ goal: { id: 'native-goal', text: 'fixture' }, task: 'fixture',
-      dataDir: root, maxUsd: 1 }), (error) => error.outcome === 'failed' && /No Fly worker/.test(error.message));
+      dataDir: root, maxUsd: 1, diagnostic: true }), (error) => error.outcome === 'failed' && /No Fly worker/.test(error.message));
     assert.equal(model.provider, 'codex');
     assert.equal(model.adapter, 'codex-cli');
     assert.equal(model.ApiKey, '');

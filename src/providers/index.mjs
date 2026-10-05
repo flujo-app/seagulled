@@ -11,6 +11,10 @@ const MAX_TEXT = 80_000;
 const DEFAULT_MODEL = { openai: 'gpt-6.1-sol', anthropic: 'claude-sonnet-5-5' };
 const PRICES_PER_MILLION = { 'gpt-6-luna': [0.1, 0.5], 'gpt-6.1-sol': [2, 10], 'gpt-6-astra': [10, 50], 'claude-sonnet-5-5': [2, 10] };
 const METHOD = { codex: ['subscription'], claude: ['subscription'], antigravity: [], openai: ['key'], anthropic: ['key'], modal: ['key'] };
+const FLEET_MODEL = {
+  openai: { baseUrl: 'https://api.openai.com/v1', provider: 'openai', adapter: 'openai-responses' },
+  anthropic: { baseUrl: 'https://api.anthropic.com', provider: 'anthropic', adapter: 'anthropic' },
+};
 const json = (text) => { try { return JSON.parse(text); } catch { return null; } };
 const safeText = (value) => String(value ?? '').slice(0, MAX_TEXT);
 const validModel = (value) => typeof value === 'string' && /^[\w./:-]{1,160}$/.test(value);
@@ -131,7 +135,7 @@ export class ProviderManager {
     }
     for (const [id, envKey] of [['openai', this.env.OPENAI_API_KEY], ['anthropic', this.env.ANTHROPIC_API_KEY], ['modal', this.env.MODAL_PROXY_TOKEN]]) {
       if (envKey && !this.explicitlyDisconnected.has(id) && !this.apiBlocked.has(id) && !this.connected.has(id) && (id !== 'modal' || this.saved[id]?.model)) {
-        this.connected.set(id, { method: 'key', key: envKey, model: this.saved[id]?.model ?? DEFAULT_MODEL[id] });
+        this.connected.set(id, { method: 'key', key: envKey, model: this.saved[id]?.model ?? DEFAULT_MODEL[id], fleetAllowed: this.saved[id]?.method === 'key' && this.saved[id]?.fleetAllowed === true });
       }
     }
     if (this.credentialStore) {
@@ -139,7 +143,7 @@ export class ProviderManager {
         if (this.saved[id]?.method === 'key' && !this.connected.has(id) && !this.explicitlyDisconnected.has(id) && !this.apiBlocked.has(id)) {
           try {
             const key = await this.credentialStore.get?.(id);
-            if (key && (id !== 'modal' || this.saved[id]?.model)) this.connected.set(id, { method: 'key', key, model: this.saved[id].model ?? DEFAULT_MODEL[id] });
+            if (key && (id !== 'modal' || this.saved[id]?.model)) this.connected.set(id, { method: 'key', key, model: this.saved[id].model ?? DEFAULT_MODEL[id], fleetAllowed: this.saved[id]?.fleetAllowed === true });
           } catch { /* Secure storage unavailable: leave disconnected and ask for a fresh key. */ }
         }
       }
@@ -159,15 +163,37 @@ export class ProviderManager {
       else if (apiBlocked) detail = apiBlocked;
       else if (id === 'modal') detail = 'Requires a Modal inference Proxy Token and an available endpoint model. Modal account tokens are not inference tokens.';
       else detail = 'Requires an API key; API billing is separate from CLI subscriptions.';
-      return { id, name, available: (id === 'codex' || id === 'claude') ? Boolean(detected?.installed && detected?.loggedIn && !detected?.blocked) : id === 'antigravity' ? false : !apiBlocked && Boolean(connection || keyAvailable), connected: Boolean(connection), methods: METHOD[id], detail, ...(connection?.model ? { models: [connection.model] } : {}) };
+      const fleet = this.fleetRoute(id);
+      return { id, name, available: (id === 'codex' || id === 'claude') ? Boolean(detected?.installed && detected?.loggedIn && !detected?.blocked) : id === 'antigravity' ? false : !apiBlocked && Boolean(connection || keyAvailable), connected: Boolean(connection), methods: METHOD[id], detail, fleetSupported: Object.hasOwn(FLEET_MODEL, id), fleetEligible: fleet.available, fleetDetail: fleet.available ? 'Worker credential transfer authorized; FLUJO inference remains unverified.' : fleet.detail, ...(connection?.model ? { models: [connection.model] } : {}) };
     });
   }
 
-  async connect({ id, method, key, model } = {}) {
+  fleetRoute(providerId) {
+    if (!Object.hasOwn(NAMES, providerId)) return { available: false, detail: 'Unknown provider.' };
+    if (this.apiBlocked.has(providerId)) return { available: false, detail: this.apiBlocked.get(providerId) };
+    if (providerId === 'codex' || providerId === 'claude') return { available: false, detail: 'Native subscription credentials are not qualified for isolated FLUJO workers.' };
+    if (providerId === 'antigravity') return { available: false, detail: 'Unattended Antigravity execution is unsupported.' };
+    if (providerId === 'modal') return { available: false, detail: 'Modal inference is available locally, but its FLUJO worker adapter is unqualified.' };
+    const connection = this.connected.get(providerId);
+    if (!connection || this.explicitlyDisconnected.has(providerId)) return { available: false, detail: 'Connect this API provider before using isolated workers.' };
+    if (connection.method !== 'key' || !connection.key || !validModel(connection.model)) return { available: false, detail: 'This API connection cannot be used by isolated workers.' };
+    if (connection.fleetAllowed !== true) return { available: false, detail: 'Connect again and allow this key for isolated FLUJO workers.' };
+    return {
+      available: true,
+      providerId,
+      model: { name: connection.model, ...FLEET_MODEL[providerId], apiKey: connection.key },
+      verification: 'unverified',
+      costPolicy: 'pending',
+    };
+  }
+
+  async connect({ id, method, key, model, fleetAllowed = false } = {}) {
     if (!Object.hasOwn(NAMES, id)) throw new Error('Unknown provider.');
     if (method === 'oauth' || method === 'login') throw new Error('Use the provider’s native sign-in. This app does not handle OAuth tokens.');
     if (!METHOD[id].includes(method)) throw new Error(`${NAMES[id]} does not support that connection method here.`);
     if (model !== undefined && !validModel(model)) throw new Error('Invalid model name.');
+    if (typeof fleetAllowed !== 'boolean') throw new Error('Worker credential consent must be a boolean.');
+    if (fleetAllowed && !Object.hasOwn(FLEET_MODEL, id)) throw new Error(`${NAMES[id]} is not qualified for isolated FLUJO workers.`);
     if (method === 'subscription') {
       await this.discover();
       if (!this.detected.get(id)?.installed) throw new Error(`${NAMES[id]} CLI is not installed.`);
@@ -183,11 +209,14 @@ export class ProviderManager {
       return this.publicState().find((item) => item.id === id);
     }
     const supplied = typeof key === 'string' ? key.trim() : '';
+    if (this.apiBlocked.has(id) && !supplied) throw new Error(`${NAMES[id]} was blocked. Reconnect with a key after resolving the provider denial.`);
+    const existing = this.connected.get(id);
+    if (fleetAllowed && !supplied && (!existing || this.explicitlyDisconnected.has(id))) throw new Error('Connect this API provider before allowing its key in isolated workers.');
     const envKey = id === 'openai' ? this.env.OPENAI_API_KEY : id === 'anthropic' ? this.env.ANTHROPIC_API_KEY : this.env.MODAL_PROXY_TOKEN;
-    const secret = supplied || envKey;
+    const secret = supplied || existing?.key || envKey;
     if (!secret || secret.length > 500) throw new Error(`${NAMES[id]} needs a valid key.`);
     if (id === 'modal' && !/^wk-[^.\s]+\.ws-[^\s]+$/.test(secret)) throw new Error('Modal inference requires a combined Proxy Token.');
-    let selectedModel = model ?? DEFAULT_MODEL[id];
+    let selectedModel = model ?? existing?.model ?? this.saved[id]?.model ?? DEFAULT_MODEL[id];
     if (id === 'modal' && !selectedModel) {
       const response = await this.fetch('https://inference.us-west.modal.direct/v1/models', { headers: { authorization: `Bearer ${secret}` }, redirect: 'error' });
       if (!response.ok) throw new Error('Modal could not list inference models. Check the Proxy Token.');
@@ -196,10 +225,10 @@ export class ProviderManager {
       if (!selectedModel) throw new Error('This Modal Proxy Token has no available inference models.');
     }
     if (supplied && this.credentialStore) await this.credentialStore.set(id, secret);
-    this.connected.set(id, { method, key: secret, model: selectedModel });
+    this.connected.set(id, { method, key: secret, model: selectedModel, fleetAllowed });
     this.apiBlocked.delete(id);
     this.explicitlyDisconnected.delete(id);
-    this.saved[id] = { method, model: selectedModel }; this.#save();
+    this.saved[id] = { method, model: selectedModel, fleetAllowed }; this.#save();
     return this.publicState().find((item) => item.id === id);
   }
 

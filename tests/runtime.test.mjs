@@ -8,13 +8,13 @@ import path from 'node:path';
 import { createRuntime } from '../src/runtime.mjs';
 import { createServer } from '../src/server.mjs';
 
-function fixture(t, { connected = true, mode = 'complete' } = {}) {
+function fixture(t, { connected = true, mode = 'complete', receipt, providerIds = ['fixture'] } = {}) {
   const dataDir = mkdtempSync(path.join(tmpdir(), 'seagulled-runtime-'));
   let sink;
   let available = true;
   const providers = {
     async discover() { return this.publicState(); },
-    publicState() { return [{ id: 'fixture', name: 'Scripted fixture', available, connected, methods: ['key'] }]; },
+    publicState() { return providerIds.map(id => ({ id, name: 'Scripted fixture', available, connected, methods: ['key'] })); },
     async connect() { connected = true; }, async disconnect() { connected = false; },
   };
   const swarm = {
@@ -28,7 +28,7 @@ function fixture(t, { connected = true, mode = 'complete' } = {}) {
         throw Object.assign(new Error('Provider credits unavailable'), { outcome: 'not_applied' });
       }
       if (mode === 'slow-complete') await new Promise(resolve => setTimeout(resolve, 25));
-      const usage = { costKind: 'reported', costUsd: 0.03, inputTokens: 10, outputTokens: 20 };
+      const usage = receipt ?? { costKind: 'reported', costUsd: 0.03, inputTokens: 10, outputTokens: 20 };
       sink({ type: 'usage', goalId: goal.id, usage });
       let artifacts;
       if (mode === 'artifact') {
@@ -59,6 +59,35 @@ test('durable goal and conversation count emitted usage once, not aggregate twic
   await reopened.close();
 });
 
+test('invalid monetary receipts stay unpriced and preserve pending spend across reopening', async t => {
+  for (const costUsd of [null, undefined, '0', NaN, -1]) {
+    const receipt = { costKind: 'reported', costUsd, inputTokens: 10, outputTokens: 20, reservedUsd: 0.5 };
+    const { app, dataDir, providers, swarm } = fixture(t, { receipt });
+    const goal = await app.chat('Complete with an unpriced receipt');
+    assert.equal((await app.wait(goal.id)).status, 'completed');
+    const state = app.snapshot();
+    assert.equal(state.spend.usd, 0);
+    assert.equal(state.spend.reportedUsd, 0);
+    assert.equal(state.spend.unknownCalls, 1);
+    assert.equal(state.spend.pendingUsd, 0.5);
+    assert.deepEqual(state.goals[0].usage, { inputTokens: 10, outputTokens: 20, costKind: 'unknown' });
+    await app.close();
+    const reopened = createRuntime({ dataDir, providers, swarm });
+    assert.equal(reopened.snapshot().spend.unknownCalls, 1);
+    assert.equal(reopened.snapshot().goals[0].pendingUsd, 0.5);
+    assert.equal(reopened.snapshot().goals[0].billingPending, true);
+    await reopened.close();
+  }
+});
+
+test('an explicit numeric zero receipt remains reported rather than unpriced', async t => {
+  const { app } = fixture(t, { receipt: { costKind: 'reported', costUsd: 0 } });
+  const goal = await app.chat('Complete with a measured zero receipt');
+  await app.wait(goal.id);
+  assert.equal(app.snapshot().spend.unknownCalls, 0);
+  assert.equal(app.snapshot().goals[0].usage.costKind, 'reported');
+});
+
 test('known provider denial refreshes availability without an unknown execution hold', async t => {
   const { app } = fixture(t, { mode: 'denied' });
   const first = await app.chat('Rejected account request');
@@ -70,6 +99,29 @@ test('known provider denial refreshes availability without an unknown execution 
   assert.equal(next.status, 'queued');
   assert.equal(app.snapshot().spend.usd, 0);
   assert.equal(app.snapshot().spend.unknownCalls, 0);
+});
+
+test('explicit provider connection selects future goals and survives reopening without changing existing goals', async t => {
+  const { app, dataDir, providers, swarm } = fixture(t, { providerIds: ['native-first', 'selected-api'] });
+  const original = await app.chat('Use discovered provider');
+  await app.wait(original.id);
+  assert.equal(app.snapshot().goals[0].providerId, 'native-first');
+  await app.connect({ id: 'selected-api', method: 'key' });
+  const selected = await app.chat('Use explicitly connected API');
+  await app.wait(selected.id);
+  assert.equal(app.snapshot().goals[1].providerId, 'selected-api');
+  assert.equal(app.snapshot().goals[0].providerId, 'native-first');
+  const explicit = await app.chat('Override this one goal', { providerId: 'native-first' });
+  await app.wait(explicit.id);
+  assert.equal(app.snapshot().goals[2].providerId, 'native-first');
+  await app.close();
+  const reopened = createRuntime({ dataDir, providers, swarm });
+  const next = await reopened.chat('Keep selected API');
+  await reopened.wait(next.id);
+  assert.equal(reopened.snapshot().goals[3].providerId, 'selected-api');
+  await reopened.disconnect('selected-api');
+  assert.equal(reopened.snapshot().preferredProviderId, undefined);
+  await reopened.close();
 });
 
 test('queued goal waits for provider; budget and goal edit persist', async t => {

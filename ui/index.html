@@ -29,6 +29,27 @@
     </main>
   </div>
   <dialog id="edit-dialog" class="dialog"><form id="edit-form" method="dialog"><div class="dialog-heading"><div><span class="eyebrow">GOAL SETTINGS</span><h2>Edit goal</h2></div><button class="icon-button" type="button" data-close="edit-dialog" aria-label="Close">×</button></div><label class="field-label" for="goal-text">What should Todd do?</label><textarea id="goal-text" rows="4" required></textarea><label class="field-label" for="goal-budget">Budget in USD</label><div class="currency-field"><span>$</span><input id="goal-budget" type="number" min="0.01" step="0.01" inputmode="decimal" required></div><p class="field-help">Changing a running goal pauses it. Lowering the budget below recorded spend also pauses it.</p><div class="dialog-actions"><button class="subtle-button" type="button" data-close="edit-dialog">Cancel</button><button class="primary-button" type="submit">Save changes</button></div></form></dialog>
-  <dialog id="provider-dialog" class="dialog provider-dialog"><div class="dialog-heading"><div><span class="eyebrow">CONNECT YOUR TEAM</span><h2>Choose a provider</h2></div><button class="icon-button" type="button" data-close="provider-dialog" aria-label="Close">×</button></div><p class="dialog-intro">Use an existing sign-in or connect a key. Todd takes it from there.</p><div id="provider-list" class="provider-list"></div><button id="refresh-providers" class="text-button" type="button">Check providers again</button><div id="connect-panel" hidden><button id="provider-back" class="text-button" type="button">← Providers</button><h3 id="connect-title"></h3><p id="connect-detail" class="field-help"></p><form id="connect-form"><label class="field-label" for="connect-method">Connection method</label><select id="connect-method"></select><div id="key-field"><label id="connect-key-label" class="field-label" for="connect-key">API key</label><input id="connect-key" type="password" autocomplete="off" spellcheck="false" placeholder="Paste key"><p class="field-help">Sent only to your local runtime for this connection.</p></div><div id="model-field"><label class="field-label" for="connect-model">Model <span class="optional">optional</span></label><select id="connect-model"></select></div><button id="connect-submit" class="primary-button wide" type="submit">Connect</button></form></div><p id="provider-error" class="form-error" role="alert" hidden></p></dialog>
+  <dialog id="provider-dialog" class="dialog provider-dialog">
+    <div class="dialog-heading"><div><span class="eyebrow">CONNECT YOUR TEAM</span><h2>Choose a provider</h2></div><button class="icon-button" type="button" data-close="provider-dialog" aria-label="Close">×</button></div>
+    <p class="dialog-intro">Connected means a sign-in or key is available. It does not verify a live run or cloud billing.</p>
+    <div id="provider-list" class="provider-list"></div>
+    <button id="refresh-providers" class="text-button" type="button">Check providers again</button>
+    <div id="connect-panel" hidden>
+      <button id="provider-back" class="text-button" type="button">← Providers</button>
+      <h3 id="connect-title"></h3><p id="connect-detail" class="field-help"></p>
+      <form id="connect-form">
+        <div id="method-field"><label class="field-label" for="connect-method">Connection method</label><select id="connect-method"></select></div>
+        <div id="key-field">
+          <label id="connect-key-label" class="field-label" for="connect-key">API key</label><input id="connect-key" type="password" autocomplete="off" spellcheck="false" placeholder="Paste key">
+          <p id="worker-disclosure" class="field-help">On desktop, saved keys are encrypted locally. Connecting permits this provider’s key to be used by isolated FLUJO workers. Cloud execution and billing require separate qualification.</p>
+          <p id="key-local-help" class="field-help" hidden>On desktop, saved keys are encrypted locally. The app can call this provider directly; isolated FLUJO worker use is unavailable for this connection.</p>
+        </div>
+        <div id="model-field"><label class="field-label" for="connect-model">Model <span class="optional">optional</span></label><select id="connect-model"></select></div>
+        <button id="connect-submit" class="primary-button wide" type="submit">Connect</button>
+      </form>
+      <button id="disconnect-provider" class="text-button" type="button" hidden>Disconnect provider</button>
+    </div>
+    <p id="provider-error" class="form-error" role="alert" hidden></p>
+  </dialog>
 </body>
 </html>

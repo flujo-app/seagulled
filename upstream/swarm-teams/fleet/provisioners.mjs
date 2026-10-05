@@ -13,11 +13,11 @@ import { attemptError, cleanupAttempt, provisionWithCleanup } from './attempt.mj
  * conversations and MCP servers but share that machine's filesystem, so this is for
  * development and for teams that do not need separate sandboxes.
  */
-export function workspaceProvisioner({ origin, token, model, browser = true }) {
+export function workspaceProvisioner({ origin, token, model, browser = true, specialists }) {
   return {
-    async provision(worker, fleet) {
+    async provision(worker, fleet, context = {}) {
       const target = { kind: 'workspace', origin, workspace: `swarm-${worker.id}`, token };
-      await installTemplate(new FlujoClient(target), { model, fleet, browser });
+      await installTemplate(new FlujoClient(target), { model, fleet, browser, specialists: context.specialists ?? specialists });
       return target;
     },
     async retire(target) {
@@ -32,7 +32,7 @@ export function workspaceProvisioner({ origin, token, model, browser = true }) {
  * must run where flujo-cloud can run (Fly CLI signed in, native FLUJO as snapshot source).
  * Child Workers can use the fleet tools only if `fleet.url` is reachable from Fly.
  */
-export async function flyProvisioner({ flujoCloudPath, templateWorkspace, source, org, region = 'iad', memoryMb = 4096, fleetReachable = false, concurrency = 8, captureSpacingMs = 8000, teamLimits }) {
+export async function flyProvisioner({ flujoCloudPath, templateWorkspace, source, org, region = 'iad', memoryMb = 4096, fleetReachable = false, concurrency = 8, captureSpacingMs = 8000, teamLimits, specialists }) {
   const lib = (name) => import(pathToFileURL(path.join(flujoCloudPath, 'lib', name)).href);
   const { ManagedCloud } = await lib('managed.mjs');
   const { createFlyRunner, unusedLoopbackPort } = await lib('process.mjs');
@@ -51,7 +51,7 @@ export async function flyProvisioner({ flujoCloudPath, templateWorkspace, source
   const up = (worker, options) => provisionWithCleanup({ managed, worker, options, turn });
 
   return {
-    async provision(worker, fleet) {
+    async provision(worker, fleet, context = {}) {
       let result;
       await slot();
       try { result = await up(worker, { workspace: templateWorkspace, source, org, region, memoryMb, flowIds: [BOOT_FLOW] }); }
@@ -66,7 +66,8 @@ export async function flyProvisioner({ flujoCloudPath, templateWorkspace, source
       try {
         connection = await this.connect(target);
         await installTemplate(connection.client, { model: { id: MODEL_ID }, enableBundled: true,
-          fleet: reachable ? { url: fleet.remoteUrl ?? fleet.url, token: fleet.token } : undefined, limits: teamLimits });
+          fleet: reachable ? { url: fleet.remoteUrl ?? fleet.url, token: fleet.token } : undefined, limits: teamLimits,
+          specialists: context.specialists ?? specialists });
       } catch (error) {
         throw attemptError(error, await cleanupAttempt(managed, app));
       } finally { await connection?.close(); }

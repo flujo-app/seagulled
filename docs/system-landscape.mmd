@@ -1,0 +1,81 @@
+%% Source-derived architecture, 2026-10-05. Not a live resource inventory.
+%% Amber / dashed nodes represent optional or unqualified cloud execution.
+flowchart LR
+  subgraph LOCAL["MACHINE L — desktop / controller host"]
+    direction TB
+    subgraph RENDERER["Sandboxed renderer boundary"]
+      UI["Electron UI + restricted preload"]
+    end
+    CLI["CLI / browser development client"]
+    subgraph TRUSTED["Trusted application process"]
+      RT["Runtime: goals, budgets, pause / stop, cancellation"]
+      API["Loopback API + authenticated SSE"]
+      SW["SwarmCoordinator: Todd → developer → reviewer; ≤6 calls"]
+      PM["ProviderManager: native and API adapters"]
+    end
+    PRIVATE[("Private state / journals / artifacts; OS-encrypted keys; native login stores")]
+    subgraph SOURCE["FLUJO L — local source instance"]
+      BOOT["Owned boot workspace: model + swarm_boot"]
+      LOCALWS["Workspace-mode alternative: own flows / MCPs, shared host filesystem"]
+    end
+    subgraph CTRL["Fleet controller process"]
+      FLEET["fleet MCP / operator API"]
+      REG[("Worker / run registry; shared board; recovery holds")]
+    end
+    TRANS["ManagedCloud + Fly CLI / proxy + relay poller"]
+  end
+  subgraph FLY["Fly private network — isolated product resources, optional / unqualified"]
+    subgraph RELAYM["MACHINE R — owned relay, multi-worker only"]
+      RELAY["Request queue / private HTTP; no public service"]
+    end
+    subgraph MA["MACHINE A — own sandbox and volume"]
+      subgraph FA["FLUJO A instance"]
+        subgraph WA["Worker A workspace"]
+          TEAM["swarm_team lead"]
+          AG["swarm_agent subflows: shared filesystem"]
+          MCP["Local MCPs: bash / filesystem / flujo / optional browser"]
+          FM["fleet remote MCP client"]
+          MODEL["Model adapter"]
+        end
+      end
+    end
+    subgraph MB["MACHINE B — optional child; separate filesystem / volume"]
+      FB["FLUJO B instance: own workspace / flows / MCPs / model binding"]
+    end
+  end
+  subgraph SERVICES["External service boundaries"]
+    PROVIDERS["OpenAI / Codex; Anthropic / Claude; Modal inference"]
+    FLYAPI["Fly control plane"]
+    EXTRA["Additional MCP services: optional; inventory unknown"]
+    OWNERS["Existing owner-managed fleets: not adopted"]
+  end
+  GIT["Public Git / releases: source + sanitized docs only; private state and secrets excluded"]
+  UI -->|"A1: sender-checked IPC"| RT
+  CLI -->|"A2: session bearer"| API
+  API --> RT
+  RT --> SW
+  RT --> PRIVATE
+  SW --> PM
+  PM -->|"A3: native login / A4: API or proxy token"| PROVIDERS
+  SW -.-> BOOT
+  SW -.-> FLEET
+  FLEET --> REG
+  FLEET -.->|"A5: worker API bearer via proxy"| FA
+  FLEET -.->|"A5: worker API bearer via proxy"| FB
+  BOOT -.->|"Trusted clone snapshot"| WA
+  TRANS -.->|"A7: Fly login"| FLYAPI
+  TRANS -.->|"A7: separate relay poll/respond secret"| RELAY
+  RELAY -.->|"Forward original actor authorization"| FLEET
+  FM -.->|"A6: per-worker fleet bearer"| RELAY
+  FB -.->|"A6: per-worker fleet bearer"| RELAY
+  TEAM --> AG
+  AG --> MCP
+  TEAM --> FM
+  MODEL -.->|"A3 / A4: model authentication"| PROVIDERS
+  MCP -.->|"A8: service-specific authentication"| EXTRA
+  classDef optional fill:#fffbeb,stroke:#b45309,stroke-dasharray:6 4;
+  classDef private fill:#fff7ed,stroke:#d97706;
+  classDef service fill:#f5f3ff,stroke:#8b5cf6;
+  class RELAY,TEAM,AG,MCP,FM,MODEL,FB,BOOT,TRANS optional;
+  class PRIVATE,REG private;
+  class PROVIDERS,FLYAPI,EXTRA service;
