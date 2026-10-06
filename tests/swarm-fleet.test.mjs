@@ -13,13 +13,21 @@ import { assertFleetAccountCurrent, conversationFailure, fleetStatus, fleetDiagn
 import { createOwnedRelay, isRelayPreCreationFailure,
   relayFailureCleanupConfirmed } from '../src/swarm/relay.mjs';
 import { assertFreshAppName, readFlyOrgApps, verifyFreshAppPlan } from '../src/swarm/fly-network.mjs';
-import { buildSpecs } from '../upstream/swarm-teams/template/flows.mjs';
-import { Controller } from '../upstream/swarm-teams/fleet/controller.mjs';
-import { flyProvisioner } from '../upstream/swarm-teams/fleet/provisioners.mjs';
-import { FlujoClient } from '../upstream/swarm-teams/lib/flujo-client.mjs';
+import { buildSpecs } from '@flujo-app/swarm-teams/template/flows.mjs';
+import { Controller } from '@flujo-app/swarm-teams/fleet/controller.mjs';
+import { flyProvisioner } from '@flujo-app/swarm-teams/fleet/provisioners.mjs';
+import { FlujoClient } from '@flujo-app/swarm-teams/lib/flujo-client.mjs';
 
 const relayNetwork = 'seagulled-g-0123456789abcdef0123456789abcdef';
 const accountRef = `fly-account-sha256:${'a'.repeat(64)}`;
+const sdkFixtureManifest = (root, managed = './lib/managed.mjs') => {
+  writeFileSync(path.join(root, 'package.json'), JSON.stringify({
+    name: 'flujo-cloud', type: 'module', exports: {
+      '.': managed, './process': './lib/process.mjs',
+      './private-files': './lib/private-files.mjs', './snapshot': './lib/snapshot.mjs',
+    },
+  }));
+};
 const relayInventory = (journal, created, network = relayNetwork) => {
   const apps = [{ id: 'unrelated-default-id', name: 'unrelated-default-app', network: 'default' },
     { id: 'unrelated-private-id', name: 'unrelated-private-app', network: 'other-private' },
@@ -288,7 +296,8 @@ test('product fleet requires one bound private source and checks the SDK proof b
     path.join(cloudSdkRoot, 'lib'), flyConfigDir]) mkdirSync(directory, { recursive: true });
   const snapshottedInstances = path.join(sourceDataRoot, 'workspaces', 'instances');
   mkdirSync(snapshottedInstances, { recursive: true });
-  writeFileSync(path.join(cloudSdkRoot, 'lib', 'managed.mjs'), `export class ManagedCloud {
+  sdkFixtureManifest(cloudSdkRoot, './owned-api.mjs');
+  writeFileSync(path.join(cloudSdkRoot, 'owned-api.mjs'), `export class ManagedCloud {
     constructor(options) { globalThis.__seagulledSourceFixture.options = options; this.fetch = options.fetchImpl; }
     async source(input) { globalThis.__seagulledSourceFixture.input = input;
       if (globalThis.__seagulledSourceFixture.sourceImpl) return globalThis.__seagulledSourceFixture.sourceImpl(this);
@@ -419,7 +428,7 @@ test('private SDK preflight rejects an incompatible Worker source before relay o
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const sourceOrigin = `http://127.0.0.1:${server.address().port}`;
-  writeFileSync(path.join(cloudSdkRoot, 'package.json'), '{"type":"module"}');
+  sdkFixtureManifest(cloudSdkRoot);
   writeFileSync(path.join(cloudSdkRoot, 'lib', 'managed.mjs'), `export class ManagedCloud {
     static privateNetworkContractVersion = 1;
     constructor() {}
@@ -472,6 +481,7 @@ test('private SDK preflight rejects an incompatible Worker source before relay o
 test('Fly provisioner gives ManagedCloud only the selected account and owned record directory', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'seagulled-managed-lease-'));
   const lib = path.join(root, 'lib'); mkdirSync(lib);
+  writeFileSync(path.join(root, 'package.json'), '{"name":"flujo-cloud","type":"module"}');
   writeFileSync(path.join(lib, 'managed.mjs'), 'export class ManagedCloud { constructor(options) { globalThis.__seagulledManagedLeaseFixture = options; } }');
   writeFileSync(path.join(lib, 'process.mjs'), 'export const createFlyRunner = () => ({}); export const unusedLoopbackPort = async () => 1;');
   writeFileSync(path.join(lib, 'private-files.mjs'), 'export const readPrivateJson = async () => ({});');

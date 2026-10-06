@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { Controller } from '../upstream/swarm-teams/fleet/controller.mjs';
-import { buildSpecs } from '../upstream/swarm-teams/template/flows.mjs';
+import { Controller } from '@flujo-app/swarm-teams/fleet/controller.mjs';
+import { buildSpecs } from '@flujo-app/swarm-teams/template/flows.mjs';
 import { goalCapacity, fleetTopology, fleetExecutionLimits, staffOwnedTeam,
   verifiedLocalConversations, verifiedTeamStaffing } from '../src/swarm/fleet.mjs';
 import { teamProfile } from '../src/swarm/team-profile.mjs';

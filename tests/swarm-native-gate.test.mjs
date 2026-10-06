@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { Controller } from '../upstream/swarm-teams/fleet/controller.mjs';
+import { Controller } from '@flujo-app/swarm-teams/fleet/controller.mjs';
 
 const operatorToken = 'native-gate-fixture-operator-token-32-characters';
 const deferred = () => {

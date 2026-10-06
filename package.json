@@ -14,12 +14,13 @@
     "start": "electron .",
     "cli": "node bin/seagulled.mjs",
     "dev": "node bin/seagulled.mjs serve",
-    "test": "node --test tests/*.test.mjs upstream/swarm-teams/test/fleet.test.mjs upstream/swarm-teams/test/recovery.test.mjs upstream/swarm-teams/test/diagnostics-guard.test.mjs upstream/swarm-teams/test/specialists.test.mjs upstream/swarm-teams/test/flujo-client-cancellation.test.mjs upstream/swarm-teams/test/fly-network.test.mjs",
+    "test": "node --test tests/*.test.mjs",
     "package": "electron-builder --dir",
     "dist": "electron-builder --win portable --publish never",
     "check": "node scripts/check-release.mjs",
     "prepackage": "node scripts/prepare-helpers.mjs",
-    "predist": "node scripts/prepare-helpers.mjs"
+    "predist": "node scripts/prepare-helpers.mjs",
+    "package:cli": "node scripts/package-cli.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.56.0",
@@ -39,13 +40,9 @@
       "!**/__pycache__/**",
       "!**/*.pyc",
       "bin/**/*",
-      "upstream/swarm-teams/{fleet,lib,template}/**/*",
-      "upstream/factory/receipts.mjs",
       "package.json",
       "LICENSE",
       "THIRD_PARTY_NOTICES.md",
-      "upstream/swarm-teams/install.mjs",
-      "upstream/swarm-teams/swarm.mjs",
       "docs/provenance.json"
     ],
     "asar": true,
@@ -79,10 +76,13 @@
   },
   "license": "MIT",
   "files": [
-    "bin/", "electron/", "ui/", "src/",
-    "upstream/swarm-teams/fleet/", "upstream/swarm-teams/lib/", "upstream/swarm-teams/template/",
-    "upstream/swarm-teams/install.mjs", "upstream/swarm-teams/swarm.mjs",
-    "upstream/factory/receipts.mjs", "docs/provenance.json", "LICENSE", "THIRD_PARTY_NOTICES.md"
+    "bin/",
+    "electron/",
+    "ui/",
+    "src/",
+    "docs/provenance.json",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "author": "flujo-app",
   "repository": {
@@ -92,10 +92,18 @@
   "dependencies": {
     "@huggingface/transformers": "4.3.0",
     "kokoro-js": "1.2.1",
-    "node-pty": "1.1.0"
+    "node-pty": "1.1.0",
+    "@flujo-app/swarm-teams": "0.1.0",
+    "@flujo-app/factory-receipts": "0.1.0",
+    "flujo-cloud": "npm:@flujo-app/flujo-cloud@0.1.1"
   },
   "overrides": {
     "sharp": "0.35.5",
     "onnxruntime-node": "1.30.0"
-  }
+  },
+  "bundleDependencies": [
+    "@flujo-app/swarm-teams",
+    "@flujo-app/factory-receipts",
+    "flujo-cloud"
+  ]
 }

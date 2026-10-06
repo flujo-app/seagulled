@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSyn
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { NativeOriginalLedger } from '../upstream/swarm-teams/fleet/native-ledger.mjs';
+import { NativeOriginalLedger } from '@flujo-app/swarm-teams/fleet/native-ledger.mjs';
 
 const hasCode = (code) => (error) => error.code === code;
 const hash = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');

@@ -4,8 +4,8 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { Controller } from '../upstream/swarm-teams/fleet/controller.mjs';
-import { createNativeInvocationFacade } from '../upstream/swarm-teams/fleet/native-facade.mjs';
+import { Controller } from '@flujo-app/swarm-teams/fleet/controller.mjs';
+import { createNativeInvocationFacade } from '@flujo-app/swarm-teams/fleet/native-facade.mjs';
 
 const canonical = (value) => value === null || typeof value !== 'object'
   ? JSON.stringify(value) ?? 'null'
