@@ -102,7 +102,7 @@ test('real local video seeks through transition frames forward and backward and 
   const loaded=await page.evaluate(async()=>{
     const {MoviePlayer}=await import('/movie-player.mjs');
     const video=document.getElementById('video'),stage=document.getElementById('stage');
-    const frames=[];const player=new MoviePlayer({video,stage,manifestUrl:'/movie-manifest.json',onFrame:event=>frames.push(event),onStatus:({detail})=>{stage.dataset.detail=detail;}});
+    const frames=[];const player=new MoviePlayer({video,stage,manifestUrl:'/movie-manifest.json',onFrame:event=>frames.push({...event,atMs:performance.now()}),onStatus:({detail})=>{stage.dataset.detail=detail;}});
     window.testMovie={player,frames};return player.load();
   });
   assert.equal(loaded,true,await page.locator('#stage').evaluate((element,timing)=>JSON.stringify({status:element.dataset.movieStatus,detail:element.dataset.detail,video:document.getElementById('video').error?.message,time:document.getElementById('video').currentTime,duration:document.getElementById('video').duration,ready:document.getElementById('video').readyState,network:document.getElementById('video').networkState,mediaTrace:window.movieMediaTrace,...timing}),{fixtureWarmupMs,playerLoadMs:Date.now()-playerStarted}));
@@ -122,6 +122,61 @@ test('real local video seeks through transition frames forward and backward and 
   assert.equal(forwardTimes.every((time,index)=>index===0||time>forwardTimes[index-1]),true);
   assert.equal(reverseTimes.every((time,index)=>index===0||time<reverseTimes[index-1]),true);
   assert.equal(frames.some(frame=>frame.via==='presented'),true);
+  const forwardFrames=frames.filter(frame=>frame.clipId==='headphones-on'&&frame.direction==='forward');
+  const forwardFps=(forwardFrames.length-1)*1000/(forwardFrames.at(-1).atMs-forwardFrames[0].atMs);
+  t.diagnostic(`decoded 8 fps fixture presented forward transition at ${forwardFps.toFixed(2)} fps`);
+  assert.equal(forwardFps>=7.6&&forwardFps<=9.5,true,`8 fps transition presented at ${forwardFps.toFixed(2)} fps`);
+  const reverseFrames=frames.filter(frame=>frame.clipId==='headphones-on'&&frame.direction==='reverse');
+  const reverseFps=(reverseFrames.length-1)*1000/(reverseFrames.at(-1).atMs-reverseFrames[0].atMs);
+  t.diagnostic(`decoded 8 fps fixture presented reverse transition at ${reverseFps.toFixed(2)} fps`);
+  assert.equal(reverseFps>=7.6&&reverseFps<=9.5,true,`8 fps reverse transition presented at ${reverseFps.toFixed(2)} fps`);
+  const partialReturn=await page.evaluate(async()=>{
+    const {player,frames}=window.testMovie;
+    const entered=player.setScene('headphones');
+    const deadline=performance.now()+3000;
+    while((player.currentTransition?.frame??-1)<3){if(performance.now()>deadline)throw new Error('Forward transition did not reach its fourth frame.');await new Promise(resolve=>setTimeout(resolve,10));}
+    const shown=player.currentTransition.frame,oldEpoch=player.epoch;
+    const returned=player.setScene('idle'),returnEpoch=player.epoch;
+    const oldCount=frames.filter(frame=>frame.epoch===oldEpoch).length;
+    return {shown,oldReady:await entered,newReady:await returned,oldCount,
+      oldAfter:frames.filter(frame=>frame.epoch===oldEpoch).length,
+      reverse:frames.filter(frame=>frame.epoch===returnEpoch&&frame.clipId==='headphones-on').map(frame=>frame.frame)};
+  });
+  assert.equal(partialReturn.oldReady,false);
+  assert.equal(partialReturn.newReady,true);
+  assert.equal(partialReturn.oldAfter,partialReturn.oldCount);
+  assert.deepEqual(partialReturn.reverse,Array.from({length:partialReturn.shown},(_,index)=>partialReturn.shown-1-index));
+  const partialReverseReturn=await page.evaluate(async()=>{
+    const {player,frames}=window.testMovie;
+    await player.setScene('headphones');
+    const leaving=player.setScene('idle');
+    const deadline=performance.now()+3000;
+    while((player.currentTransition?.frame??8)>4){if(performance.now()>deadline)throw new Error('Reverse transition did not reach its fourth frame.');await new Promise(resolve=>setTimeout(resolve,10));}
+    const shown=player.currentTransition.frame;
+    const returned=player.setScene('headphones'),epoch=player.epoch;
+    return {shown,oldReady:await leaving,newReady:await returned,
+      forward:frames.filter(frame=>frame.epoch===epoch&&frame.clipId==='headphones-on').map(frame=>frame.frame)};
+  });
+  assert.equal(partialReverseReturn.oldReady,false);
+  assert.equal(partialReverseReturn.newReady,true);
+  assert.deepEqual(partialReverseReturn.forward,Array.from({length:7-partialReverseReturn.shown},(_,index)=>partialReverseReturn.shown+1+index));
+  await page.evaluate(()=>window.testMovie.player.setScene('idle'));
+  const partialThirdScene=await page.evaluate(async()=>{
+    const {player,frames}=window.testMovie;
+    const entered=player.setScene('headphones');
+    const deadline=performance.now()+3000;
+    while((player.currentTransition?.frame??-1)<3){if(performance.now()>deadline)throw new Error('Forward transition did not reach its fourth frame.');await new Promise(resolve=>setTimeout(resolve,10));}
+    const shown=player.currentTransition.frame;
+    const changed=player.setScene('work'),epoch=player.epoch;
+    return {shown,oldReady:await entered,newReady:await changed,
+      reverse:frames.filter(frame=>frame.epoch===epoch&&frame.clipId==='headphones-on').map(frame=>frame.frame),
+      firstWork:frames.find(frame=>frame.epoch===epoch&&frame.clipId==='work')?.frame};
+  });
+  assert.equal(partialThirdScene.oldReady,false);
+  assert.equal(partialThirdScene.newReady,true);
+  assert.deepEqual(partialThirdScene.reverse,Array.from({length:partialThirdScene.shown},(_,index)=>partialThirdScene.shown-1-index));
+  assert.equal(partialThirdScene.firstWork,0);
+  await page.evaluate(async()=>{await window.testMovie.player.setScene('idle');window.testMovie.frames.length=0;});
   const cancel=await page.evaluate(async()=>{
     const {player,frames}=window.testMovie;
     const pending=player.setScene('headphones');

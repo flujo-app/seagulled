@@ -65,7 +65,7 @@ export class MoviePlayer {
     if(!video||!stage)throw new Error('Movie stage and video are required.');
     this.video=video;this.stage=stage;this.manifestInput=manifest;this.manifestUrl=manifestUrl;this.fetchImpl=fetchImpl;this.onStatus=onStatus;this.onFrame=onFrame;
     this.metadataTimeoutMs=metadataTimeoutMs;this.seekTimeoutMs=seekTimeoutMs;
-    this.manifest=null;this.requestedScene='idle';this.settledScene=null;this.loadedSrc=null;this.active=null;this.epoch=0;this.destroyed=false;this.lastStatus=null;
+    this.manifest=null;this.requestedScene='idle';this.settledScene=null;this.currentTransition=null;this.loadedSrc=null;this.active=null;this.epoch=0;this.destroyed=false;this.lastStatus=null;
     video.muted=true;video.playsInline=true;video.preload='auto';this.#status('loading');
   }
   #status(value,detail=''){
@@ -90,11 +90,12 @@ export class MoviePlayer {
     this.requestedScene=scene;
     if(this.destroyed||!this.manifest||!Object.keys(this.manifest.loops).length)return Promise.resolve(false);
     if(!interrupt&&this.active?.scene===scene)return this.active.ready;
+    const unfinished=this.currentTransition;
     this.#cancelActive();
     const controller=new AbortController(),epoch=++this.epoch;
     let resolveReady;const ready=new Promise(resolve=>{resolveReady=resolve;});
     this.active={scene,controller,ready,resolveReady};
-    void this.#run(scene,epoch,controller.signal,resolveReady);
+    void this.#run(scene,epoch,controller.signal,resolveReady,unfinished);
     return ready;
   }
   interrupt(){this.#cancelActive();this.epoch++;if(this.manifest&&Object.keys(this.manifest.loops).length)this.#status('interrupted');}
@@ -111,9 +112,16 @@ export class MoviePlayer {
     }
     return null;
   }
-  async #run(scene,epoch,signal,resolveReady){
+  async #run(scene,epoch,signal,resolveReady,unfinished){
     let resolved=false;const ready=value=>{if(!resolved){resolved=true;resolveReady(value);}};
     try{
+      if(unfinished){
+        const {clip,frame}=unfinished;
+        const retrace=clip.reversible && (scene===clip.from || scene!==clip.to);
+        const direction=retrace?'reverse':'forward';
+        const startFrame=frame+(retrace?-1:1);
+        await this.#sequence(clip,direction,epoch,signal,null,startFrame);
+      }
       const transition=this.#transition(this.settledScene,scene);
       if(transition)await this.#sequence(transition.clip,transition.direction,epoch,signal);
       if(signal.aborted)throw aborted();
@@ -125,18 +133,30 @@ export class MoviePlayer {
       ready(false);
     }
   }
-  async #sequence(clip,direction,epoch,signal,onFirstFrame){
+  async #sequence(clip,direction,epoch,signal,onFirstFrame,startFrame){
     await this.#ensureClip(clip,signal);
-    const indices=Array.from({length:clip.frames},(_,index)=>direction==='reverse'?clip.frames-1-index:index);
+    const first=startFrame??(direction==='reverse'?clip.frames-1:0);
+    const indices=direction==='reverse'
+      ?Array.from({length:first+1},(_,index)=>first-index)
+      :Array.from({length:clip.frames-first},(_,index)=>first+index);
+    let nextDeadline=null;
     for(const frame of indices){
       if(signal.aborted||epoch!==this.epoch)throw aborted();
       const via=await this.#presentFrame(clip,frame,signal);
       if(signal.aborted||epoch!==this.epoch)throw aborted();
+      if(direction!=='loop')this.currentTransition={clip,frame,direction};
       this.video.dataset.ready='true';this.video.dataset.clip=clip.id||clip.src;this.video.dataset.frame=String(frame);
       this.video.dataset.direction=direction;this.#status('playing');
       this.onFrame({clipId:clip.id||clip.src,frame,direction,via,mediaTime:this.video.currentTime,epoch});
       onFirstFrame?.();onFirstFrame=null;
-      await delay(1000/clip.fps,signal);
+      const now=performance.now();
+      nextDeadline=nextDeadline===null?now+1000/clip.fps:nextDeadline+1000/clip.fps;
+      if(nextDeadline<now)nextDeadline=now+1000/clip.fps;
+      await delay(Math.max(0,nextDeadline-now),signal);
+    }
+    if(direction!=='loop'){
+      this.settledScene=direction==='reverse'?clip.from:clip.to;
+      this.currentTransition=null;
     }
   }
   async #ensureClip(clip,signal){
