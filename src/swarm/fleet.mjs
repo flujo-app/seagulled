@@ -1,14 +1,14 @@
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { homedir } from 'node:os';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
-import { Controller } from '../../upstream/swarm-teams/fleet/controller.mjs';
-import { flyProvisioner } from '../../upstream/swarm-teams/fleet/provisioners.mjs';
-import { FlujoClient } from '../../upstream/swarm-teams/lib/flujo-client.mjs';
-import { installTemplate } from '../../upstream/swarm-teams/install.mjs';
-import { BOOT_FLOW } from '../../upstream/swarm-teams/template/flows.mjs';
+import { Controller } from '@flujo-app/swarm-teams/fleet/controller.mjs';
+import { flyProvisioner } from '@flujo-app/swarm-teams/fleet/provisioners.mjs';
+import { FlujoClient } from '@flujo-app/swarm-teams/lib/flujo-client.mjs';
+import { installTemplate } from '@flujo-app/swarm-teams/install.mjs';
+import { BOOT_FLOW } from '@flujo-app/swarm-teams/template/flows.mjs';
 import { teamProfile, specialistStaffingBrief } from './team-profile.mjs';
+import { cloudSdkEntry, importCloudSdk } from './cloud-sdk.mjs';
 import { collectFlyArtifacts } from '../artifacts/fly.mjs';
 import { createOwnedRelay, relayFailureCleanupConfirmed } from './relay.mjs';
 import { assertNetworkVacant, assertPlannedNetworkMembers, readFlyOrgApps,
@@ -83,7 +83,7 @@ export function bindVerifiedFlyOrganization(config, account) {
   if (!validFlyAccount(account)) throw new Error(flyUnavailable);
   return { ...config, provisioner: { ...config.provisioner, org: account.orgSlug } };
 }
-const productSourceUnavailable = 'A packaged, product-owned FLUJO source and cloud SDK are not ready for isolated Workers.';
+const productSourceUnavailable = 'A product-owned FLUJO source and compatible installed cloud SDK are required for isolated Workers.';
 const inside = (root, candidate) => {
   const relative = path.relative(root, candidate);
   return Boolean(relative && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
@@ -109,7 +109,7 @@ function verifiedSourceBinding(binding, dataDir) {
       || cloudSdkRoot === sourceDataRoot || inside(sourceDataRoot, cloudSdkRoot)
       || !statSync(sourceInstanceDir).isDirectory() || !statSync(sourceDataRoot).isDirectory()
       || !statSync(sourceAppRoot).isDirectory() || !statSync(cloudSdkRoot).isDirectory()
-      || !regularFile(path.join(cloudSdkRoot, 'lib', 'managed.mjs'))) return null;
+      || !regularFile(cloudSdkEntry('.', cloudSdkRoot))) return null;
     return { cloudSdkRoot, sourceOrigin: origin.origin, sourceInstanceDir, sourceDataRoot, sourceAppRoot };
   } catch { return null; }
 }
@@ -120,7 +120,7 @@ export async function boundFleetSource({ dataDir, sourceBinding, flyAccount, sig
   if (!binding) return { available: false, detail: productSourceUnavailable };
   if (!validFlyAccount(flyAccount)) return { available: false, detail: flyUnavailable };
   try {
-    const { ManagedCloud } = await import(pathToFileURL(path.join(binding.cloudSdkRoot, 'lib', 'managed.mjs')).href);
+    const { ManagedCloud } = await importCloudSdk('.', binding.cloudSdkRoot);
     const env = isolatedFlyEnvironment(flyAccount, process.env, binding.sourceInstanceDir);
     const discoveryFetch = (url, options = {}) => fetch(url, { ...options,
       signal: AbortSignal.any([options.signal, signal,
@@ -649,7 +649,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     const flyEnv = isolatedFlyEnvironment(flyAccount, process.env,
       diagnostic ? undefined : config.sourceInstanceDir);
     mkdirSync(cloudDirectory, { recursive: true, mode: 0o700 });
-    const { ManagedCloud } = await import(pathToFileURL(path.join(config.provisioner.flujoCloudPath, 'lib', 'managed.mjs')).href);
+    const { ManagedCloud } = await importCloudSdk('.', config.provisioner.flujoCloudPath);
     if (ManagedCloud.privateNetworkContractVersion !== 1
       || typeof ManagedCloud.prototype.openOwnedProxy !== 'function'
       || typeof ManagedCloud.prototype.credential !== 'function'
@@ -679,7 +679,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
         { outcome: 'not_applied' });
     }
     assertAdmission(signal, fleetDeadlineAt);
-    const { createFlyRunner } = await import(pathToFileURL(path.join(config.provisioner.flujoCloudPath, 'lib', 'process.mjs')).href);
+    const { createFlyRunner } = await importCloudSdk('./process', config.provisioner.flujoCloudPath);
     const selectedFly = createFlyRunner({ env: flyEnv, binary: flyAccount.flyctlPath });
     const flyToken = (await selectedFly.run(['auth', 'token'])).trim();
     const org = await cloudManaged.organization(diagnostic ? config.provisioner.org : flyAccount.orgSlug);

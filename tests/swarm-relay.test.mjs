@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { createRelay, startRelayAgent } from '../upstream/swarm-teams/fleet/relay.mjs';
+import { createRelay, startRelayAgent } from '@flujo-app/swarm-teams/fleet/relay.mjs';
 import { PRODUCT_RELAY_LIMITS } from '../src/swarm/relay.mjs';
 
 const secret = 'relay-fixture-secret-with-at-least-32-characters';

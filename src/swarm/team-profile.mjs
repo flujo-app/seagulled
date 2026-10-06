@@ -1,4 +1,4 @@
-import { CASE_SPECIALISTS_V1 } from '../../upstream/swarm-teams/template/specialists.mjs';
+import { CASE_SPECIALISTS_V1 } from '@flujo-app/swarm-teams/template/specialists.mjs';
 
 // Reuse the recovered specialist catalog and its single shared subflow gate.
 export const TODD_SPECIALISTS_V1 = Object.freeze({

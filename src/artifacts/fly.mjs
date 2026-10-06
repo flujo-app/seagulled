@@ -1,8 +1,8 @@
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { promises as fs } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import { safeReceipt } from '../../upstream/factory/receipts.mjs';
+import { importCloudSdk } from '../swarm/cloud-sdk.mjs';
+import { safeReceipt } from '@flujo-app/factory-receipts';
 
 const ID = /^[A-Za-z0-9_-]{1,100}$/;
 const APP = /^[a-z][a-z0-9-]{2,62}$/;
@@ -118,7 +118,7 @@ export async function collectFlyArtifacts({target,goalId,workerId,dataDir,flujoC
   try {await fs.lstat(group);throw Error('Output folder exists without its receipt; preserve it for reconciliation.');}
   catch(error){if(error.code!=='ENOENT')throw error;}
   if (!managed) {
-    const {ManagedCloud}=await import(pathToFileURL(path.join(flujoCloudPath,'lib/managed.mjs')).href);
+    const {ManagedCloud}=await importCloudSdk('.', flujoCloudPath);
     managed=new ManagedCloud();
   }
   const files=await managed.operation(target.app,'collect-output',async()=>{

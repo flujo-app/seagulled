@@ -3,11 +3,12 @@ import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { startRelayAgent } from '../../upstream/swarm-teams/fleet/relay.mjs';
+import { fileURLToPath } from 'node:url';
+import { importCloudSdk } from './cloud-sdk.mjs';
+import { startRelayAgent } from '@flujo-app/swarm-teams/fleet/relay.mjs';
 import { assertAppNetwork, assertFreshAppName, assertProductNetwork, readFlyOrgApps } from './fly-network.mjs';
 
-const RELAY_SOURCE = fileURLToPath(new URL('../../upstream/swarm-teams/fleet/relay.mjs', import.meta.url));
+const RELAY_SOURCE = fileURLToPath(import.meta.resolve('@flujo-app/swarm-teams/fleet/relay.mjs'));
 // Ten waiting team leads must leave room for all ninety child conversations.
 export const PRODUCT_RELAY_LIMITS = Object.freeze({ maxConcurrentServes: 128 });
 const API = 'https://api.machines.dev/v1';
@@ -52,7 +53,7 @@ export async function createOwnedRelay({ journalPath, flujoCloudPath, org, netwo
   let fly = flyRunner;
   let allocate = portAllocator;
   if (!fly || !allocate) {
-    const { createFlyRunner, unusedLoopbackPort } = await import(pathToFileURL(path.join(flujoCloudPath, 'lib', 'process.mjs')).href);
+    const { createFlyRunner, unusedLoopbackPort } = await importCloudSdk('./process', flujoCloudPath);
     if (!fly && (!flyEnv || !path.isAbsolute(flyctlPath ?? '') || flyEnv.FLYCTL_PATH !== flyctlPath
       || !flyEnv.FLY_CONFIG_DIR || flyEnv.FLY_API_TOKEN)) {
       throw new Error('An isolated personal Fly account and bundled helper are required for the relay.');
