@@ -80,6 +80,7 @@ async function invoke(_event, method, args = []) {
 function createWindow() {
   const window = new BrowserWindow({
     width:1190,height:780,minWidth:750,minHeight:540,
+    fullscreen:true,
     backgroundColor:'#f8f7f3',
     show:false,
     webPreferences:{
@@ -94,6 +95,15 @@ function createWindow() {
   const ownAudio=(contents,permission,details)=>contents===window.webContents && permission==='media' && Array.isArray(details?.mediaTypes) && details.mediaTypes.length>0 && details.mediaTypes.every(type=>type==='audio');
   window.webContents.session.setPermissionRequestHandler((contents,permission,callback,details)=>callback(ownAudio(contents,permission,details)));
   window.webContents.session.setPermissionCheckHandler((contents,permission,_origin,details)=>contents===window.webContents && permission==='media' && details?.mediaType!=='video');
+  window.webContents.on('before-input-event',(event,input)=>{
+    if(input.type!=='keyDown'||input.isAutoRepeat)return;
+    if(input.key==='F11'){
+      event.preventDefault();window.setFullScreen(!window.isFullScreen());
+    }else if(input.key?.toLowerCase()==='q'&&!input.alt&&!input.shift&&(process.platform==='darwin'?input.meta:input.control)){
+      event.preventDefault();app.quit();
+    }
+    // Escape stays with the renderer so an open dialog closes normally.
+  });
   window.once('ready-to-show',()=>window.show());
   window.webContents.setWindowOpenHandler(({url})=>{if(allowExternal(url))void shell.openExternal(url);return {action:'deny'};});
   window.webContents.on('will-navigate',(event,url)=>{if(url!==window.webContents.getURL()){event.preventDefault();if(allowExternal(url))void shell.openExternal(url);}});
