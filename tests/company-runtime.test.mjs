@@ -48,7 +48,10 @@ test('default company goal stays queued without admission and never dispatches a
   const goal = await app.chat('Build an actual company');
   const result = await app.wait(goal.id);
   assert.equal(result.executionMode, 'company');
-  assert.equal(result.workerTopologyVersion, 2);
+  assert.equal(result.workerTopologyVersion, 3);
+  assert.equal(result.maxWorkers, 10);
+  assert.equal(result.conversationsPerWorker, 10);
+  assert.equal(result.agentsPerWorker, 9);
   assert.equal(result.status, 'queued');
   assert.equal(result.execution.readiness, 'blocked');
   assert.equal(seen.executions, 0);
@@ -172,6 +175,10 @@ test('unfinished saved topology-v2 goals require fresh company admission without
   await app.wait(goal.id); await app.close();
   const file = path.join(dataDir, 'state.json');
   const saved = JSON.parse(readFileSync(file, 'utf8'));
+  saved.goals[0].workerTopologyVersion = 2;
+  saved.goals[0].maxWorkers = 5;
+  saved.goals[0].conversationsPerWorker = 5;
+  saved.goals[0].agentsPerWorker = 4;
   delete saved.goals[0].executionMode;
   saved.goals[0].execution = { requested: 'company', readiness: 'ready', verifiedWorkers: 5, verifiedChildConversations: 20 };
   saved.goals.push({ ...saved.goals[0], id: 'historical-result', status: 'completed', result: 'Earlier local result', execution: undefined });

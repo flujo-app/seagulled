@@ -5,15 +5,13 @@ Talk to Todd. He delegates your goal to a team, checks what they bring back, and
 Download the Windows portable app from [Releases](https://github.com/flujo-app/seagulled/releases). Open it and tell Todd what you want done. 
 
 
-# How it works:
-- You tell Todd Howard to make something happen. 
-- You give him your money and a budget. 
-- He creates a company, they work 24/7 - and then he occasionally comes in and shits on everything.  
+New goals request **10 teams × 10 conversations**: ten isolated Workers, each with one lead and nine specialist agents. Todd supervises separately. Advanced controls let you choose smaller teams, edit the goal and allowance, pause or stop.
 
-Infrastructure Setup
-- Electron.  You link your Fly.io and your Codex/Claude/Modal account, and you give a Budget in USD - and a Goal. That's it.  
-- Todd rents Flymachines and creates a network of up to 10 VM's. Each Machine runs 10 parallel AI agents with full access to browser-, bash-, file-, and self-modification-tools. They all talk to each other.
-- The swarm is using a self-hosted Qwen 3.8 27b LLM on a rented H100 - or your Codex/Claude Plan. 
+Each team includes an independent verifier and an adversarial reviewer. The controller caps the Worker tree, allows one original lead run per Worker, and requires the exact completed child conversation records before reporting verified staffing. Todd reviews the resulting evidence. These checks verify execution and staffing; they do not establish that every answer is correct.
+
+Connect a supported provider and authorize Worker access to its API key to use cloud inference. Native Codex/Claude connections remain local; they do not establish a remote 100-conversation route. The optional private Qwen/H100 route requires its own readiness checks. Missing source, account or provider readiness keeps the goal waiting. Unknown billing or cleanup holds block additional work; estimates are not billed spend.
+
+The 10×10 scheduler is covered by deterministic offline tests. **A live 100-conversation cloud run has not been verified.** The source runtime and cloud SDK remain separate prerequisites; signing into accounts alone does not make the company ready.
 
 <img width="1800" height="1260" alt="image" src="https://github.com/user-attachments/assets/51dc3f86-20e7-42e6-ad4c-76a2cb0c28fa" />
 

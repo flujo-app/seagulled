@@ -112,7 +112,7 @@ function appendGoalEditor(card,goal){
   const textLabel=node('label','Goal');const textInput=node('textarea');textInput.value=goal.text||'';textInput.rows=3;textInput.maxLength=4000;textInput.required=true;textLabel.append(textInput);
   const budgetLabel=node('label','Budget');const amount=node('input');amount.type='number';amount.min='0.01';amount.step='any';amount.required=true;amount.value=String(goal.budget?.amount??goal.budgetUsd??5);amount.setAttribute('aria-label','Edit budget amount');
   const currency=node('select');currency.setAttribute('aria-label','Edit budget currency');for(const code of allowedCurrencies){const option=node('option',code);option.value=code;currency.append(option);}currency.value=goal.budget?.currency||'USD';budgetLabel.append(amount,currency);
-  const workerLabel=node('label','Workers');const workers=node('input');workers.type='number';workers.min='1';workers.max='6';workers.step='1';workers.required=true;workers.value=String(goal.maxWorkers??5);workerLabel.append(workers);
+  const workerLabel=node('label','Workers');const workers=node('input');workers.type='number';workers.min='1';workers.max=goal.workerTopologyVersion===3?'10':'6';workers.step='1';workers.required=true;workers.value=String(goal.maxWorkers??5);workerLabel.append(workers);
   const conversationLabel=node('label','Conversations per worker');const conversations=node('input');conversations.type='number';conversations.min='1';conversations.max='10';conversations.step='1';conversations.required=true;conversations.value=String(goal.conversationsPerWorker??(goal.agentsPerWorker===undefined?5:goal.agentsPerWorker+1));conversationLabel.append(conversations);
   const save=node('button','Save changes','line-button');save.type='submit';form.append(textLabel,budgetLabel,workerLabel,conversationLabel,save);
   form.addEventListener('submit',async event=>{event.preventDefault();const sentence=oneSentence(textInput.value);if(!sentence){showError('Enter one sentence for Todd.');return;}
@@ -195,7 +195,7 @@ function renderProviderForm(){
   if(!id)elements['provider-guidance'].textContent='Choose a supported provider to connect inference.';
   else if(!authReady())elements['provider-guidance'].textContent='Finish Fly and Modal sign-in before connecting inference.';
   else if(nativeMissing)elements['provider-guidance'].textContent=`${item?.name||id} is not installed; choose an API provider.`;
-  else if(native&&connected)elements['provider-guidance'].textContent=`${item?.name||id} is connected locally; remote five-by-five staffing remains unverified.`;
+  else if(native&&connected)elements['provider-guidance'].textContent=`${item?.name||id} is connected locally; remote ten-by-ten staffing remains unverified.`;
   else if(native)elements['provider-guidance'].textContent=`Connect ${item?.name||id} through its native account flow.`;
   else if(connected&&item?.fleetEligible)elements['provider-guidance'].textContent='This API key may be used by isolated Workers; remote capacity is verified at run time.';
   else if(connected)elements['provider-guidance'].textContent='This API key is connected locally; worker use needs your separate choice.';
@@ -412,7 +412,8 @@ elements['provider-worker-consent'].addEventListener('change',renderProviderForm
 elements['provider-connect'].addEventListener('click',()=>void connectProvider());
 elements['provider-disconnect'].addEventListener('click',()=>void disconnectProvider());
 elements['fallback-go'].addEventListener('click',()=>{if(goalSubmitting)return;const sentence=oneSentence(elements['fallback-goal'].value);if(!sentence){showError('Enter one sentence for Todd.');return;}pendingGoal=sentence;void submitGoal();});
-for(const id of ['workers','conversations'])elements[id].addEventListener('input',()=>{$(`${id}-value`).value=elements[id].value;$(`${id}-value`).textContent=elements[id].value;});
+function renderTeamSize(){const workers=Number(elements.workers.value),conversations=Number(elements.conversations.value);$('team-size-note').textContent=`${workers*conversations} conversations requested: ${workers} teams, each with 1 lead + ${conversations-1} agents. Todd supervises separately. Actual staffing is verified during execution.`;}
+for(const id of ['workers','conversations'])elements[id].addEventListener('input',()=>{$(`${id}-value`).value=elements[id].value;$(`${id}-value`).textContent=elements[id].value;renderTeamSize();});
 elements['private-h100'].addEventListener('change',()=>{renderDetails();renderAuth();});
 elements['budget-amount'].addEventListener('input',()=>{budgetCustom=true;selectedPreset=null;markPreset(null);elements['budget-note'].textContent='Your chosen allowance will be checked before work starts.';});
 for(const button of document.querySelectorAll('[data-budget-usd]'))button.addEventListener('click',()=>{const usd=Number(button.dataset.budgetUsd);void (async()=>{if(currencySwitch)await currencySwitch;if(budgetWait)await budgetWait;if(!budgetQuote){showError('Currency allowance is unavailable.');return;}selectedPreset=usd;budgetCustom=true;elements['budget-amount'].value=String(amountForUsd(usd,budgetQuote));markPreset(usd);budgetNote(budgetQuote,usd);})();});

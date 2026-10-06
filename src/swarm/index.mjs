@@ -38,7 +38,8 @@ const companyTopologyMatches = (record, { maxWorkers, conversationsPerWorker, ag
   && record?.requestedConversationsPerWorker === conversationsPerWorker
   && record?.requestedAgentsPerWorker === agentsPerWorker;
 const companyIdentityMatches = (record, goal, capacity) => companyTopologyMatches(record, capacity)
-  && record?.companyProviderId === goal.providerId && record?.text === goal.text;
+  && record?.companyProviderId === goal.providerId && record?.text === goal.text
+  && record?.workerTopologyVersion === goal.workerTopologyVersion;
 const aborted = (signal) => {
   if (signal?.aborted) throw Object.assign(new Error('Goal execution was cancelled.'), { name: 'AbortError' });
 };
@@ -101,7 +102,7 @@ export class SwarmCoordinator {
   /** Two read-only stages. The returned leases remain backend-only and are never persisted. */
   async prepareCompany(goal, { signal, stage, priorAdmission } = {}) {
     if (!goal || typeof goal.id !== 'string' || !/^[\w-]{1,100}$/.test(goal.id)
-      || goal.executionMode !== 'company' || goal.workerTopologyVersion !== 2
+      || goal.executionMode !== 'company' || ![2, 3].includes(goal.workerTopologyVersion)
       || typeof goal.providerId !== 'string' || !goal.providerId) throw companyUnavailable('unavailable');
     if (Object.values(this.registry.state.runs).some((run) => run.goalId === goal.id
       && ['running', 'unknown'].includes(run.state))) {
@@ -109,7 +110,7 @@ export class SwarmCoordinator {
         { code: 'UNKNOWN', unknown: true });
     }
     const priorGoal = this.registry.state.goals[goal.id];
-    if (priorGoal && (priorGoal.executionMode !== 'company' || priorGoal.workerTopologyVersion !== 2)) {
+    if (priorGoal && (priorGoal.executionMode !== 'company' || priorGoal.workerTopologyVersion !== goal.workerTopologyVersion)) {
       throw companyUnavailable('unavailable');
     }
     let capacity;
@@ -234,13 +235,15 @@ export class SwarmCoordinator {
     return Object.values(this.registry.state.runs).some((run) => {
       const sandbox = run.sandbox;
       const workers = sandbox?.workerCount;
+      const strict = record.workerTopologyVersion === 3;
       return run.goalId === goalId && run.role === 'developer' && run.state === 'completed'
-        && sandbox?.kind === 'fly' && sandbox.verification === 'original-worker-hierarchy-v1'
+        && sandbox?.kind === 'fly' && sandbox.verification === (strict ? 'original-worker-hierarchy-v2' : 'original-worker-hierarchy-v1')
+        && (!strict || sandbox.childCompletionVerified === true)
         && sandbox.retired === true && sandbox.cleanupConfirmed === true
         && sandbox.bootCleanupConfirmed === true && sandbox.relayCleanupConfirmed === true
         && sandbox.relayUsed === (record.requestedWorkers > 1)
         && Number.isInteger(workers) && workers >= record.requestedWorkers
-        && workers <= (sandbox.relayUsed ? Math.min(12, 2 * record.requestedWorkers) : record.requestedWorkers)
+        && workers <= (strict ? record.requestedWorkers : sandbox.relayUsed ? Math.min(12, 2 * record.requestedWorkers) : record.requestedWorkers)
         && sandbox.initialWorkerCount === record.requestedWorkers
         && sandbox.localConversationCount === workers * record.requestedAgentsPerWorker
         && sandbox.conversationCountVerified === workers * record.requestedConversationsPerWorker
@@ -265,14 +268,14 @@ export class SwarmCoordinator {
     if (!finite(goal.budgetUsd) || goal.budgetUsd <= 0 || !finite(goal.spentUsd ?? 0)) throw new Error('A positive goal budget and valid spend are required.');
     if (!goal.providerId) throw new Error('Connect a provider before starting this goal.');
     const { maxWorkers, conversationsPerWorker, agentsPerWorker } = goalCapacity(goal);
-    const company = goal.executionMode === 'company' && goal.workerTopologyVersion === 2;
+    const company = goal.executionMode === 'company' && [2, 3].includes(goal.workerTopologyVersion);
     if (this.active.has(goal.id)) throw new Error('This goal is already running.');
     const saved = this.registry.state.goals[goal.id];
     const priorRuns = Object.values(this.registry.state.runs).filter((run) => run.goalId === goal.id);
     if (priorRuns.some((run) => ['running', 'unknown'].includes(run.state))) {
       throw Object.assign(new Error('This goal has an uncertain provider call. Inspect its saved task before starting more work.'), { code: 'UNKNOWN', unknown: true });
     }
-    if (company && saved && (saved.executionMode !== 'company' || saved.workerTopologyVersion !== 2)
+    if (company && saved && (saved.executionMode !== 'company' || saved.workerTopologyVersion !== goal.workerTopologyVersion)
       || !company && saved?.executionMode === 'company') throw companyUnavailable('unavailable');
     if (saved?.state === 'done') {
       if (company && (!companyIdentityMatches(saved, goal, { maxWorkers, conversationsPerWorker, agentsPerWorker })
@@ -281,7 +284,7 @@ export class SwarmCoordinator {
     }
     if (goal.executionMode !== undefined && !['company', 'local'].includes(goal.executionMode)
       || goal.executionMode === 'company' && !company
-      || goal.workerTopologyVersion === 2 && !['company', 'local'].includes(goal.executionMode)) {
+      || [2, 3].includes(goal.workerTopologyVersion) && !['company', 'local'].includes(goal.executionMode)) {
       throw companyUnavailable('unavailable');
     }
     if (company) {

@@ -74,6 +74,9 @@ test('fullscreen stage keeps text in dialogs and sends one bounded goal after ac
   await page.locator('#movie[data-movie-status="playing"]').waitFor();
   await page.waitForFunction(()=>document.getElementById('budget-amount').value==='200000');
   assert.equal(await page.locator('#budget-currency').inputValue(),'COP');
+  assert.equal(await page.locator('#workers').inputValue(),'10');
+  assert.equal(await page.locator('#conversations').inputValue(),'10');
+  await page.getByText('100 conversations requested: 10 teams, each with 1 lead + 9 agents. Todd supervises separately. Actual staffing is verified during execution.').waitFor({state:'attached'});
   const background=await page.locator('#frame').evaluate(element=>getComputedStyle(element).backgroundImage);
   assert.equal(background.includes('todd-stopmotion.png'),false);
   assert.equal(await page.locator('#movie').getByRole('heading').count(),0);
@@ -104,7 +107,7 @@ test('fullscreen stage keeps text in dialogs and sends one bounded goal after ac
   assert.deepEqual(providerCalls[1],{id:'anthropic',method:'key',model:'claude-sonnet-5-5',fleetAllowed:true,key:'fixture-anthropic-only'});
   await page.getByLabel('Provider',{exact:true}).selectOption('codex');
   await page.getByRole('button',{name:'Connect account'}).click();
-  await page.getByText('Codex is connected locally; remote five-by-five staffing remains unverified.').waitFor();
+  await page.getByText('Codex is connected locally; remote ten-by-ten staffing remains unverified.').waitFor();
   assert.deepEqual(providerCalls[2],{id:'codex',method:'subscription'});
   await page.getByLabel('Goal provider').selectOption('codex');
   await page.getByText('Codex is connected locally. Company readiness is checked separately.').waitFor();
@@ -128,8 +131,8 @@ test('fullscreen stage keeps text in dialogs and sends one bounded goal after ac
   await page.locator('#budget-currency').selectOption('COP');
   await page.waitForFunction(()=>document.getElementById('budget-amount').value==='400000');
   await page.getByLabel('Goal budget amount').fill('25000');
-  await page.getByLabel('Workers 5').fill('4');
-  await page.getByLabel('Conversations per worker 5').fill('2');
+  await page.getByLabel('Workers 10').fill('4');
+  await page.getByLabel('Conversations per worker 10').fill('2');
   await page.getByLabel('Private H100 + Qwen').check();
   assert.equal(await page.getByLabel('Goal provider').isDisabled(),true);
   await page.getByText("At Go, private H100 may start paid inference within this goal's allowance; availability is checked then.").waitFor();

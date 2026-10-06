@@ -8,6 +8,7 @@ import { flyProvisioner } from '../../upstream/swarm-teams/fleet/provisioners.mj
 import { FlujoClient } from '../../upstream/swarm-teams/lib/flujo-client.mjs';
 import { installTemplate } from '../../upstream/swarm-teams/install.mjs';
 import { BOOT_FLOW } from '../../upstream/swarm-teams/template/flows.mjs';
+import { teamProfile, specialistStaffingBrief } from './team-profile.mjs';
 import { collectFlyArtifacts } from '../artifacts/fly.mjs';
 import { createOwnedRelay, relayFailureCleanupConfirmed } from './relay.mjs';
 import { assertNetworkVacant, assertPlannedNetworkMembers, readFlyOrgApps,
@@ -147,27 +148,31 @@ const boundedCount = (value, fallback, maximum, name) => {
   return value;
 };
 export function goalCapacity(goal = {}) {
-  if (goal.workerTopologyVersion !== undefined && ![1, 2].includes(goal.workerTopologyVersion)) {
-    throw new RangeError('workerTopologyVersion must be 1 or 2.');
+  if (goal.workerTopologyVersion !== undefined && ![1, 2, 3].includes(goal.workerTopologyVersion)) {
+    throw new RangeError('workerTopologyVersion must be 1, 2 or 3.');
   }
-  const maxWorkers = boundedCount(goal.maxWorkers, 5, 6, 'maxWorkers');
+  const strict = goal.workerTopologyVersion === 3;
+  const maxWorkers = boundedCount(goal.maxWorkers, strict ? 10 : 5, strict ? 10 : 6, 'maxWorkers');
   // Earlier saved goals allowed ten child agents (eleven total conversations).
   // Preserve that exact legacy capacity only when its derived child count agrees.
-  const legacyEleven = goal.conversationsPerWorker === 11 && goal.agentsPerWorker === 10;
+  const legacyEleven = !strict && goal.conversationsPerWorker === 11 && goal.agentsPerWorker === 10;
   const selected = goal.conversationsPerWorker === undefined ? undefined
     : legacyEleven ? 11 : boundedCount(goal.conversationsPerWorker, 5, 10, 'conversationsPerWorker');
   const legacy = goal.agentsPerWorker;
-  if (legacy !== undefined && (!Number.isInteger(legacy) || legacy < 0 || legacy > 10)) {
-    throw new RangeError('agentsPerWorker must be an integer from 0 to 10.');
+  if (legacy !== undefined && (!Number.isInteger(legacy) || legacy < 0 || legacy > (strict ? 9 : 10))) {
+    throw new RangeError(`agentsPerWorker must be an integer from 0 to ${strict ? 9 : 10}.`);
   }
   if (selected !== undefined && legacy !== undefined && legacy !== selected - 1) {
     throw new RangeError('conversationsPerWorker and agentsPerWorker disagree.');
   }
-  const conversationsPerWorker = selected ?? (legacy === undefined ? 5 : legacy + 1);
+  const conversationsPerWorker = selected ?? (legacy === undefined ? strict ? 10 : 5 : legacy + 1);
   return { maxWorkers, conversationsPerWorker, agentsPerWorker: conversationsPerWorker - 1 };
 }
 export function fleetTopology(goal, { workerCap, relay = false } = {}) {
-  if (!Number.isInteger(workerCap) || workerCap < 1 || workerCap > 6) throw new RangeError('Worker count must be 1 to 6.');
+  const strict = goal?.workerTopologyVersion === 3;
+  if (!Number.isInteger(workerCap) || workerCap < 1 || workerCap > (strict ? 10 : 6)) throw new RangeError(`Worker count must be 1 to ${strict ? 10 : 6}.`);
+  if (strict) return { initialWorkers: workerCap, limits: { maxWorkers: workerCap,
+    maxDepth: relay ? 2 : 1, maxChildren: relay ? Math.max(1, workerCap - 1) : 1, maxActiveRuns: 1 } };
   const version = goal?.workerTopologyVersion === 2 ? 2 : 1;
   const initialWorkers = version === 2 ? workerCap : 1;
   const maxWorkers = version === 2 ? Math.min(12, workerCap * 2) : workerCap;
@@ -191,12 +196,16 @@ const STAFF_BRANCHES = Object.freeze([
   { name: 'independent-verification', angle: 'Independently verify the proposed result and artifacts.' },
   { name: 'adversarial-review', angle: 'Challenge the conclusion with counterexamples and unresolved risks.' },
   { name: 'handoff-synthesis', angle: 'Reconcile the evidence and prepare a bounded handoff.' },
+  { name: 'requirements-check', angle: 'Check every user requirement and identify missing acceptance criteria.' },
+  { name: 'integration-check', angle: 'Exercise component boundaries and validate the combined result.' },
+  { name: 'regression-check', angle: 'Check existing behavior and failure paths for regressions.' },
+  { name: 'delivery-check', angle: 'Check deliverable integrity, instructions and reproducibility.' },
 ]);
 
 /** Admit real controller Worker runs, with one coordinating parent and bounded descendants. */
 export function staffOwnedTeam(controller, root, { task, workerCap, localChildTarget = 4,
   onReserved = () => undefined, onStaffed = () => undefined } = {}) {
-  if (!Number.isInteger(workerCap) || workerCap < 1 || workerCap > 6) throw new RangeError('Worker count must be 1 to 6.');
+  if (!Number.isInteger(workerCap) || workerCap < 1 || workerCap > 10) throw new RangeError('Worker count must be 1 to 10.');
   if (!Number.isInteger(localChildTarget) || localChildTarget < 0 || localChildTarget > 10) {
     throw new RangeError('Local child conversation count must be 0 to 10.');
   }
@@ -204,6 +213,7 @@ export function staffOwnedTeam(controller, root, { task, workerCap, localChildTa
     ? `At the start of this run, call the installed start_subflow_ tool exactly ${localChildTarget} times with distinct concrete tasks. ` +
       'Record the returned child conversation IDs; then steer and wait for those same children. ' +
       'Do not start replacement local subflows or report a capacity gate as actual staffing. '
+      + specialistStaffingBrief(localChildTarget)
     : 'This Worker has only its lead conversation; do not start a local subflow. ';
   const leadTask = `${task}\n\n` +
     `You coordinate ${workerCap} owned Worker Machine${workerCap === 1 ? '' : 's'}, including yourself. ` +
@@ -234,7 +244,7 @@ export function staffOwnedTeam(controller, root, { task, workerCap, localChildTa
   }
   return { lead: runs[0], runs };
 }
-export function verifiedLocalConversations(read, parentConversationId, target) {
+export function verifiedLocalConversations(read, parentConversationId, target, { requireCompleted = false } = {}) {
   const page = read?.body;
   if (read?.status !== 200 || !Array.isArray(page?.items) || !Number.isInteger(page.total)
     || page.hasMore !== false || page.total !== page.items.length) {
@@ -254,7 +264,29 @@ export function verifiedLocalConversations(read, parentConversationId, target) {
         id: item.id, parentConversationId: item.parentConversationId, status: safeFailureField(item.status) ?? 'unknown',
       })) });
   }
+  if (requireCompleted && descendants.some(item => item.status !== 'completed')) {
+    throw unknown('A local agent has not completed successfully; agreement from its team lead cannot verify it.');
+  }
   return descendants.map(({ id, status }) => ({ id, status: safeFailureField(status) ?? 'unknown' }));
+}
+
+/** Count original identities, not capacity or a lead's claim about staffing. */
+export function verifiedTeamStaffing(entries, workerCount, childCount) {
+  if (!Array.isArray(entries) || entries.length !== workerCount) throw unknown('The original Worker staffing receipt is incomplete.');
+  const workers = new Set(), conversations = new Set();
+  for (const entry of entries) {
+    if (typeof entry.workerId !== 'string' || workers.has(entry.workerId)
+      || typeof entry.leadConversationId !== 'string' || !entry.leadConversationId
+      || !Array.isArray(entry.children) || entry.children.length !== childCount) throw unknown('The original Worker staffing receipt is invalid.');
+    workers.add(entry.workerId);
+    for (const id of [entry.leadConversationId, ...entry.children.map(child => child.id)]) {
+      if (typeof id !== 'string' || !id || conversations.has(id)) throw unknown('A staffing receipt repeats a conversation identity.');
+      conversations.add(id);
+    }
+    if (entry.children.some(child => child.status !== 'completed')) throw unknown('A staffing receipt contains an unfinished local agent.');
+  }
+  return { workerCount: workers.size, localConversationCount: workerCount * childCount,
+    conversationCountVerified: conversations.size, childCompletionVerified: true };
 }
 const sourceFingerprint = (origin) => createHash('sha256').update(new URL(origin).origin.toLowerCase()).digest('hex').slice(0, 24);
 const holdPath = (dataDir, origin) => path.join(dataDir, 'fleet', `source-admission-${sourceFingerprint(origin)}.json`);
@@ -727,7 +759,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
       source: workerSource,
       fleetReachable: Boolean(relay), concurrency: workerCap,
       initialWorkers: topology.initialWorkers,
-      teamLimits, flyEnv, cloudDirectory, network: intent.network,
+      teamLimits, specialists: teamProfile(goal), flyEnv, cloudDirectory, network: intent.network,
       accountRef: intent.accountRef,
       verifyFreshApp, onPlannedApp: planApp, onConfirmedApp: confirmApp, onRetiredApp: retireApp,
       verifyNetwork });
@@ -741,7 +773,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
       try {
         connection = await controller.connect(worker.target, { operation });
         const observed = verifiedLocalConversations(await connection.client.descendants(runs[0].conversationId),
-          runs[0].conversationId, teamLimits.concurrency);
+          runs[0].conversationId, teamLimits.concurrency, { requireCompleted: goal.workerTopologyVersion === 3 });
         localConversations.push({ workerId: worker.id, leadConversationId: runs[0].conversationId,
           children: observed });
         record({ localConversations });
@@ -755,11 +787,12 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     controller = new Controller({ registryPath, operatorToken: randomBytes(32).toString('base64url'),
       publicUrl: 'http://127.0.0.1:1', remoteUrl: relay?.remoteUrl,
       provisioner, log: () => undefined, runTimeoutMs: 20 * 60_000, deadlineAt: fleetDeadlineAt,
-      maxRunsPerWorker: goal.workerTopologyVersion === 2 ? 1 : undefined,
+      maxRunsPerWorker: [2, 3].includes(goal.workerTopologyVersion) ? 1 : undefined,
+      specialists: teamProfile(goal),
       beforeRetire: async ({ worker, target }) => {
         if (target.kind !== 'fly') return;
         await verifyNetwork({ operation: 'cleanup' });
-        if (goal.workerTopologyVersion === 2 && Object.values(controller.registry.state.runs)
+        if ([2, 3].includes(goal.workerTopologyVersion) && Object.values(controller.registry.state.runs)
           .some((run) => run.workerId === worker.id && run.state === 'completed')) {
           try { await observeWorkerConversations(worker, { operation: 'cleanup' }); }
           catch (error) {
@@ -840,6 +873,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     for (const staffedRun of staffed) {
       await observeWorkerConversations(controller.registry.worker(staffedRun.workerId));
     }
+    if (goal.workerTopologyVersion === 3) verifiedTeamStaffing(localConversations, workerCap, teamLimits.concurrency);
     record({ state: 'run-completed' });
     const artifactDir = path.join(dataDir, 'artifacts', goal.id);
     const resultPath = path.join(artifactDir, 'fly-result.txt');
@@ -853,10 +887,10 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     const retirement = await controller.retire('operator', { workerId: child.workerId });
     if (retirement.cleanupUnconfirmed?.length) throw unknown('Fly Worker cleanup is unconfirmed. Its original record blocks further provisioning.');
     cleanupConfirmed = true;
-    if (goal.workerTopologyVersion === 2 && (localConversationErrors.length || Object.values(controller.registry.state.workers)
+    if ([2, 3].includes(goal.workerTopologyVersion) && (localConversationErrors.length || Object.values(controller.registry.state.workers)
       .filter((worker) => worker.depth > 0).some((worker) =>
         !localConversations.some((entry) => entry.workerId === worker.id)))) {
-      throw unknown('A spawned Worker lacks a verified five-conversation receipt. Preserve the private tree for reconciliation.');
+      throw unknown('A spawned Worker lacks its requested conversation receipt. Preserve the private tree for reconciliation.');
     }
     if (artifactErrors.length) throw Object.assign(new Error('Owned Fly output capture was incomplete. The worker tree was retired; inspect the private capture receipts.'),
       { outcome: 'failed' });
@@ -865,12 +899,13 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     delivered = { available: true, text: result.result, artifacts, usage: { inputTokens: 0, outputTokens: 0, costUsd: null, costKind: 'unknown',
       reservedUsd: maxUsd, billingPending: true, ...(cloudReserved ? { reservationId } : {}) },
       sandbox: { kind: 'fly', workerId: child.workerId, runId: child.runId, retired: true, cleanupConfirmed: true,
-        verification: 'original-worker-hierarchy-v1', relayUsed: Boolean(relay),
+        verification: goal.workerTopologyVersion === 3 ? 'original-worker-hierarchy-v2' : 'original-worker-hierarchy-v1', relayUsed: Boolean(relay),
+        ...(goal.workerTopologyVersion === 3 ? verifiedTeamStaffing(localConversations, workerCap, teamLimits.concurrency) : {}),
         workerCount: localConversations.length, initialWorkerCount: staffed.length,
         teamLeadRuns: staffed.map((item) => item.runId),
         localConversationCount: localConversations.reduce((sum, item) => sum + item.children.length, 0),
         conversationCountVerified: localConversations.length + localConversations.reduce((sum, item) => sum + item.children.length, 0) } };
-    if (!diagnostic && goal.workerTopologyVersion === 2) {
+    if (!diagnostic && [2, 3].includes(goal.workerTopologyVersion)) {
       try { onCompany({ verifiedWorkers: localConversations.length,
         verifiedChildConversations: delivered.sandbox.localConversationCount }); }
       catch { /* A status listener cannot invalidate a verified Worker result. */ }

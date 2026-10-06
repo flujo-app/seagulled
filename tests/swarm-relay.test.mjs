@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createRelay, startRelayAgent } from '../upstream/swarm-teams/fleet/relay.mjs';
+import { PRODUCT_RELAY_LIMITS } from '../src/swarm/relay.mjs';
 
 const secret = 'relay-fixture-secret-with-at-least-32-characters';
 const deferred = () => {
@@ -121,6 +122,32 @@ test('default limits carry twelve Workers with five actual conversations each', 
     await close(relay);
     await close(controller);
   }
+});
+
+test('product relay admits ten held parents and ninety children without starving their original requests', async () => {
+  const releaseParents = deferred(), releaseChildren = deferred(), seen = new Map();
+  let active = 0, peak = 0;
+  const controller = http.createServer(async (request, response) => {
+    seen.set(request.url, (seen.get(request.url) ?? 0) + 1);
+    peak = Math.max(peak, ++active);
+    if (request.url.startsWith('/parent/')) await releaseParents.promise;
+    else { if ([...seen.keys()].filter(key => key.startsWith('/child/')).length === 90) releaseChildren.resolve(); await releaseChildren.promise; }
+    response.end('done'); active--;
+  });
+  const relay = createRelay({ secret });
+  const controllerOrigin = await listen(controller), relayOrigin = await listen(relay);
+  const agent = startRelayAgent({ controllerOrigin, relayOrigin, secret, lanes: 2, limits: PRODUCT_RELAY_LIMITS });
+  try {
+    const parents = Array.from({ length: 10 }, (_, index) => fetch(`${relayOrigin}/parent/${index}`));
+    await waitFor(() => seen.size === 10, 'ten held parent requests');
+    const children = Array.from({ length: 90 }, (_, index) => fetch(`${relayOrigin}/child/${index}`));
+    await waitFor(() => seen.size === 100, 'all ninety children while ten parents remain held');
+    assert.ok((await Promise.all(children)).every(response => response.status === 200));
+    assert.equal(peak, 100);
+    releaseParents.resolve();
+    assert.ok((await Promise.all(parents)).every(response => response.status === 200));
+    assert.ok([...seen.values()].every(count => count === 1), 'no original request is replayed');
+  } finally { releaseParents.resolve(); releaseChildren.resolve(); await agent.stop(); await close(relay); await close(controller); }
 });
 
 test('controller serves never exceed the configured slot count', async () => {

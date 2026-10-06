@@ -540,3 +540,39 @@ test('understaffed or excessive Worker proof cannot finish a company', async () 
     assert.equal(swarm.registry.goal(input.id).state, 'active');
   }
 });
+
+test('10x10 completion requires exact completed hierarchy proof and preserves original results across restart', async () => {
+  for (const defect of [null, 'unfinished', 'extra-worker', 'missing-agent', 'old-proof', 'duplicate-lead']) {
+    const providers = manager([
+      JSON.stringify({ done: false, tasks: [{ task: 'Execute the bounded company' }] }),
+      'Offline reviewer checked the fixture.',
+      JSON.stringify({ done: true, response: 'Offline company proof accepted.' }),
+    ]);
+    providers.fleetRoute = providerId => ({ available: true, providerId, model: { name: 'offline-model', apiKey: 'offline-secret' } });
+    const sandbox = { kind: 'fly', verification: 'original-worker-hierarchy-v2', childCompletionVerified: true,
+      relayUsed: true, retired: true, cleanupConfirmed: true, bootCleanupConfirmed: true, relayCleanupConfirmed: true,
+      workerCount: 10, initialWorkerCount: 10, localConversationCount: 90, conversationCountVerified: 100,
+      teamLeadRuns: Array.from({ length: 10 }, (_, i) => `original-run-${i}`) };
+    if (defect === 'unfinished') sandbox.childCompletionVerified = false;
+    if (defect === 'extra-worker') sandbox.workerCount = 11;
+    if (defect === 'missing-agent') sandbox.localConversationCount = 89;
+    if (defect === 'old-proof') sandbox.verification = 'original-worker-hierarchy-v1';
+    if (defect === 'duplicate-lead') sandbox.teamLeadRuns[9] = sandbox.teamLeadRuns[0];
+    const { swarm, admit, dataDir } = offlineCompany(providers, { fleetRunner: async () => ({
+      available: true, text: 'Offline fixture result.', usage: { costUsd: 0.1, costKind: 'estimated' }, sandbox,
+    }) });
+    const input = goal({ executionMode: 'company', workerTopologyVersion: 3, maxWorkers: 10, conversationsPerWorker: 10, agentsPerWorker: 9 });
+    const admission = await admit(input);
+    if (defect) {
+      await assert.rejects(swarm.execute({ goal: input, admission }), error => error.code === 'COMPANY_UNAVAILABLE');
+      assert.equal(swarm.registry.goal(input.id).state, 'active');
+    } else {
+      assert.equal((await swarm.execute({ goal: input, admission })).completed, true);
+      const reopened = new SwarmCoordinator({ providers, dataDir });
+      const calls = providers.calls.length;
+      assert.equal((await reopened.execute({ goal: input })).text, 'Offline company proof accepted.');
+      await assert.rejects(reopened.execute({ goal: { ...input, workerTopologyVersion: 2 } }));
+      assert.equal(providers.calls.length, calls, 'original provider calls are never replayed');
+    }
+  }
+});

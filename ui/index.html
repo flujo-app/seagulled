@@ -45,8 +45,9 @@
       <label class="setting-label" for="goal-provider">Goal provider</label>
       <select id="goal-provider" aria-label="Goal provider"><option value="">Choose a connected provider</option></select>
       <small id="goal-provider-note" class="budget-note">Choose an inference provider for this goal. The company starts when its workers are ready.</small>
-      <label class="setting-label" for="workers">Workers <output id="workers-value">5</output></label><input id="workers" type="range" min="1" max="6" value="5">
-      <label class="setting-label" for="conversations">Conversations per worker <output id="conversations-value">5</output></label><input id="conversations" type="range" min="1" max="10" value="5">
+      <label class="setting-label" for="workers">Workers <output id="workers-value">10</output></label><input id="workers" type="range" min="1" max="10" value="10">
+      <label class="setting-label" for="conversations">Conversations per worker <output id="conversations-value">10</output></label><input id="conversations" type="range" min="1" max="10" value="10">
+      <small id="team-size-note" class="budget-note">100 conversations requested: 10 teams, each with 1 lead + 9 agents. Todd supervises separately. Actual staffing is verified during execution.</small>
       <label class="private-h100-switch" for="private-h100"><span>Private H100 + Qwen</span><input id="private-h100" type="checkbox"></label>
       <small id="private-h100-status" class="budget-note">Off. If enabled, Go may start paid private inference within this goal's allowance.</small>
     </div>
