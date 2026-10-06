@@ -40,6 +40,9 @@ test('subscription CLI returns token usage with non-billed subscription kind', a
   assert.equal(claude.text, 'Claude answer');
   assert.ok(calls.some(([, args]) => args.includes('--max-budget-usd')));
   assert.ok(calls.some(([, args]) => args.includes('--sandbox') && args.includes('read-only')));
+  const nativeCalls = calls.filter(([, args]) => args[0] === 'exec' || args[0] === '-p');
+  assert.equal(nativeCalls.length, 2);
+  assert.ok(nativeCalls.every(([, , options]) => options.killTree === true));
 });
 
 test('API calls are bounded and do not invent billed spend', async () => {
@@ -126,10 +129,10 @@ test('fleet routes require explicit worker consent and expose only public eligib
   const manager = new ProviderManager({ commandRunner: mockCommands, env: { OPENAI_API_KEY: 'env-secret' } });
   await manager.discover();
   assert.deepEqual(manager.fleetRoute('missing'), { available: false, detail: 'Unknown provider.' });
-  for (const id of ['codex', 'claude', 'antigravity', 'modal', 'openai', 'anthropic']) {
+  for (const id of ['codex', 'claude', 'antigravity', 'modal', 'openai', 'anthropic', 'private-h100']) {
     assert.equal(manager.fleetRoute(id).available, false, id);
   }
-  for (const state of manager.publicState()) assert.equal(state.fleetSupported, ['openai', 'anthropic'].includes(state.id), state.id);
+  for (const state of manager.publicState()) assert.equal(state.fleetSupported, ['openai', 'anthropic', 'private-h100'].includes(state.id), state.id);
   assert.equal(manager.publicState().find((item) => item.id === 'openai').fleetEligible, false);
   await manager.connect({ id: 'openai', method: 'key', fleetAllowed: true });
   assert.deepEqual(manager.fleetRoute('openai'), {

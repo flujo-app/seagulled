@@ -16,15 +16,22 @@ const HELP = `Seagulled — talk to Todd, supervise the team.
   seagulled providers                Discover providers
   seagulled connect PROVIDER          Use native sign-in, or a saved key
   seagulled connect PROVIDER --key-env ENV_NAME --method key
-  seagulled edit GOAL --text "…" --budget 5
+  seagulled edit GOAL --text "…" --budget 50
   seagulled pause|resume|stop GOAL
   seagulled pause-all|resume-all|stop-all
 
-Options: --budget USD, --provider ID, --home DIRECTORY, --json, --no-open
+Options: --budget AMOUNT [--currency ISO_CODE], --workers COUNT,
+         --conversations COUNT, --private-h100 | --no-private-h100,
+         --provider ID, --home DIRECTORY, --json, --no-open
+         --execution-mode company|local (local is a bounded diagnostic)
+Defaults: 50 USD, five workers, five total conversations per worker.
 Saved state lives in your private Seagulled folder. Keys stay out of arguments.
 `;
 const { positionals, values } = parseArgs({ allowPositionals: true, options: {
   budget: { type: 'string' }, provider: { type: 'string' }, home: { type: 'string' }, json: { type: 'boolean' },
+  currency: { type: 'string' }, workers: { type: 'string' }, conversations: { type: 'string' },
+  'private-h100': { type: 'boolean' }, 'no-private-h100': { type: 'boolean' },
+  'execution-mode': { type: 'string' },
   text: { type: 'string' }, method: { type: 'string' }, 'key-env': { type: 'string' }, 'no-open': { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
 } });
 const [command = 'chat', ...args] = positionals;
@@ -71,7 +78,12 @@ async function client() {
     controlGoal: (id, action) => request(session, `/api/goals/${encodeURIComponent(id)}/${action}`, 'POST'),
     controlSwarm: action => request(session, `/api/swarm/${action}`, 'POST'),
     async wait(id) {
-      while (true) { const state = await request(session, '/api/state'); const goal = state.goals.find(g => g.id === id); if (!goal || !['running', 'pausing', 'stopping'].includes(goal.status)) return goal; await new Promise(r => setTimeout(r, 500)); }
+      while (true) {
+        const state = await request(session, '/api/state'); const goal = state.goals.find(g => g.id === id);
+        const preparing = goal?.status === 'queued' && ['checking', 'ready'].includes(goal.execution?.readiness);
+        if (!goal || (!preparing && !['running', 'pausing', 'stopping'].includes(goal.status))) return goal;
+        await new Promise(r => setTimeout(r, 500));
+      }
     },
     session,
   };
@@ -88,8 +100,21 @@ async function cleanup() { await service?.close(); await runtime?.close(); }
 try {
   if (values.help || command === 'help') { print(HELP); }
   else {
+    if (values.currency !== undefined && values.budget === undefined) throw new Error('Choose an amount with the budget currency.');
+    if (values['private-h100'] && values['no-private-h100']) throw new Error('Choose one private inference setting.');
+    if (values['execution-mode'] !== undefined && !['company', 'local'].includes(values['execution-mode'])) throw new Error('Choose company or local execution.');
+    if (command === 'edit' && values['execution-mode'] !== undefined) throw new Error('Execution mode is fixed when a goal is created.');
+    const options = {
+      ...(values.budget !== undefined ? values.currency !== undefined
+        ? { budget: { amount: Number(values.budget), currency: values.currency.toUpperCase() } }
+        : { budgetUsd: Number(values.budget) } : {}),
+      ...(values.workers !== undefined ? { maxWorkers: Number(values.workers) } : {}),
+      ...(values.conversations !== undefined ? { conversationsPerWorker: Number(values.conversations) } : {}),
+      ...(values['private-h100'] ? { privateH100: true } : values['no-private-h100'] ? { privateH100: false } : {}),
+      ...(values.provider ? { providerId: values.provider } : {}),
+      ...(values['execution-mode'] ? { executionMode: values['execution-mode'] } : {}),
+    };
     const app = await client();
-    const options = { ...(values.budget ? { budgetUsd: Number(values.budget) } : {}), ...(values.provider ? { providerId: values.provider } : {}) };
     if (command === 'serve') {
       const endpoint = app.session || (service = await createServer({ runtime }));
       if (!values['no-open']) open(`${endpoint.url}/#token=${encodeURIComponent(endpoint.token)}`);
@@ -104,14 +129,15 @@ try {
       print(await app.connect({ id: args[0], method: values.method || (key ? 'key' : 'subscription'), ...(key ? { key } : {}) }));
     } else if (['pause', 'resume', 'stop'].includes(command)) print(await app.controlGoal(args[0], command));
     else if (['pause-all', 'resume-all', 'stop-all'].includes(command)) showState(await app.controlSwarm(command.split('-')[0]));
-    else if (command === 'edit') print(await app.updateGoal(args[0], { ...(values.text ? { text: values.text } : {}), ...(values.budget ? { budgetUsd: Number(values.budget) } : {}) }));
+    else if (command === 'edit') print(await app.updateGoal(args[0], { ...(values.text ? { text: values.text } : {}), ...options }));
     else if (command === 'goal') {
-      const goal = await app.chat(args.join(' '), options); print(`Todd: On it. Goal ${goal.id}.`);
+      const goal = await app.chat(args.join(' '), options); print(`Todd: Saved goal ${goal.id}.`);
       const stop = async () => { await app.controlGoal(goal.id, 'pause').catch(() => {}); };
       process.once('SIGINT', stop);
       const result = await app.wait(goal.id); process.off('SIGINT', stop);
       if (values.json) print(result); else print(result.result || result.error || `Goal ${result.status}.`);
       if (['failed', 'interrupted'].includes(result.status)) process.exitCode = 1;
+      else if (result.status === 'queued') process.exitCode = 2;
     } else if (command === 'chat') {
       const rl = createInterface({ input: process.stdin, output: process.stdout });
       print('Todd: What are we building? Type /goals, /pause, /stop or /quit.');
@@ -122,7 +148,7 @@ try {
           if (text === '/goals') { showState(await app.snapshot()); continue; }
           if (text === '/pause' || text === '/stop') { await app.controlSwarm(text.slice(1)); print('Todd: The team got the message.'); continue; }
           if (!text) continue;
-          const goal = await app.chat(text, options); print('Todd: I’m putting the team on it.');
+          const goal = await app.chat(text, options); print('Todd: Your goal is saved.');
           const result = await app.wait(goal.id); print(`Todd: ${result.result || result.error || result.status}`);
         }
       } finally { rl.close(); }

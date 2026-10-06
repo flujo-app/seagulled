@@ -10,6 +10,22 @@ import { claimController } from './owner.mjs';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const same = (a, b) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+const TEAM_LIMIT_MAX = { agentTurns: 200, leadTurns: 600, concurrency: 10 };
+const checkedTeamLimits = (limits) => {
+  if (limits === undefined) return undefined;
+  if (!limits || typeof limits !== 'object' || Array.isArray(limits)) {
+    throw new FleetError('INVALID', 'Team limits must be bounded integers.');
+  }
+  const selected = {};
+  for (const [name, value] of Object.entries(limits)) {
+    if (!Object.hasOwn(TEAM_LIMIT_MAX, name) || !Number.isInteger(value)
+      || value < (name === 'concurrency' ? 0 : 1) || value > TEAM_LIMIT_MAX[name]) {
+      throw new FleetError('INVALID', `Invalid team limit ${name}.`);
+    }
+    selected[name] = value;
+  }
+  return selected;
+};
 
 export const TOOLS = [
   { name: 'fleet_info', description: 'Show the goal, the limits, the whole Worker tree and where you are in it.',
@@ -41,7 +57,9 @@ export class Controller {
    * @param publicUrl     URL under which Workers reach this controller
    * @param provisioner   { provision(worker, fleet) -> target, retire(target), connect?(target) }
    */
-  constructor({ registryPath, operatorToken, publicUrl, remoteUrl, provisioner, runTimeoutMs, beforeRetire, specialists,
+  constructor({ registryPath, operatorToken, publicUrl, remoteUrl, provisioner, runTimeoutMs, deadlineAt,
+    maxRunsPerWorker,
+    beforeRetire, specialists,
     log = () => undefined }) {
     if (!operatorToken || operatorToken.length < 32) throw new Error('operatorToken must be at least 32 characters.');
     this.releaseOwner = claimController(registryPath);
@@ -56,6 +74,8 @@ export class Controller {
     this.provisioner = provisioner;
     this.log = log;
     this.runTimeoutMs = runTimeoutMs;
+    this.deadlineAt = deadlineAt;
+    this.maxRunsPerWorker = maxRunsPerWorker;
     this.beforeRetire = beforeRetire;
     this.specialists = specialists;
     this.provisioning = new Map(); // workerId -> Promise<target>
@@ -67,14 +87,16 @@ export class Controller {
       ...(this.remoteUrl ? { remoteUrl: `${this.remoteUrl}/mcp` } : {}) };
   }
 
-  async connect(target) {
-    if (this.provisioner?.connect && target.kind !== 'external') return this.provisioner.connect(target);
+  async connect(target, context = {}) {
+    if (this.provisioner?.connect && target.kind !== 'external') return this.provisioner.connect(target, context);
     return { client: new FlujoClient(target), close: async () => undefined };
   }
 
   /** Create a goal; its supervisor runs on an existing FLUJO (an always-on worker). */
-  async createGoal({ id, text, limits, supervisor, model, start = true }) {
+  async createGoal({ id, text, limits, supervisor, model, teamLimits, start = true }) {
+    const selectedTeamLimits = checkedTeamLimits(teamLimits);
     const goal = this.registry.createGoal({ id, text, limits });
+    if (selectedTeamLimits) { goal.teamLimits = selectedTeamLimits; this.registry.save(); }
     const { worker, token } = this.registry.reserve({ goalId: goal.id, role: 'supervisor', name: 'supervisor' });
     // An always-on Fly worker is reached through a private proxy and talks back through the relay.
     const onFly = Boolean(supervisor.app);
@@ -85,7 +107,7 @@ export class Controller {
     try {
       connection = await this.connect(target);
       await installTemplate(connection.client, { model, fleet: this.fleetFor(token, { remote: onFly }),
-        browser: supervisor.browser !== false, specialists: this.specialists });
+        browser: supervisor.browser !== false, limits: selectedTeamLimits, specialists: this.specialists });
     } catch (error) {
       this.registry.markFailed(worker.id, error.message);
       throw error;
@@ -98,16 +120,32 @@ export class Controller {
 
   /** Start one conversation on a Worker. Returns at once; the run settles in the background. */
   startRun({ worker, startedBy, task, flowName = FLOW_NAMES.team }) {
+    if (this.deadlineAt && Date.now() >= this.deadlineAt) throw new FleetError('DEADLINE', 'The fleet deadline has passed.', 409);
+    if (this.maxRunsPerWorker && Object.values(this.registry.state.runs)
+      .filter((run) => run.workerId === worker.id).length >= this.maxRunsPerWorker) {
+      throw new FleetError('CAPACITY', 'This Worker has reached its conversation run limit.', 409);
+    }
     const run = this.registry.startRun({ workerId: worker.id, startedBy, task, flowName });
     const job = (async () => {
       let connection;
       let submitted = false;
       try {
         const target = worker.target ?? await this.provisioning.get(worker.id);
+        if (this.deadlineAt && Date.now() >= this.deadlineAt) throw new FleetError('DEADLINE', 'The fleet deadline passed before submission.', 409);
         connection = await this.connect(target);
+        if (this.deadlineAt && Date.now() >= this.deadlineAt) throw new FleetError('DEADLINE', 'The fleet deadline passed before submission.', 409);
+        // The native actor gate needs an immutable target/workspace receipt.
+        // Older fixtures without a workspace retain their ordinary flow path,
+        // but cannot pass that gate.
+        if (typeof target?.workspace === 'string' && target.workspace.trim()) {
+          this.registry.bindRunTarget(run.id, target);
+        }
         submitted = true;
+        const timeoutMs = this.deadlineAt
+          ? Math.min(this.runTimeoutMs ?? 6 * 3600_000, Math.max(1, this.deadlineAt - Date.now()))
+          : this.runTimeoutMs;
         const result = await connection.client.runFlow({ flowName, prompt: task, conversationId: run.conversationId,
-          ...(this.runTimeoutMs ? { timeoutMs: this.runTimeoutMs } : {}) });
+          ...(timeoutMs ? { timeoutMs } : {}) });
         this.registry.settleRun(run.id, result);
       } catch (error) {
         this.registry.settleRun(run.id, { status: submitted ? 'unknown' : 'failed', output: '', error: error.message });
@@ -120,13 +158,21 @@ export class Controller {
     return run;
   }
 
-  delegate(actor, { name, task }) {
+  startDelegatedRun(actor, worker, task) {
+    const goal = this.registry.goal(actor.goalId);
+    return this.startRun({ worker, startedBy: actor.id,
+      task: `You are Worker "${worker.name}" (${worker.id}) in the swarm for this goal:\n${goal.text}\n\nYOUR BRANCH:\n${task}` });
+  }
+
+  delegate(actor, { name, task, deferRun = false }) {
+    if (this.deadlineAt && Date.now() >= this.deadlineAt) throw new FleetError('DEADLINE', 'The fleet deadline has passed.', 409);
     if (typeof task !== 'string' || !task.trim()) throw new FleetError('INVALID', 'A task is required.');
     const { worker, token } = this.registry.reserve({ goalId: actor.goalId, parentId: actor.id, role: 'team', name });
     const provisioning = (async () => {
       try {
         const target = await this.provisioner.provision(worker, this.fleetFor(token),
-          { isLeaf: worker.depth >= this.registry.goal(worker.goalId).limits.maxDepth, specialists: this.specialists });
+          { isLeaf: worker.depth >= this.registry.goal(worker.goalId).limits.maxDepth,
+            teamLimits: this.registry.goal(worker.goalId).teamLimits, specialists: this.specialists });
         this.registry.enroll(worker.id, target);
         return target;
       } catch (error) {
@@ -137,10 +183,8 @@ export class Controller {
     })();
     provisioning.catch(() => undefined);
     this.provisioning.set(worker.id, provisioning);
-    const goal = this.registry.goal(actor.goalId);
-    const run = this.startRun({ worker, startedBy: actor.id,
-      task: `You are Worker "${worker.name}" (${worker.id}) in the swarm for this goal:\n${goal.text}\n\nYOUR BRANCH:\n${task}` });
-    return { workerId: worker.id, runId: run.id, state: 'provisioning' };
+    const run = deferRun ? null : this.startDelegatedRun(actor, worker, task);
+    return { workerId: worker.id, runId: run?.id ?? null, state: 'provisioning' };
   }
 
   owns(actor, workerId) {
@@ -196,7 +240,7 @@ export class Controller {
         if (activeRuns.length) {
           let connection;
           try {
-            connection = await this.connect(current.target);
+            connection = await this.connect(current.target, { operation: 'cleanup' });
             for (const run of activeRuns) {
               try { await connection.client.cancel(run.conversationId); }
               catch { this.log(`cancel request for ${run.id} was unconfirmed`); }
@@ -248,7 +292,7 @@ export class Controller {
   async tool(actor, name, args = {}) {
     switch (name) {
       case 'fleet_info': return this.info(actor);
-      case 'fleet_delegate': return this.delegate(actor, args);
+      case 'fleet_delegate': return this.delegate(actor, { name: args.name, task: args.task });
       case 'fleet_start_task': {
         if (!this.owns(actor, args.workerId)) throw new FleetError('FORBIDDEN', 'You can only start tasks on your own descendants.', 403);
         const run = this.startRun({ worker: this.registry.worker(args.workerId), startedBy: actor.id, task: args.task });
@@ -294,6 +338,14 @@ export class Controller {
     const token = /^Bearer (.+)$/.exec(request.headers.authorization ?? '')?.[1] ?? '';
     if (token && same(token, this.operatorToken)) return 'operator';
     return this.registry.actorFor(token);
+  }
+
+  /** Trusted host seam for a later gateway; deliberately has no HTTP route. */
+  resolveNativeOriginalRun(request, claim) {
+    const actor = this.authenticate(request);
+    if (!actor) throw new FleetError('UNAUTHORIZED', 'A Worker bearer is required.', 401);
+    if (actor === 'operator') throw new FleetError('FORBIDDEN', 'The operator is not an executing Worker.', 403);
+    return this.registry.resolveNativeOriginalRun(actor, claim);
   }
 
   async handle(request, response) {

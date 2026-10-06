@@ -2,25 +2,30 @@
 import http from 'node:http';
 import https from 'node:https';
 import { randomUUID } from 'node:crypto';
+import { setTimeout as abortableDelay } from 'node:timers/promises';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** One request without Node fetch's 5-minute header timeout: flow runs can take hours. */
-export function rawRequest(url, { method = 'GET', headers = {}, body, timeoutMs = 0 } = {}) {
+export function rawRequest(url, { method = 'GET', headers = {}, body, timeoutMs = 0, signal } = {}) {
+  if (signal?.aborted) throw Object.assign(new Error('FLUJO request was cancelled before submission.'),
+    { name: 'AbortError', outcome: 'not_applied' });
   return new Promise((resolve, reject) => {
     const target = new URL(url);
     const payload = body === undefined ? undefined : Buffer.from(typeof body === 'string' ? body : JSON.stringify(body));
+    let timer;
+    const stopTimer = () => { if (timer) clearTimeout(timer); };
     const request = (target.protocol === 'https:' ? https : http).request(target, {
-      method,
+      method, signal,
       headers: { ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': payload.length } : {}), ...headers },
     }, (response) => {
       const chunks = [];
       response.on('data', (chunk) => chunks.push(chunk));
-      response.on('end', () => resolve({ status: response.statusCode, text: Buffer.concat(chunks).toString('utf8') }));
-      response.on('error', reject);
+      response.on('end', () => { stopTimer(); resolve({ status: response.statusCode, text: Buffer.concat(chunks).toString('utf8') }); });
+      response.on('error', (error) => { stopTimer(); reject(error); });
     });
-    if (timeoutMs > 0) request.setTimeout(timeoutMs, () => request.destroy(new Error(`timeout after ${timeoutMs} ms`)));
-    request.on('error', reject);
+    if (timeoutMs > 0) timer = setTimeout(() => request.destroy(new Error(`timeout after ${timeoutMs} ms`)), timeoutMs);
+    request.on('error', (error) => { stopTimer(); reject(error); });
     request.end(payload);
   });
 }
@@ -31,10 +36,22 @@ function parse(text) {
 
 export class FlujoClient {
   /** `token` is the worker control bearer; a local FLUJO in localhost mode needs none. */
-  constructor({ origin, workspace, token }) {
+  constructor({ origin, workspace, token, signal, deadlineAt }) {
     this.origin = origin.replace(/\/$/, '');
     this.workspace = workspace;
     this.token = token;
+    this.signal = signal;
+    this.deadlineAt = deadlineAt;
+  }
+
+  requestTimeout(timeoutMs) {
+    if (this.signal?.aborted) throw Object.assign(new Error('FLUJO request was cancelled before submission.'),
+      { name: 'AbortError', outcome: 'not_applied' });
+    if (this.deadlineAt === undefined) return timeoutMs;
+    const remaining = this.deadlineAt - Date.now();
+    if (remaining <= 0) throw Object.assign(new Error('FLUJO request deadline passed before submission.'),
+      { code: 'DEADLINE', outcome: 'not_applied' });
+    return timeoutMs > 0 ? Math.min(timeoutMs, remaining) : remaining;
   }
 
   headers(workspace = this.workspace) {
@@ -47,7 +64,8 @@ export class FlujoClient {
   async api(method, path, body, { workspace = this.workspace, timeoutMs = 120_000 } = {}) {
     const url = new URL(this.origin + path);
     if (workspace) url.searchParams.set('workspace', workspace);
-    const response = await rawRequest(url, { method, headers: this.headers(workspace), body, timeoutMs });
+    const response = await rawRequest(url, { method, headers: this.headers(workspace), body,
+      timeoutMs: this.requestTimeout(timeoutMs), signal: this.signal });
     return { status: response.status, body: parse(response.text) };
   }
 
@@ -103,6 +121,11 @@ export class FlujoClient {
     return Array.isArray(body) ? body : Object.values(body.servers ?? body);
   }
 
+  async serverTools(name) {
+    const body = await this.expect('GET', `/api/mcp/servers/${encodeURIComponent(name)}/tools`);
+    return { tools: Array.isArray(body?.tools) ? body.tools : [], error: body?.error };
+  }
+
   async upsertServer(config) {
     const exists = (await this.servers()).some((server) => server.name === config.name);
     return this.expect(exists ? 'PUT' : 'POST',
@@ -130,6 +153,11 @@ export class FlujoClient {
     return this.api('GET', `/v1/chat/conversations/${encodeURIComponent(id)}`);
   }
 
+  /** Read FLUJO's persisted conversation hierarchy without opening message bodies. */
+  async descendants(id) {
+    return this.api('GET', `/v1/chat/conversations?paged=1&limit=200&descendantsOf=${encodeURIComponent(id)}`);
+  }
+
   async inject(id, content) {
     return this.expect('POST', `/v1/chat/conversations/${encodeURIComponent(id)}/inject`, { content, id: randomUUID() });
   }
@@ -144,16 +172,17 @@ export class FlujoClient {
    * sending the task a second time.
    */
   async runFlow({ flowName, prompt, conversationId = randomUUID(), timeoutMs = 6 * 3600_000, pollMs = 5000 }) {
+    const submitTimeoutMs = this.requestTimeout(timeoutMs);
     const body = {
       model: `flow-${flowName}`, stream: false,
       metadata: { flujo: 'true', requireApproval: 'false', conversationId },
       messages: [{ role: 'user', content: prompt }],
     };
-    const deadline = Date.now() + timeoutMs;
+    const deadline = Date.now() + submitTimeoutMs;
     let transportError;
     try {
       const response = await rawRequest(`${this.origin}/v1/chat/completions?workspace=${encodeURIComponent(this.workspace)}`,
-        { method: 'POST', headers: this.headers(), body, timeoutMs });
+        { method: 'POST', headers: this.headers(), body, timeoutMs: submitTimeoutMs, signal: this.signal });
       const parsed = parse(response.text);
       if (response.status === 200 && parsed?.choices?.[0]?.message) {
         // A flow that ends on a handoff to Finish returns empty content; its answer is the last prose turn.
@@ -168,15 +197,21 @@ export class FlujoClient {
     } catch (error) {
       transportError = error.message;
     }
+    const interrupted = () => ({ conversationId, status: 'unknown', output: '',
+      error: 'flow submission was interrupted; original outcome is unconfirmed' });
+    if (this.signal?.aborted) return interrupted();
     while (Date.now() < deadline) {
+      if (this.signal?.aborted) return interrupted();
       const read = await this.conversation(conversationId).catch(() => null);
+      if (this.signal?.aborted) return interrupted();
       const status = read?.status === 200 ? read.body.status : undefined;
       if (status && !['running', 'queued', 'pending', 'awaiting'].includes(status)) {
         return { conversationId, status: status === 'completed' ? 'completed' : 'failed',
           output: lastAssistantText(read.body.messages), ...(status === 'completed' ? {} : { error: `conversation ${status}` }) };
       }
       if (read?.status === 404) return { conversationId, status: 'unknown', output: '', error: `conversation not found after submission; outcome is unconfirmed (${transportError})` };
-      await sleep(pollMs);
+      try { await abortableDelay(pollMs, undefined, { signal: this.signal }); }
+      catch (error) { if (this.signal?.aborted) return interrupted(); throw error; }
     }
     return { conversationId, status: 'unknown', output: '', error: `no terminal state before the deadline (${transportError})` };
   }

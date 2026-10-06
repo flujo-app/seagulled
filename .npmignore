@@ -11,3 +11,5 @@ upstream/swarm-teams/test/
 upstream/swarm-teams/diagnostics/
 *.log
 *.local.json
+**/__pycache__/**
+**/*.pyc

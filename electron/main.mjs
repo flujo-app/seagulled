@@ -1,15 +1,15 @@
 import {app, BrowserWindow, ipcMain, shell, safeStorage} from 'electron';
-import {join, dirname} from 'node:path';
+import {join, dirname, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {mkdirSync} from 'node:fs';
 import {createRuntime, defaultDataDir} from '../src/runtime.mjs';
 import {createServer} from '../src/server.mjs';
 import {ProviderManager} from '../src/providers/index.mjs';
 import {createCredentialStore} from './credentials.mjs';
-import {validateConnectPayload} from './input.mjs';
+import {validateConnectPayload,validateGoalOptions,validateVoiceInput} from './input.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const externalHosts = new Set(['modal.com','www.modal.com','auth.modal.com','anthropic.com','console.anthropic.com','claude.ai','openai.com','platform.openai.com','chatgpt.com','github.com','accounts.google.com']);
+const externalHosts = new Set(['modal.com','www.modal.com','auth.modal.com','anthropic.com','console.anthropic.com','claude.ai','openai.com','platform.openai.com','chatgpt.com','github.com','accounts.google.com','www.exchangerate-api.com']);
 let runtime;
 let serverHandle;
 let mainWindow;
@@ -32,19 +32,29 @@ async function invoke(_event, method, args = []) {
   if (!Array.isArray(args)) throw new Error('Request is invalid.');
   switch(method) {
     case 'state': return runtime.snapshot();
-    case 'chat': {
-      const options=args[1] || {};
-      const budgetUsd=Number(options.budgetUsd ?? 5);
-      if(!Number.isFinite(budgetUsd)||budgetUsd<=0||budgetUsd>100000)throw new Error('Budget must be between $0.01 and $100,000.');
-      return runtime.chat(assertString(args[0], 'Message'),{budgetUsd});
+    case 'defaultBudget': {
+      const currency=assertString(args[0] ?? 'USD','Currency',3).toUpperCase();
+      if(!/^[A-Z]{3}$/.test(currency))throw new Error('Currency is invalid.');
+      return runtime.defaultBudget(currency);
     }
+    case 'chat': {
+      return runtime.chat(assertString(args[0], 'Message'),validateGoalOptions(args[1] || {}));
+    }
+    case 'authState': return runtime.authState();
+    case 'authConnect': {
+      const id=args[0]?.id;if(id!=='fly'&&id!=='modal')throw new Error('Unknown sign-in.');
+      return runtime.authConnect({id});
+    }
+    case 'authCancel': return runtime.authCancel();
+    case 'voiceCapabilities': return runtime.voiceCapabilities();
+    case 'transcribeAudio': return runtime.transcribeAudio(validateVoiceInput(args[0]));
+    case 'speak': return runtime.speak(assertString(args[0],'Speech',1200));
+    case 'stopSpeaking': return runtime.stopSpeaking();
     case 'updateGoal': {
       const patch=args[1];
       if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('Goal changes are invalid.');
-      const text=assertString(patch.text,'Goal text');
-      const budgetUsd=Number(patch.budgetUsd);
-      if (!Number.isFinite(budgetUsd) || budgetUsd <= 0) throw new Error('Budget must be a positive number.');
-      return runtime.updateGoal(assertId(args[0]),{text,budgetUsd});
+      const text=assertString(patch.text,'Goal text',4000);
+      return runtime.updateGoal(assertId(args[0]),{text,...validateGoalOptions(patch)});
     }
     case 'controlGoal': {
       const action=args[1];
@@ -70,6 +80,7 @@ async function invoke(_event, method, args = []) {
 function createWindow() {
   const window = new BrowserWindow({
     width:1190,height:780,minWidth:750,minHeight:540,
+    fullscreen:true,
     backgroundColor:'#f8f7f3',
     show:false,
     webPreferences:{
@@ -81,6 +92,18 @@ function createWindow() {
       devTools:!app.isPackaged
     }
   });
+  const ownAudio=(contents,permission,details)=>contents===window.webContents && permission==='media' && Array.isArray(details?.mediaTypes) && details.mediaTypes.length>0 && details.mediaTypes.every(type=>type==='audio');
+  window.webContents.session.setPermissionRequestHandler((contents,permission,callback,details)=>callback(ownAudio(contents,permission,details)));
+  window.webContents.session.setPermissionCheckHandler((contents,permission,_origin,details)=>contents===window.webContents && permission==='media' && details?.mediaType!=='video');
+  window.webContents.on('before-input-event',(event,input)=>{
+    if(input.type!=='keyDown'||input.isAutoRepeat)return;
+    if(input.key==='F11'){
+      event.preventDefault();window.setFullScreen(!window.isFullScreen());
+    }else if(input.key?.toLowerCase()==='q'&&!input.alt&&!input.shift&&(process.platform==='darwin'?input.meta:input.control)){
+      event.preventDefault();app.quit();
+    }
+    // Escape stays with the renderer so an open dialog closes normally.
+  });
   window.once('ready-to-show',()=>window.show());
   window.webContents.setWindowOpenHandler(({url})=>{if(allowExternal(url))void shell.openExternal(url);return {action:'deny'};});
   window.webContents.on('will-navigate',(event,url)=>{if(url!==window.webContents.getURL()){event.preventDefault();if(allowExternal(url))void shell.openExternal(url);}});
@@ -91,7 +114,11 @@ function createWindow() {
 async function start() {
   const dataDir=defaultDataDir();
   mkdirSync(join(dataDir,'providers'),{recursive:true,mode:0o700});
-  const providers=new ProviderManager({dataDir:join(dataDir,'providers'),credentialStore:createCredentialStore({dataDir,safeStorage})});
+  const helpers=process.env.SEAGULLED_HELPERS_DIR
+    ? resolve(process.env.SEAGULLED_HELPERS_DIR)
+    : app.isPackaged&&process.platform==='win32'&&process.arch==='x64'
+      ? join(process.resourcesPath,'helpers') : null;
+  const providers=new ProviderManager({dataDir:join(dataDir,'providers'),credentialStore:createCredentialStore({dataDir,safeStorage}),...(helpers?{helperRoot:helpers}:{})});
   runtime=createRuntime({dataDir,providers});
   serverHandle=await createServer({runtime});
   ipcMain.handle('seagulled:invoke',invoke);

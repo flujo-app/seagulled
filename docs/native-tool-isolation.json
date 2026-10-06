@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "kind": "offline-native-binary-protocol-probe",
+  "platform": "linux-x64",
+  "cliVersion": "0.153.3",
+  "sdkVersion": "0.153.3",
+  "model": "gpt-6-sol",
+  "pins": {
+    "imageDigest": "sha256:77776e398f5b9c7216a440dc27753eff7a4df2978930eca37eb32b1ce193c129",
+    "cliSha256": "f9d4eab23d0e0726340e084ed22d668885c1dcabeb29ec508b8962e5e29b8dc6",
+    "sdkSha256": "d62ed107033bdba802b283c77d875e4bec3deb2704a910bb7e3f95059473b16f",
+    "catalogSha256": "eb49c7341edd6c628861ac75503c62ae757147a3ebf5294e566cfe57085ffbe7",
+    "fixtureSha256": "8fd8ea60b1b7baa983e05a31b8b836a71e6c3e2b62e7ac12c4a6cf86141d665f"
+  },
+  "isolation": {
+    "externalNetwork": false,
+    "readOnlyContainer": true,
+    "hostMounts": false,
+    "freshHome": true,
+    "accountStateForwarded": false,
+    "user": "65534:65534",
+    "sandboxMode": "read-only",
+    "toolPolicy": {
+      "view_image": false,
+      "experimental_request_user_input": { "enabled": false }
+    }
+  },
+  "inventoryDenial": {
+    "responsesPosts": 2,
+    "advertisedTools": [],
+    "forcedCalls": ["exec_command", "apply_patch", "view_image", "browser_use"],
+    "arguments": "malformed non-executable JSON",
+    "originalCallIdsMatched": true,
+    "exactUnsupportedOutputs": 4,
+    "handlerEffects": "none; lookup rejected missing tools"
+  },
+  "droppedAcknowledgement": {
+    "responsesPosts": 1,
+    "outcome": "SDK error and turn.failed after first socket was destroyed",
+    "secondPostObservedBeforeStreamTermination": false,
+    "generalRetryGuarantee": false
+  },
+  "externalProviderRun": false,
+  "serviceStarted": false,
+  "nativeFleetEligible": false,
+  "limitations": [
+    "Only this pinned Linux image, controlled catalog and configuration were exercised.",
+    "The controlled catalog projects an entry from client 0.160.0; broader model compatibility is unqualified.",
+    "Four missing-tool lookups are not exhaustive tool, filesystem or operating-system isolation proof.",
+    "The drop-ack stream terminated early; no twenty-second absence or universal no-replay claim is made.",
+    "Windows execution, live company transport, fresh-account OAuth and billed spend remain unqualified."
+  ]
+}
