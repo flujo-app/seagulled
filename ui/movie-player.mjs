@@ -10,11 +10,19 @@ function clip(value,label){
     throw new Error(`${label} needs a local video, frame count and frame rate.`);
   return Object.freeze({src:value.src,frames:value.frames,fps:value.fps});
 }
+function backgroundClip(value){
+  if(!value||typeof value!=='object'||Array.isArray(value)||!localClip.test(value.src)||value.src.split('/').includes('..'))
+    throw new Error('Background movie needs a bundled local video.');
+  return Object.freeze({src:value.src});
+}
 
 /** Manifest paths are limited to bundled, local clips. No URL or foreign footage is accepted. */
 export function validateMovieManifest(raw){
   if(!raw||typeof raw!=='object'||Array.isArray(raw)||raw.version!==1||!raw.loops||typeof raw.loops!=='object'||Array.isArray(raw.loops)||!Array.isArray(raw.transitions))
     throw new Error('Movie manifest version 1 is required.');
+  const background=raw.background===undefined?null:backgroundClip(raw.background);
+  if(background&&(Object.keys(raw.loops).length||raw.transitions.length))
+    throw new Error('Continuous background movie cannot include scene clips.');
   const loops={};
   for(const [scene,value] of Object.entries(raw.loops)){
     if(!scenes.has(scene))throw new Error(`Unknown movie scene: ${scene}.`);
@@ -28,7 +36,7 @@ export function validateMovieManifest(raw){
     return Object.freeze({id:value.id,from:value.from,to:value.to,reversible:value.reversible,...clip(value,`Transition ${value.id}`)});
   });
   if(new Set(transitions.map(value=>value.id)).size!==transitions.length)throw new Error('Movie transition IDs must be unique.');
-  return Object.freeze({version:1,loops:Object.freeze(loops),transitions:Object.freeze(transitions)});
+  return Object.freeze({version:1,background,loops:Object.freeze(loops),transitions:Object.freeze(transitions)});
 }
 function name(value){return typeof value==='string'&&/^[a-z][a-z0-9-]{0,63}$/.test(value);}
 
@@ -65,7 +73,7 @@ export class MoviePlayer {
     if(!video||!stage)throw new Error('Movie stage and video are required.');
     this.video=video;this.stage=stage;this.manifestInput=manifest;this.manifestUrl=manifestUrl;this.fetchImpl=fetchImpl;this.onStatus=onStatus;this.onFrame=onFrame;
     this.metadataTimeoutMs=metadataTimeoutMs;this.seekTimeoutMs=seekTimeoutMs;
-    this.manifest=null;this.requestedScene='idle';this.settledScene=null;this.currentTransition=null;this.loadedSrc=null;this.active=null;this.epoch=0;this.destroyed=false;this.lastStatus=null;
+    this.manifest=null;this.requestedScene='idle';this.settledScene=null;this.currentTransition=null;this.loadedSrc=null;this.active=null;this.backgroundReady=null;this.backgroundController=null;this.backgroundErrorHandler=null;this.epoch=0;this.destroyed=false;this.lastStatus=null;
     video.muted=true;video.playsInline=true;video.preload='auto';this.#status('loading');
   }
   #status(value,detail=''){
@@ -80,6 +88,11 @@ export class MoviePlayer {
         if(!response.ok)throw new Error('Movie manifest could not be loaded.');raw=await response.json();}
       this.manifest=validateMovieManifest(raw);
       if(this.destroyed)return false;
+      if(this.manifest.background){
+        this.#status('ready');
+        this.backgroundReady=this.#playBackground(this.manifest.background);
+        return this.backgroundReady;
+      }
       if(!Object.keys(this.manifest.loops).length){this.#status('missing','No approved Todd movie clips are installed.');return false;}
       this.#status('ready');
       return this.setScene(this.requestedScene,{interrupt:true});
@@ -88,6 +101,7 @@ export class MoviePlayer {
   setScene(scene,{interrupt=false}={}){
     if(!scenes.has(scene))throw new Error(`Unknown movie scene: ${scene}.`);
     this.requestedScene=scene;
+    if(this.manifest?.background)return this.backgroundReady||Promise.resolve(false);
     if(this.destroyed||!this.manifest||!Object.keys(this.manifest.loops).length)return Promise.resolve(false);
     if(!interrupt&&this.active?.scene===scene)return this.active.ready;
     const unfinished=this.currentTransition;
@@ -98,8 +112,34 @@ export class MoviePlayer {
     void this.#run(scene,epoch,controller.signal,resolveReady,unfinished);
     return ready;
   }
-  interrupt(){this.#cancelActive();this.epoch++;if(this.manifest&&Object.keys(this.manifest.loops).length)this.#status('interrupted');}
-  destroy(){this.destroyed=true;this.interrupt();this.video.removeAttribute('src');this.video.load();this.video.dataset.ready='false';}
+  interrupt(){if(this.manifest?.background)return;this.#cancelActive();this.epoch++;if(this.manifest&&Object.keys(this.manifest.loops).length)this.#status('interrupted');}
+  destroy(){
+    this.destroyed=true;
+    this.backgroundController?.abort();
+    if(this.backgroundErrorHandler)this.video.removeEventListener('error',this.backgroundErrorHandler);
+    this.interrupt();this.video.pause();this.video.removeAttribute('src');this.video.load();this.video.dataset.ready='false';
+  }
+  async #playBackground(clip){
+    const controller=new AbortController();this.backgroundController=controller;
+    const {signal}=controller;
+    this.video.muted=true;this.video.playsInline=true;this.video.autoplay=true;this.video.loop=true;this.video.preload='auto';
+    this.video.dataset.ready='false';this.video.dataset.clip=clip.src;this.video.dataset.direction='continuous';
+    this.backgroundErrorHandler=()=>{if(!this.destroyed){this.video.dataset.ready='false';this.#status('failed','Approved movie video could not be decoded.');}};
+    this.video.addEventListener('error',this.backgroundErrorHandler);
+    try{
+      this.loadedSrc=clip.src;
+      this.video.src=new URL(clip.src,new URL(this.manifestUrl,location.href)).href;
+      this.video.load();
+      await waitForMedia(this.video,{event:'loadedmetadata',predicate:()=>this.video.readyState>=1&&Number.isFinite(this.video.duration)&&this.video.duration>0,signal,timeoutMs:this.metadataTimeoutMs});
+      await this.video.play();
+      if(signal.aborted)throw aborted();
+      this.video.dataset.ready='true';this.#status('playing');
+      return true;
+    }catch(error){
+      if(error?.name!=='AbortError'&&!this.destroyed){this.video.dataset.ready='false';this.#status('failed',error?.message||'Approved movie playback failed.');}
+      return false;
+    }
+  }
   #cancelActive(){
     const active=this.active;if(!active)return;
     active.controller.abort();active.resolveReady(false);this.video.pause();this.active=null;

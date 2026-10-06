@@ -1,6 +1,6 @@
 {
   "name": "seagulled",
-  "version": "0.1.0-rc.4",
+  "version": "0.1.0",
   "description": "Talk to Todd. He puts a company of agents on your goal, then comes back to judge the work.",
   "type": "module",
   "main": "electron/main.mjs",

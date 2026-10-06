@@ -1,5 +1,9 @@
 # RC acceptance
 
+## Final desktop publication
+
+The selected visual is one approved 12-second forward/reverse movie, used as the endless fullscreen background. Listening, speech, goals and Advanced keep the same movie running. This replaces the earlier separate-scene film requirement; the source and package checks below are historical checkpoints. The current publication adds this loop and its attribution to the existing desktop, with no further feature work.
+
 ## Unreleased avatar and first-install work
 
 The desktop now opens its native window fullscreen; F11 toggles window mode and Ctrl+Q quits (Command+Q on macOS), with shortcuts disclosed in Advanced. The combined suite passes313 offline cases, and both hosted Windows checks at test-only `88ecae8` pass ([push](https://github.com/flujo-app/seagulled/actions/runs/37468373390), [PR](https://github.com/flujo-app/seagulled/actions/runs/37468381345)) after a CRLF fixture correction. Actual source and clean packaged Windows Electron checks pass startup, native F11 in both directions, dialog Escape, renderer isolation and clean shortcut shutdown. Frozen `b73ffcc` packaging matches52 runtime files and1,325 helper hashes with zero private entries; its71-entry CLI runs independently, and the normal portable launcher passes exact archive identity, fresh startup and shutdown. The 262,810,288-byte EXE has SHA256 `0d73565eedb93cf48e3f01ed97cc20411f309bf1a37427b6be3fc11a1944264d`; the 635,451-byte CLI has SHA256 `0c55552e2ffa7aa8d747c4153c984a2fa435c505431dc8a834e85358cd2e6e59`. Published releases remain unchanged; actual macOS behavior, approved movie footage and live company remain unqualified, and the movie manifest stays empty.

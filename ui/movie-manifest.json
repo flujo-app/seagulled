@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "background": {"src": "clips/todd-loop.mp4"},
   "loops": {},
   "transitions": []
 }

@@ -21,7 +21,7 @@ const capture=new VoiceCapture({onLevel:level=>{elements['voice-level'].style.se
 const moviePlayer=new MoviePlayer({video:elements['movie-video'],stage:elements.movie,manifest:movieManifest,onStatus:({status,detail})=>{
   elements['movie-status'].textContent=status==='missing'||status==='missing-scene'||status==='failed'
     ? `${detail||'Approved movie footage is unavailable.'} Narration is separate from the film; lip movement is not synchronized.`
-    : status==='playing'?'Local silent film is playing. Narration is separate; lip movement is not synchronized.':'Checking approved local movie clips.';
+    : status==='playing'?'Local silent film is playing continuously. Narration is separate; lip movement is not synchronized.':'Checking approved local movie.';
 }});
 
 function browserBridge() {

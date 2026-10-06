@@ -107,5 +107,38 @@
     "pullRequest": "https://github.com/flujo-app/iambrokeplshlp/pull/62",
     "scope": "optional client cancellation and deadlines, unknown original submissions, absolute HTTP timeout and installed MCP inventory lookup",
     "merged": false
+  },
+  "avatarLoop": {
+    "path": "ui/clips/todd-loop.mp4",
+    "sha256": "db6e387edc51c82d5e9a462b8ee0963800fc48bbfa6ae7a9fdc8af4a9d556419",
+    "bytes": 1857393,
+    "width": 448,
+    "height": 256,
+    "fps": 8,
+    "frames": 96,
+    "durationSeconds": 12,
+    "playback": "continuous silent background",
+    "frameOrder": "0..48,47..1, then repeat",
+    "sourceAnimationSha256": "893eb7b1597e6a80bb13cc662853e19eed110ca122794ec3a1d8f07c425ec8af",
+    "license": "CC BY-SA 4.0",
+    "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
+    "reference": {
+      "url": "https://commons.wikimedia.org/wiki/File:Todd_Howard,_SXSW_2024_(2).jpg",
+      "photographer": "Vbrunophotog",
+      "cropContributor": "Ggoofy14",
+      "sha256": "c02dae7249cca9006da97d037cbcfb192f9f502ee511a6c6be554aea665fcb37",
+      "license": "CC BY-SA 4.0"
+    },
+    "generation": {
+      "model": "Wan-AI/Wan2.1-VACE-1.3B-diffusers",
+      "revision": "ec4d2cb062b548996b179d493fdd05340de702a1"
+    },
+    "changes": [
+      "AI-generated animation using the licensed reference photograph",
+      "Forward/reverse loop edit with duplicate turnaround frames removed"
+    ],
+    "synthetic": true,
+    "audio": false,
+    "voiceClone": false
   }
 }

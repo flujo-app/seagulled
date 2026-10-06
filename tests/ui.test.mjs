@@ -52,6 +52,13 @@ test('fullscreen stage keeps text in dialogs and sends one bounded goal after ac
     if(route==='/api/swarm/pause'){state.goals[0].status='paused';state.swarm={status:'paused',admissionPaused:true};publish();send(200,state);return;}
     if(route==='/api/swarm/resume'){state.goals[0].status='running';state.swarm={status:'working',admissionPaused:false};publish();send(200,state);return;}
     if(route==='/api/swarm/stop'){state.goals[0].status='stopped';state.swarm={status:'idle',admissionPaused:false};publish();send(200,state);return;}
+    if(route==='/clips/todd-loop.mp4'){
+      const bytes=await readFile(join(ui,'clips','todd-loop.mp4'));
+      const match=/^bytes=(\d+)-(\d*)$/.exec(req.headers.range||'');
+      if(match){const start=Number(match[1]),end=match[2]?Math.min(Number(match[2]),bytes.length-1):bytes.length-1;
+        res.writeHead(206,{'Content-Type':'video/mp4','Accept-Ranges':'bytes','Content-Range':`bytes ${start}-${end}/${bytes.length}`,'Content-Length':end-start+1}).end(bytes.subarray(start,end+1));return;}
+      res.writeHead(200,{'Content-Type':'video/mp4','Content-Length':bytes.length}).end(bytes);return;
+    }
     const file={'/':'index.html','/index.html':'index.html','/app.js':'app.js','/styles.css':'styles.css','/stage.mjs':'stage.mjs','/movie-player.mjs':'movie-player.mjs','/movie-manifest.json':'movie-manifest.json','/goal-input.mjs':'goal-input.mjs','/voice-capture.mjs':'voice-capture.mjs'}[route];
     if(file){const type=file.endsWith('.css')?'text/css':file.endsWith('.html')?'text/html':file.endsWith('.json')?'application/json':'text/javascript';res.writeHead(200,{'Content-Type':type}).end(await readFile(join(ui,file)));return;}
     res.writeHead(404).end();
@@ -64,7 +71,7 @@ test('fullscreen stage keeps text in dialogs and sends one bounded goal after ac
   await page.goto(`http://127.0.0.1:${server.address().port}/#token=${token}`);
   assert.equal(new URL(page.url()).hash,'');
   await page.locator('#movie[data-scene="idle"]').waitFor();
-  await page.locator('#movie[data-movie-status="missing"]').waitFor();
+  await page.locator('#movie[data-movie-status="playing"]').waitFor();
   await page.waitForFunction(()=>document.getElementById('budget-amount').value==='200000');
   assert.equal(await page.locator('#budget-currency').inputValue(),'COP');
   const background=await page.locator('#frame').evaluate(element=>getComputedStyle(element).backgroundImage);
@@ -135,7 +142,7 @@ test('fullscreen stage keeps text in dialogs and sends one bounded goal after ac
   await page.locator('#movie[data-scene="work"]').waitFor();
   assert.deepEqual(goalCall,{text:'Build the game.',budget:{amount:25000,currency:'COP'},maxWorkers:4,conversationsPerWorker:2,privateH100:true,executionMode:'company'});
   await page.getByRole('button',{name:'Open advanced controls'}).click();
-  await page.getByText('No approved Todd movie clips are installed.',{exact:false}).waitFor();
+  await page.getByText('Local silent film is playing continuously.',{exact:false}).waitFor();
   await page.getByText('Narration: Michael (preset) local preset.').waitFor();
   await page.getByText('Provider and spend').click();
   await page.getByText('Codex, OpenAI API, Anthropic API connected locally. Company readiness is checked separately.').waitFor();
