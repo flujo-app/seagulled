@@ -7,7 +7,7 @@ Download the Windows portable app from [Releases](https://github.com/flujo-app/s
 
 New goals request **10 teams × 10 conversations**: ten isolated Workers, each with one lead and nine specialist agents. Todd supervises separately. Advanced controls let you choose smaller teams, edit the goal and allowance, pause or stop.
 
-Each team includes an independent verifier and an adversarial reviewer. The controller caps the Worker tree, allows one original lead run per Worker, and requires the exact completed child conversation records before reporting verified staffing. Todd reviews the resulting evidence. These checks verify execution and staffing; they do not establish that every answer is correct.
+Each team includes an independent verifier and an adversarial reviewer. The controller caps active and lifetime Workers, allows one original lead run per Worker, and requires the exact completed child conversation records before reporting verified staffing. Retiring a Worker cannot create an extra slot. Todd reviews the resulting evidence. These checks verify execution and staffing; they do not establish that every answer is correct.
 
 Connect a supported provider and authorize Worker access to its API key to use cloud inference. Native Codex/Claude connections remain local; they do not establish a remote 100-conversation route. The optional private Qwen/H100 route requires its own readiness checks. Missing source, account or provider readiness keeps the goal waiting. Unknown billing or cleanup holds block additional work; estimates are not billed spend.
 

@@ -819,7 +819,8 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     assertAdmission(signal, fleetDeadlineAt);
     await relay?.start(controller.publicUrl);
     assertAdmission(signal, fleetDeadlineAt);
-    const fleetGoal = controller.registry.createGoal({ id: goal.id, text: goal.text, limits: topology.limits });
+    const fleetGoal = controller.registry.createGoal({ id: goal.id, text: goal.text, limits: topology.limits,
+      ...(goal.workerTopologyVersion === 3 ? { maxTotalWorkers: workerCap } : {}) });
     fleetGoal.teamLimits = teamLimits; controller.registry.save();
     const root = controller.registry.reserve({ goalId: fleetGoal.id, role: 'supervisor', name: 'Todd' }).worker;
     controller.registry.enroll(root.id, { kind: 'external', origin: config.supervisor.origin, workspace: bootWorkspace });

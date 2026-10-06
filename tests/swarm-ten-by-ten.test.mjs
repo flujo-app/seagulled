@@ -49,7 +49,7 @@ test('ten original lead runs are reserved before execution; ninety completed ori
   });
   t.after(async () => { await controller.close(); rmSync(dir, { recursive: true, force: true }); });
   const record = controller.registry.createGoal({ id: 'ten-by-ten', text: 'Offline staffing fixture',
-    limits: fleetTopology(goal, { workerCap: 10, relay: true }).limits });
+    limits: fleetTopology(goal, { workerCap: 10, relay: true }).limits, maxTotalWorkers: 10 });
   record.teamLimits = fleetExecutionLimits({ goal }).teamLimits;
   controller.registry.save();
   const root = controller.registry.reserve({ goalId: record.id, role: 'supervisor', name: 'Todd' }).worker;
@@ -59,7 +59,7 @@ test('ten original lead runs are reserved before execution; ninety completed ori
   assert.equal(new Set(runs.map(run => controller.registry.worker(run.workerId).name)).size, 10);
   assert.ok(runs.every(run => /start_subflow_ tool exactly 9 times/.test(controller.registry.run(run.runId).task)));
   assert.ok(runs.every(run => /ROLE_ID/.test(controller.registry.run(run.runId).task)));
-  assert.throws(() => controller.delegate(root, { name: 'extra', task: 'Overflow' }), /all 10 Workers/);
+  assert.throws(() => controller.delegate(root, { name: 'extra', task: 'Overflow' }), /all 10 lifetime Workers/);
   await Promise.all([...controller.settled.values()]);
   assert.equal(provisioned.length, 10);
   assert.ok(provisioned.every(context => context.teamLimits.concurrency === 9 && context.specialists.id === 'todd_specialists_v1'));
@@ -71,6 +71,12 @@ test('ten original lead runs are reserved before execution; ninety completed ori
   assert.throws(() => verifiedTeamStaffing(entries.slice(0, 9), 10, 9), /incomplete/);
   const duplicate = structuredClone(entries); duplicate[1].children[0].id = duplicate[0].children[0].id;
   assert.throws(() => verifiedTeamStaffing(duplicate, 10, 9), /repeats/);
+  controller.registry.retire(runs[9].workerId);
+  assert.throws(() => controller.delegate(root, { name: 'replacement', task: 'Retired slot' }), /retired slots cannot be replaced/);
+  await controller.close();
+  const restarted = new Controller({ registryPath: path.join(dir, 'registry.json'), operatorToken: 'offline-fixture-operator-token-over-32-characters', publicUrl: 'http://127.0.0.1:1' });
+  try { assert.throws(() => restarted.delegate(restarted.registry.worker(root.id), { name: 'replacement', task: 'After restart' }), /retired slots cannot be replaced/); }
+  finally { await restarted.close(); }
 });
 
 test('failed, running, unknown, missing, extra and repeated child records cannot verify 10x10 staffing', () => {

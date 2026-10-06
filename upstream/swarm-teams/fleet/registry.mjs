@@ -49,17 +49,21 @@ export class Registry {
     renameSync(temporary, this.path);
   }
 
-  createGoal({ id = `g-${randomUUID().slice(0, 8)}`, text, limits = {} }) {
+  createGoal({ id = `g-${randomUUID().slice(0, 8)}`, text, limits = {}, maxTotalWorkers }) {
     if (typeof text !== 'string' || !text.trim()) fail('INVALID', 'A goal needs text.');
     if (typeof id !== 'string' || !/^[\w-]{1,100}$/.test(id)) fail('INVALID', 'Goal id must be a short identifier.');
     if (this.state.goals[id]) fail('CONFLICT', 'Goal id already exists.', 409);
+    if (maxTotalWorkers !== undefined && (!Number.isInteger(maxTotalWorkers) || maxTotalWorkers < 1 || maxTotalWorkers > 1000)) {
+      fail('INVALID', 'Total Worker limit must be an integer from 1 to 1000.');
+    }
     const merged = { ...DEFAULT_LIMITS };
     for (const [key, value] of Object.entries(limits)) {
       if (!(key in DEFAULT_LIMITS)) fail('INVALID', `Unknown limit ${key}.`);
       if (!Number.isInteger(value) || value < 1 || value > 1000) fail('INVALID', `Limit ${key} must be an integer from 1 to 1000.`);
       merged[key] = value;
     }
-    this.state.goals[id] = { id, text: text.trim(), limits: merged, state: 'active', createdAt: this.clock(), result: null };
+    this.state.goals[id] = { id, text: text.trim(), limits: merged,
+      ...(maxTotalWorkers !== undefined ? { maxTotalWorkers } : {}), state: 'active', createdAt: this.clock(), result: null };
     this.save();
     return this.state.goals[id];
   }
@@ -95,6 +99,10 @@ export class Registry {
     const workers = Object.values(this.state.workers).filter((worker) => worker.goalId === goalId && ACTIVE.includes(worker.state));
     let depth = 0;
     if (parentId) {
+      if (goal.maxTotalWorkers !== undefined && Object.values(this.state.workers)
+        .filter(worker => worker.goalId === goalId && worker.depth > 0).length >= goal.maxTotalWorkers) {
+        fail('CAPACITY', `The goal has admitted all ${goal.maxTotalWorkers} lifetime Workers; retired slots cannot be replaced.`, 409);
+      }
       const parent = this.worker(parentId);
       if (parent.goalId !== goalId || !ACTIVE.includes(parent.state)) fail('PARENT', 'Parent is not an active node of this goal.', 409);
       depth = parent.depth + 1;
