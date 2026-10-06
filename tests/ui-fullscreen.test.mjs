@@ -4,7 +4,7 @@ import {readFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {runInNewContext} from 'node:vm';
 
-const source=readFileSync(new URL('../electron/main.mjs',import.meta.url),'utf8');
+const source=readFileSync(new URL('../electron/main.mjs',import.meta.url),'utf8').replaceAll('\r\n','\n');
 const html=readFileSync(new URL('../ui/index.html',import.meta.url),'utf8');
 const match=source.match(/function createWindow\(\) \{[\s\S]*?\n\}\nasync function start\(\)/);
 assert.ok(match,'Electron createWindow source remains available for isolated behavior test');
