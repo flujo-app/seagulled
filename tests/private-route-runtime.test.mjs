@@ -17,9 +17,9 @@ test('large requested topology persists and H100 is never selected without its e
   t.after(async () => { await runtime.close(); rmSync(dataDir, { recursive: true, force: true }); });
   await runtime.connect({ id: 'private-h100' });
   const ordinary = await runtime.chat('Build an ordinary project.');
-  assert.equal(ordinary.budgetUsd, 50); assert.equal(ordinary.maxWorkers, 5);
-  assert.equal(ordinary.conversationsPerWorker, 5); assert.equal(ordinary.agentsPerWorker, 4);
-  assert.equal(ordinary.workerTopologyVersion, 2);
+  assert.equal(ordinary.budgetUsd, 50); assert.equal(ordinary.maxWorkers, 10);
+  assert.equal(ordinary.conversationsPerWorker, 10); assert.equal(ordinary.agentsPerWorker, 9);
+  assert.equal(ordinary.workerTopologyVersion, 3);
   assert.equal(ordinary.privateH100, false); assert.equal(ordinary.providerId, null); assert.equal(executions, 0);
   assert.equal(runtime.snapshot().goals[0].status, 'queued');
   await assert.rejects(runtime.chat('Bypass the switch.', { providerId: 'private-h100' }), /Enable private/);
@@ -29,6 +29,6 @@ test('large requested topology persists and H100 is never selected without its e
   assert.equal(finished.providerId, 'private-h100'); assert.equal(finished.privateH100, true); assert.equal(executions, 1);
   await runtime.close();
   const reopened = createRuntime({ executionMode: 'local', dataDir, providers, swarm });
-  try { assert.equal(reopened.snapshot().goals[1].privateH100, true); assert.equal(reopened.snapshot().goals[1].conversationsPerWorker, 5); }
+  try { assert.equal(reopened.snapshot().goals[1].privateH100, true); assert.equal(reopened.snapshot().goals[1].conversationsPerWorker, 10); }
   finally { await reopened.close(); }
 });

@@ -165,7 +165,7 @@ test('goal capacity maps selected worker and agent counts to bounded Fly executi
   assert.deepEqual(fleetTopology({}, { workerCap: 5, relay: true }), {
     initialWorkers: 1, limits: { maxWorkers: 5, maxDepth: 2, maxChildren: 4, maxActiveRuns: 2 },
   }, 'already admitted goals retain the original one-starter, five-cap topology');
-  assert.throws(() => goalCapacity({ workerTopologyVersion: 3 }), /must be 1 or 2/);
+  assert.throws(() => goalCapacity({ workerTopologyVersion: 4 }), /must be 1, 2 or 3/);
 });
 
 test('Fly account lease selects one verified personal config and drops inherited service credentials', async () => {

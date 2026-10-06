@@ -24,9 +24,9 @@ function mode(value) {
 }
 function conversations(options, previous) {
   if (options.conversationsPerWorker !== undefined && options.agentsPerWorker !== undefined) throw new Error('Choose one conversation limit.');
-  if (options.conversationsPerWorker !== undefined) return capacity(options.conversationsPerWorker, 5, 10);
-  if (options.agentsPerWorker !== undefined) return capacity(options.agentsPerWorker, 4, 10) + 1;
-  return previous?.conversationsPerWorker ?? (previous?.agentsPerWorker === undefined ? 5 : previous.agentsPerWorker + 1);
+  if (options.conversationsPerWorker !== undefined) return capacity(options.conversationsPerWorker, 10, 10);
+  if (options.agentsPerWorker !== undefined) return capacity(options.agentsPerWorker, 9, !previous || previous.workerTopologyVersion === 3 ? 9 : 10) + 1;
+  return previous?.conversationsPerWorker ?? (previous?.agentsPerWorker === undefined ? previous ? 5 : 10 : previous.agentsPerWorker + 1);
 }
 export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, voice, budgets, fleetSource, sourceProvider, executionMode = 'company' } = {}) {
   mode(executionMode);
@@ -56,7 +56,7 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
   for (const goal of state.goals) {
     // Unfinished topology-v2 goals from earlier builds must pass company
     // admission; terminal historical results retain their original provenance.
-    if (goal.executionMode === undefined && goal.workerTopologyVersion === 2
+    if (goal.executionMode === undefined && [2, 3].includes(goal.workerTopologyVersion)
       && ['queued', 'paused', 'running', 'pausing', 'stopping', 'interrupted'].includes(goal.status)) {
       goal.executionMode = 'company';
     }
@@ -163,7 +163,9 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
     if (goal) {
       if (event.type === 'company' && company(goal)) {
         for (const key of ['verifiedWorkers', 'verifiedChildConversations']) {
-          const limit = key === 'verifiedWorkers' ? 12 : 120;
+          const limit = goal.workerTopologyVersion === 3
+            ? key === 'verifiedWorkers' ? goal.maxWorkers : goal.maxWorkers * (goal.conversationsPerWorker - 1)
+            : key === 'verifiedWorkers' ? 12 : 120;
           if (Number.isInteger(event[key]) && event[key] >= 0 && event[key] <= limit) goal.execution[key] = event[key];
         }
         publicEvent = { type: 'company', goalId: goal.id,
@@ -417,7 +419,7 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
       if (options.privateH100 !== undefined && typeof options.privateH100 !== 'boolean') throw new Error('Private inference must be on or off.');
       if (options.providerId === 'private-h100' && options.privateH100 !== true) throw new Error('Enable private inference to use H100.');
       const requestedMode = mode(options.executionMode ?? executionMode);
-      const maxWorkers = capacity(options.maxWorkers, 5, 6), conversationsPerWorker = conversations(options);
+      const maxWorkers = capacity(options.maxWorkers, 10, 10), conversationsPerWorker = conversations(options);
       const budget = await allowances.resolve(options.budget, options.budgetUsd ?? DEFAULT_BUDGET_USD);
       if (!state.providers.length) await this.discover();
       if (closed) throw new Error('This session has closed.');
@@ -425,7 +427,7 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
         providerId: options.privateH100 === true ? 'private-h100' : options.providerId || (state.preferredProviderId !== 'private-h100' ? state.preferredProviderId : null) || null,
         privateH100: options.privateH100 === true, executionMode: requestedMode,
         execution: { requested: requestedMode, readiness: 'blocked', verifiedWorkers: 0, verifiedChildConversations: 0 },
-        workerTopologyVersion: 2, maxWorkers, conversationsPerWorker, agentsPerWorker: conversationsPerWorker - 1, tasks: [], createdAt: now(), updatedAt: now(),
+        workerTopologyVersion: 3, maxWorkers, conversationsPerWorker, agentsPerWorker: conversationsPerWorker - 1, tasks: [], createdAt: now(), updatedAt: now(),
         context: state.conversation.slice(-12).map(m => ({ role: m.role, text: m.text })) };
       state.goals.push(goal); message('user', goal.text, goal.id);
       message('todd', requestedMode === 'company' ? 'Your goal is saved; I’m checking whether the crew is ready.' : 'Your local diagnostic goal is saved.', goal.id);
@@ -441,7 +443,7 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
       if (patch.privateH100 !== undefined && typeof patch.privateH100 !== 'boolean') throw new Error('Private inference must be on or off.');
       if (patch.privateH100 !== undefined && patch.providerId !== undefined) throw new Error('Choose one inference route.');
       if (patch.providerId === 'private-h100') throw new Error('Use the private inference switch to select H100.');
-      const nextWorkers = capacity(patch.maxWorkers, goal.maxWorkers ?? 5, 6), nextConversations = conversations(patch, goal);
+      const nextWorkers = capacity(patch.maxWorkers, goal.maxWorkers ?? (goal.workerTopologyVersion === 3 ? 10 : 5), goal.workerTopologyVersion === 3 ? 10 : 6), nextConversations = conversations(patch, goal);
       if (patch.budgetUsd !== undefined) usdAmount(patch.budgetUsd);
       if (patch.budget !== undefined && (!patch.budget || typeof patch.budget !== 'object' || Array.isArray(patch.budget) ||
           Object.keys(patch.budget).some(k => !['amount', 'currency'].includes(k)) || typeof patch.budget.amount !== 'number' ||

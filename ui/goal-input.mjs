@@ -10,7 +10,7 @@ export function oneSentence(text) {
 
 export function budgetOptions({amount,currency,workers,conversations,privateH100=false}) {
   const maxWorkers=Number(workers),conversationsPerWorker=Number(conversations);
-  if(!Number.isInteger(maxWorkers)||maxWorkers<1||maxWorkers>6)throw new Error('Workers must be between 1 and 6.');
+  if(!Number.isInteger(maxWorkers)||maxWorkers<1||maxWorkers>10)throw new Error('Workers must be between 1 and 10.');
   if(!Number.isInteger(conversationsPerWorker)||conversationsPerWorker<1||conversationsPerWorker>10)throw new Error('Conversations per worker must be between 1 and 10.');
   if(typeof privateH100!=='boolean')throw new Error('Private H100 choice is invalid.');
   const options={maxWorkers,conversationsPerWorker,privateH100};

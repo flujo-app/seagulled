@@ -35,7 +35,7 @@ test('goal budgets and capacity persist, and invalid limits are rejected before 
   const budgets = createBudgets({ dataDir, clock, fetchImpl: async () => new Response(JSON.stringify(quote())) });
   const runtime = createRuntime({ executionMode: 'local', dataDir, providers, budgets, swarm: {} });
   t.after(() => runtime.close());
-  for (const options of [{ maxWorkers: 7 }, { agentsPerWorker: 11 }, { maxWorkers: '3' }, { agentsPerWorker: 0 }]) await assert.rejects(runtime.chat('Build a planner.', options));
+  for (const options of [{ maxWorkers: 11 }, { agentsPerWorker: 11 }, { maxWorkers: '3' }, { agentsPerWorker: 0 }]) await assert.rejects(runtime.chat('Build a planner.', options));
   assert.equal(discoveries, 0); assert.equal(runtime.snapshot().goals.length, 0);
   const goal = await runtime.chat('Build a planner.', { budget: { amount: 20000, currency: 'COP' }, maxWorkers: 2, agentsPerWorker: 4 });
   assert.equal(goal.budgetUsd, 5); assert.equal(goal.maxWorkers, 2); assert.equal(goal.agentsPerWorker, 4);

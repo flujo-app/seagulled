@@ -21,8 +21,8 @@ export function validateConnectPayload(value) {
 export function validateGoalOptions(value={}) {
   if(!value||typeof value!=='object'||Array.isArray(value))throw new Error('Goal settings are invalid.');
   if(value.privateH100!==undefined&&typeof value.privateH100!=='boolean')throw new Error('Private H100 choice is invalid.');
-  const maxWorkers=Number(value.maxWorkers??5),conversationsPerWorker=Number(value.conversationsPerWorker??5);
-  if(!Number.isInteger(maxWorkers)||maxWorkers<1||maxWorkers>6)throw new Error('Workers must be between 1 and 6.');
+  const maxWorkers=Number(value.maxWorkers??10),conversationsPerWorker=Number(value.conversationsPerWorker??10);
+  if(!Number.isInteger(maxWorkers)||maxWorkers<1||maxWorkers>10)throw new Error('Workers must be between 1 and 10.');
   if(!Number.isInteger(conversationsPerWorker)||conversationsPerWorker<1||conversationsPerWorker>10)throw new Error('Conversations per worker must be between 1 and 10.');
   const options={maxWorkers,conversationsPerWorker};
   if(value.executionMode!==undefined) {

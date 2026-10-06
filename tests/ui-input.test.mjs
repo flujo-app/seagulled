@@ -12,8 +12,8 @@ test('native bridge preserves explicit worker permission and rejects ambiguous v
 test('native bridge preserves bounded team and currency settings',()=>{
   assert.deepEqual(validateGoalOptions({budget:{amount:25000,currency:'COP'},maxWorkers:4,conversationsPerWorker:2,privateH100:true}),{budget:{amount:25000,currency:'COP'},maxWorkers:4,conversationsPerWorker:2,privateH100:true});
   assert.deepEqual(validateGoalOptions({maxWorkers:2,conversationsPerWorker:3}),{maxWorkers:2,conversationsPerWorker:3});
-  assert.deepEqual(validateGoalOptions(),{maxWorkers:5,conversationsPerWorker:5});
-  assert.deepEqual(validateGoalOptions({executionMode:'company',providerId:'codex'}),{maxWorkers:5,conversationsPerWorker:5,executionMode:'company',providerId:'codex'});
+  assert.deepEqual(validateGoalOptions(),{maxWorkers:10,conversationsPerWorker:10});
+  assert.deepEqual(validateGoalOptions({executionMode:'company',providerId:'codex'}),{maxWorkers:10,conversationsPerWorker:10,executionMode:'company',providerId:'codex'});
   assert.throws(()=>validateGoalOptions({maxWorkers:100}),/Workers/);
   assert.throws(()=>validateGoalOptions({budget:{amount:1,currency:'US$'}}),/Budget/);
   assert.throws(()=>validateGoalOptions({privateH100:'true'}),/Private H100/);

@@ -8,6 +8,8 @@ import { startRelayAgent } from '../../upstream/swarm-teams/fleet/relay.mjs';
 import { assertAppNetwork, assertFreshAppName, assertProductNetwork, readFlyOrgApps } from './fly-network.mjs';
 
 const RELAY_SOURCE = fileURLToPath(new URL('../../upstream/swarm-teams/fleet/relay.mjs', import.meta.url));
+// Ten waiting team leads must leave room for all ninety child conversations.
+export const PRODUCT_RELAY_LIMITS = Object.freeze({ maxConcurrentServes: 128 });
 const API = 'https://api.machines.dev/v1';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const ownerMarker = (owner) => `SEAGULLED_RELAY_OWNER_${owner.toUpperCase()}`;
@@ -194,7 +196,7 @@ export async function createOwnedRelay({ journalPath, flujoCloudPath, org, netwo
           const healthy = await fetchImpl(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1000) })
             .then((res) => res.status === 200, () => false);
           if (healthy) {
-            agent = agentFactory({ relayOrigin: `http://127.0.0.1:${port}`, secret, controllerOrigin, lanes: 2 });
+            agent = agentFactory({ relayOrigin: `http://127.0.0.1:${port}`, secret, controllerOrigin, lanes: 2, limits: PRODUCT_RELAY_LIMITS });
             return;
           }
           await sleep(250);

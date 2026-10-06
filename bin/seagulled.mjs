@@ -24,7 +24,8 @@ Options: --budget AMOUNT [--currency ISO_CODE], --workers COUNT,
          --conversations COUNT, --private-h100 | --no-private-h100,
          --provider ID, --home DIRECTORY, --json, --no-open
          --execution-mode company|local (local is a bounded diagnostic)
-Defaults: 50 USD, five workers, five total conversations per worker.
+Defaults: 50 USD, ten workers, ten total conversations per worker (one lead + nine agents).
+Todd supervises separately. Smaller teams: --workers 1..10 --conversations 1..10.
 Saved state lives in your private Seagulled folder. Keys stay out of arguments.
 `;
 const { positionals, values } = parseArgs({ allowPositionals: true, options: {
