@@ -28,6 +28,9 @@
     "package": "electron-builder --dir",
     "dist": "electron-builder --win portable --publish never",
     "check": "node scripts/check-release.mjs",
+    "prepare:media": "node scripts/prepare-journey-media.mjs",
+    "prepare:helpers": "node scripts/prepare-helpers.mjs",
+    "package:source": "node scripts/package-source.mjs",
     "prepackage": "node scripts/prepare-helpers.mjs && node scripts/prepare-journey-media.mjs",
     "predist": "node scripts/prepare-helpers.mjs && node scripts/prepare-journey-media.mjs"
   },

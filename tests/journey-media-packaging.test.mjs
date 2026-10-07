@@ -64,3 +64,14 @@ test('unexpected private destination state blocks packaging without overwriting 
   assert.equal(readFileSync(privatePath, 'utf8'), 'preserved fixture');
   assert.deepEqual(readdirSync(f.destination), ['credentials.json']);
 });
+
+test('a fresh source checkout stages its committed media without private inputs', t => {
+  const f = fixture(t);
+  const bundled = path.join(f.root, 'assets', 'journey');
+  mkdirSync(bundled, { recursive: true });
+  for (const asset of f.assets) copyFileSync(path.join(f.root, 'input', asset.file), path.join(bundled, asset.file));
+  const env = { ...process.env }; delete env.SEAGULLED_MEDIA_DIR;
+  const result = spawnSync(process.execPath, [path.join(f.root, 'scripts', 'prepare-journey-media.mjs')], { encoding: 'utf8', env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(readdirSync(f.destination).sort(), [...f.assets.map(a => a.file), 'manifest.json'].sort());
+});

@@ -4,6 +4,8 @@
 Talk to Todd. He delegates your goal to a team, checks what they bring back, and occasionally comes in and shits on everything.
 Download the Windows portable app from [Releases](https://github.com/flujo-app/seagulled/releases). Open it and tell Todd what you want done. 
 
+To rebuild the stable app, use the [`v0.1.1-source.1` source tag](https://github.com/flujo-app/seagulled/tree/v0.1.1-source.1) or the complete source ZIP in the 0.1.1 release. [BUILD.md](BUILD.md) covers dependencies, tests, Windows/CLI packaging, upstream code and source verification.
+
 
 # How it works:
 - You tell Todd Howard to make something happen. 

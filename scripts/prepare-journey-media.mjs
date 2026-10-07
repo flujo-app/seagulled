@@ -6,7 +6,9 @@ import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const lock = JSON.parse(readFileSync(path.join(root, 'docs', 'journey-media-lock.json'), 'utf8'));
 const destinations = [path.join(root, '.private', 'journey-media'), path.join(root, 'ui', 'journey-media')];
-const source = process.argv[2] || process.env.SEAGULLED_MEDIA_DIR || destinations[0];
+const bundledSource = path.join(root, 'assets', 'journey');
+const source = process.argv[2] || process.env.SEAGULLED_MEDIA_DIR
+  || (existsSync(bundledSource) ? bundledSource : destinations[0]);
 if (!path.isAbsolute(source)) throw new Error('The media source must be an absolute directory.');
 if (lock.version !== 1 || !Array.isArray(lock.assets) || lock.assets.length !== 7) throw new Error('Invalid journey media lock.');
 const digest = data => createHash('sha256').update(data).digest('hex');

@@ -1,5 +1,7 @@
 # Source and dependency notices
 
+The seven setup/loading video excerpts in `assets/journey` are the media shipped with 0.1.1. Original video links, timings and exact hashes are in `docs/journey-media-lock.json`; the loading excerpt is silent. These third-party audiovisual excerpts retain their original rights, separate from the application source's MIT license. The source bundle includes only final excerpts, not full downloads or downloader/account metadata.
+
 Seagulled is an independent, unofficial parody interface. Todd Howard's name is used as a fictional conversational persona; this project is not affiliated with him, Bethesda, Microsoft, Anthropic, OpenAI, Google, or Modal.
 
 The bundled `ui/clips/todd-loop.mp4` is an AI-generated, silent animation made with Wan2.1-VACE-1.3B using [this reference photograph](https://commons.wikimedia.org/wiki/File:Todd_Howard,_SXSW_2024_(2).jpg) by Vbrunophotog, cropped by Ggoofy14. The photograph is licensed under [Creative Commons Attribution-ShareAlike 4.0 International](https://creativecommons.org/licenses/by-sa/4.0/). The animation and its forward/reverse loop edit are changes to that reference; this bundled video is distributed under the same CC BY-SA 4.0 license, separately from the application's MIT-licensed source. It is synthetic footage, with no original or cloned Todd Howard voice. The selected 49-frame animation is followed by frames 47 through 1 in reverse, forming a 96-frame, 12-second loop at 8 fps. Asset hashes and provenance are recorded in `docs/provenance.json`.
