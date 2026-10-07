@@ -1,8 +1,8 @@
 {
   "schema": 1,
-  "kind": "unreleased-offline-journey-candidate",
+  "kind": "prepublication-patch-release-validation",
   "checkedAt": "2026-10-07",
-  "source": "Pre-patch-version candidate; runtime changes passed 345 offline tests and native/portable validation. Patch package verification follows separately.",
+  "source": "Stable v0.1.0 maintenance line; runtime source commit 13553c1c58c0a4d11708a9a30ac5ee9e58e27899. Release checkout and build inputs match after Windows newline normalization.",
   "tests": {
     "passed": 345,
     "failed": 0,
@@ -16,7 +16,7 @@
     "helperFiles": 1325,
     "helperMismatches": 0,
     "mediaAssets": 7,
-    "asarSha256": "3b1cdda2a0b1df112be42860a28a683f595729249c4451376dc35893b61c6c79",
+    "asarSha256": "32e856c5082a48d5baf567c6d280c898e29ad8857ccadb0f2ed5e292d8b0dd18",
     "runtimeFiles": 56
   },
   "native": {
@@ -47,10 +47,10 @@
     "entries": 79,
     "standaloneStatus": true,
     "noHostProviderClis": true,
-    "sha256": "fdf321c89c4ae24a1edd9d329d355b1974cccb8d23a8720559c5011e17566c7e"
+    "sha256": "afbb4a08e4b9fedf3ef2b79151613cfbf083ea672188085d4921129c5e9e621c"
   },
   "windows": {
-    "sha256": "6e526d02535068114a7ca8d234381f77652b7820ae3035385a1d1c27a838c4e6"
+    "sha256": "ff33279316bca6fdbb2fd5b02eb3281e0db0a9619821fd0b13785f5c3cba4e5a"
   },
   "qualification": {
     "actualFreshBrowserLogin": false,
@@ -92,5 +92,15 @@
     "nativeTransitionsVerified": true,
     "portableTransitionsVerified": true
   },
-  "candidateVersion": "0.1.0"
+  "candidateVersion": "0.1.1",
+  "release": {
+    "version": "0.1.1",
+    "tag": "v0.1.1",
+    "runtimeCommit": "13553c1c58c0a4d11708a9a30ac5ee9e58e27899",
+    "hostedTestsPassed": 345,
+    "hostedChecks": "https://github.com/flujo-app/seagulled/actions/runs/37665943719",
+    "sourceInputFiles": 118,
+    "windowsNewlineNormalizations": 8,
+    "publicationRequested": true
+  }
 }

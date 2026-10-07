@@ -1,5 +1,7 @@
 # Startup to deployed swarm acceptance
 
+Patch version 0.1.1 is cut from the stable v0.1.0 line on codex/release-0.1.1. GitHub Windows checks pass all 345 tests for runtime commit 13553c1; rebuilt 0.1.1 Electron, normal portable and standalone CLI checks pass. The two download hashes are recorded in journey-acceptance.json and the release checksum asset. The separate 0.2.0 release-candidate dependency migration remains on main.
+
 The current journey is implemented and has offline and packaged desktop evidence. A saved goal waiting on deployment readiness is not a deployed swarm. Account sign-in, subscription use, billed spend and live capacity require their own evidence.
 
 | Requirement | Current evidence | Remaining acceptance |
@@ -19,7 +21,7 @@ The current journey is implemented and has offline and packaged desktop evidence
 | Up to three large cards | Paginate by three; worker hierarchy and dispatch activity come from actual controller transitions; private fields/stale events are rejected; retirement and restart clear active animation | Live cloud observatory acceptance; in-flight dispatch is not proof of model execution or child-conversation activity |
 | Pause/delete/settings | Cancellation/control tests pass; actual packaged edit/delete preserve tombstones; deletion awaits execution and cleanup holds | Live cloud pause/retirement proof |
 | Codex/Claude subscriptions | Read-only checks recognize existing ChatGPT Codex and Claude.ai CLI sessions; local native calls strip inherited API/cloud credentials | Remote subscription routes disabled; no token transfer/refresh/concurrency qualification |
-| Electron/CLI candidates | Unreleased Windows app and standalone CLI built; payload audit checks source, seven video assets, 1,325 helper hashes and absence of private state | Normal portable launcher passes exact archive identity, first launch, save/pause/resume/edit/delete and clean shutdown; public release outstanding |
+| Electron/CLI candidates | Windows patch app and standalone CLI built; payload audit checks source, seven video assets, 1,325 helper hashes and absence of private state | Normal portable launcher passes exact archive identity, first launch, save/pause/resume/edit/delete and clean shutdown; publication tracked by the v0.1.1 GitHub release |
 
 On 2026-10-07 the isolated dependency-complete checkout passed all 345 tests with auth-first activation controls, worker observation fencing/hierarchy rendering, sliders and waiting-goal pause controls. All 14 focused UI/media checks pass, including seven setup checks and three loading checks. The rebuilt normal portable launcher also passes exact payload identity and the loading transitions. Candidate hashes and sanitized results are in [journey-acceptance.json](journey-acceptance.json). Root checkout incomplete dependencies do not qualify a full-suite pass.
 
