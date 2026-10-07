@@ -8,4 +8,5 @@ release/
 .seagulled/
 *.local.json
 .private/
+ui/journey-media/
 coverage/

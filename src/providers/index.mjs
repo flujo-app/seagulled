@@ -125,8 +125,17 @@ export class ProviderManager {
     renameSync(temp, path);
   }
 
-  async #probe(command, args, timeoutMs = 4000) {
-    try { return await this.commandRunner(command, args, { timeoutMs, maxBytes: 8_000, env: this.env }); }
+  #nativeEnv() {
+    const env = { ...this.env };
+    for (const key of Object.keys(env)) {
+      if ((/KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL|AUTH/i.test(key) && key !== 'CODEX_HOME')
+        || /^(?:ANTHROPIC_|OPENAI_|AWS_|GOOGLE_|CLAUDE_CODE_USE_|CODEX_(?:PERMISSION_PROFILE|TASK_WORKSPACE_VERIFYING_IDENTITY|THREAD_ID|SESSION_ID|CI|INTERNAL_ORIGINATOR_OVERRIDE))/i.test(key)) delete env[key];
+    }
+    return env;
+  }
+
+  async #probe(command, args, timeoutMs = 4000, env = this.env) {
+    try { return await this.commandRunner(command, args, { timeoutMs, maxBytes: 8_000, env }); }
     catch { return null; }
   }
 
@@ -410,14 +419,19 @@ export class ProviderManager {
   async discover() {
     const [codex, codexAuth, claude, claudeAuth, antigravity] = await Promise.all([
       this.#probe(this.commands.codex, ['--version']),
-      this.#probe(this.commands.codex, ['login', 'status']),
+      this.#probe(this.commands.codex, ['login', 'status'], 4000, this.#nativeEnv()),
       this.#probe(this.commands.claude, ['--version']),
-      this.#probe(this.commands.claude, ['auth', 'status']),
+      this.#probe(this.commands.claude, ['auth', 'status'], 4000, this.#nativeEnv()),
       this.#probe(this.commands.antigravity, ['--version']),
     ]);
-    this.detected.set('codex', { installed: codex?.code === 0, loggedIn: codexAuth?.code === 0 });
+    const codexSubscription = codexAuth?.code === 0 && /Logged in using ChatGPT/i.test(`${codexAuth.stdout ?? ''}\n${codexAuth.stderr ?? ''}`);
+    this.detected.set('codex', { installed: codex?.code === 0, loggedIn: codexSubscription,
+      otherAuth: codexAuth?.code === 0 && !codexSubscription });
     const auth = json(claudeAuth?.stdout);
-    this.detected.set('claude', { installed: claude?.code === 0, loggedIn: claudeAuth?.code === 0 && auth?.loggedIn === true, blocked: this.detected.get('claude')?.blocked ?? false });
+    const claudeSubscription = claudeAuth?.code === 0 && auth?.loggedIn === true && auth.authMethod === 'claude.ai';
+    this.detected.set('claude', { installed: claude?.code === 0, loggedIn: claudeSubscription,
+      otherAuth: claudeAuth?.code === 0 && auth?.loggedIn === true && !claudeSubscription,
+      blocked: this.detected.get('claude')?.blocked ?? false });
     this.detected.set('antigravity', { installed: antigravity?.code === 0, loggedIn: false });
     for (const id of ['codex', 'claude']) {
       if (this.detected.get(id)?.loggedIn && !this.detected.get(id)?.blocked && !this.explicitlyDisconnected.has(id) && !this.connected.has(id)) {
@@ -459,7 +473,7 @@ export class ProviderManager {
       const keyAvailable = id === 'openai' ? Boolean(this.env.OPENAI_API_KEY) : id === 'anthropic' ? Boolean(this.env.ANTHROPIC_API_KEY) : id === 'modal' ? Boolean(this.env.MODAL_PROXY_TOKEN) : false;
       let detail;
       if (id === 'antigravity') detail = detected?.installed ? 'CLI found; unattended execution is unsupported.' : 'CLI not found; unattended execution is unsupported.';
-      else if (id === 'codex' || id === 'claude') detail = detected?.blocked ? 'Native sign-in exists, but subscription execution was denied. Use an API key or update native access.' : detected?.loggedIn ? 'Native sign-in found; execution is verified on first run. Subscription usage is separate from API billing.' : detected?.installed ? 'Sign in through the native app or CLI first.' : 'CLI not installed.';
+      else if (id === 'codex' || id === 'claude') detail = detected?.blocked ? 'Native sign-in exists, but subscription execution was denied. Use an API key or update native access.' : detected?.loggedIn ? 'Native subscription sign-in found; execution is verified on first run. Subscription usage is separate from API billing.' : detected?.otherAuth ? 'Native login exists, but subscription authentication is not verified. Connect the subscription account.' : detected?.installed ? 'Sign in through the native app or CLI first.' : 'CLI not installed.';
       else if (apiBlocked) detail = apiBlocked;
       else if (id === 'modal') detail = 'Requires a Modal inference Proxy Token and an available endpoint model. Modal account tokens are not inference tokens.';
       else detail = 'Requires an API key; API billing is separate from CLI subscriptions.';
@@ -488,7 +502,8 @@ export class ProviderManager {
     };
   }
 
-  async connect({ id, method, key, model, fleetAllowed = false } = {}) {
+  async connect({ id, method, key, model, fleetAllowed = false, signal } = {}) {
+    if (signal?.aborted) throw cancelled('not_applied');
     if (!Object.hasOwn(NAMES, id)) throw new Error('Unknown provider.');
     if (id === 'private-h100') throw new Error('Use the private H100 switch and its bounded account flow.');
     if (method === 'oauth' || method === 'login') throw new Error('Use the provider’s native sign-in. This app does not handle OAuth tokens.');
@@ -501,10 +516,12 @@ export class ProviderManager {
       if (!this.detected.get(id)?.installed) throw new Error(`${NAMES[id]} CLI is not installed.`);
       if (!this.detected.get(id)?.loggedIn) {
         const args = id === 'codex' ? ['login'] : ['auth', 'login', '--claudeai'];
-        const login = await this.#probe(this.commands[id], args, 90_000);
+        const login = await this.commandRunner(this.commands[id], args, { signal, timeoutMs: 300_000,
+          maxBytes: 64_000, env: this.#nativeEnv(), killTree: true });
         await this.discover();
         if (login?.code !== 0 || !this.detected.get(id)?.loggedIn) throw new Error(`${NAMES[id]} sign-in was not completed. Try Connect again after finishing the provider browser sign-in.`);
       }
+      if (signal?.aborted) throw cancelled('not_applied');
       this.explicitlyDisconnected.delete(id);
       this.connected.set(id, { method, model });
       this.saved[id] = { method, model }; this.#save();
@@ -582,7 +599,7 @@ export class ProviderManager {
         if (ownedWorkspace) args.push('-C', cwd);
         if (connection.model) args.push('--model', connection.model);
         args.push('-');
-        const env = { ...this.env };
+        const env = this.#nativeEnv();
         for (const key of Object.keys(env)) {
           if (/KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL|AUTH/i.test(key) && key !== 'CODEX_HOME') delete env[key];
           if (/^CODEX_(?:PERMISSION_PROFILE|TASK_WORKSPACE_VERIFYING_IDENTITY|THREAD_ID|SESSION_ID|CI|INTERNAL_ORIGINATOR_OVERRIDE)$/i.test(key)) delete env[key];
@@ -607,7 +624,7 @@ export class ProviderManager {
       if (Number.isFinite(maxUsd)) args.push('--max-budget-usd', String(Math.min(maxUsd, 100)));
       if (connection.model) args.push('--model', connection.model);
       const result = await this.commandRunner(this.commands.claude, args, { cwd, input: prompt, signal,
-        timeoutMs: 120_000, maxBytes: 256_000, env: this.env, killTree: true });
+        timeoutMs: 120_000, maxBytes: 256_000, env: this.#nativeEnv(), killTree: true });
       const body = json(result.stdout);
       if (result.code !== 0 || body?.is_error) {
         if (/disabled.*subscription access|subscription access.*disabled/i.test(String(body?.result ?? ''))) this.detected.set('claude', { ...this.detected.get('claude'), blocked: true });

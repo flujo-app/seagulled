@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "cueTimingReview": "pending-playback",
+  "assets": [
+    {
+      "id": "intro",
+      "file": "intro.mp4",
+      "source": "https://www.youtube.com/watch?v=UjTv8ivh7mY",
+      "startSeconds": 0,
+      "durationSeconds": 4,
+      "sha256": "5b80ea85b7f8da6ab2d5e12e1f47364ab797946c5fb6af301ce2da8744d7e2fe"
+    },
+    {
+      "id": "selected",
+      "file": "selected.mp4",
+      "source": "https://www.youtube.com/watch?v=UjTv8ivh7mY",
+      "startSeconds": 4,
+      "durationSeconds": 4,
+      "sha256": "ffcfaedfba9cc1ffa38e52fdc816d438164ad9fa3b9ef5994fe7885897a41dab"
+    },
+    {
+      "id": "removed",
+      "file": "removed.mp4",
+      "source": "https://www.youtube.com/watch?v=UjTv8ivh7mY",
+      "startSeconds": 12,
+      "durationSeconds": 4,
+      "sha256": "0358ec539b067982925c904ae6522aa518896e0da6796a5f135e8ae8cdf9d438"
+    },
+    {
+      "id": "confirmed",
+      "file": "confirmed.mp4",
+      "source": "https://www.youtube.com/watch?v=y59eeQAx0Bg",
+      "startSeconds": 6.7,
+      "durationSeconds": 2.3,
+      "sha256": "0bb9795b18a0257ee58afc1ddabb81d3ba116e2dbb2977f84cb6f5c7998a6aaa"
+    },
+    {
+      "id": "confirmed-alternate",
+      "file": "confirmed-alternate.mp4",
+      "source": "https://www.youtube.com/watch?v=KRgmLmC_VRk",
+      "startSeconds": 30,
+      "durationSeconds": 8,
+      "sha256": "13a572ce618b6b08c649e2eeb1bf8bf62dc2356307a5d5837b852ed47e23bf53"
+    },
+    {
+      "id": "fly-complete",
+      "file": "fly-complete.mp4",
+      "source": "https://www.youtube.com/watch?v=wq4nDB8dhuU",
+      "startSeconds": 7,
+      "durationSeconds": 7,
+      "sha256": "5eb4e850e82973eab161f793c6e4ef37536176f30e031f43fb30d63813649f77"
+    },
+    {
+      "id": "starfield-loading",
+      "file": "starfield-loading.mp4",
+      "source": "https://www.youtube.com/watch?v=w1Jb-_f-mrw",
+      "startSeconds": 81,
+      "durationSeconds": 5,
+      "sha256": "229098c6a4f3d6a656fbaf0fa97a92ad9e6599858cc72d27c2de3a0bc0137d70"
+    }
+  ]
+}

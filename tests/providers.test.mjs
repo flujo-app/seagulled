@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const mockCommands = async (_command, args) => {
-  if (args.join(' ') === 'auth status') return { code: 0, stdout: JSON.stringify({ loggedIn: true, email: 'private@example.com' }), stderr: '' };
+  if (args.join(' ') === 'auth status') return { code: 0, stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', email: 'private@example.com' }), stderr: '' };
   if (args.join(' ') === 'login status') return { code: 0, stdout: 'Logged in using ChatGPT', stderr: '' };
   if (args.includes('--version')) return { code: 0, stdout: 'version', stderr: '' };
   if (args[0] === 'exec') return { code: 0, stdout: [

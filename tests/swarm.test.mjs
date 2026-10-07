@@ -132,7 +132,7 @@ test('an already aborted goal creates no registry work', async () => {
 });
 
 test('invalid worker and per-worker agent settings create no provider or registry work', async () => {
-  for (const patch of [{ maxWorkers: 7 }, { maxWorkers: 1.5 }, { conversationsPerWorker: 0 },
+  for (const patch of [{ maxWorkers: 101 }, { maxWorkers: 1.5 }, { conversationsPerWorker: 0 },
     { conversationsPerWorker: 11 }, { agentsPerWorker: 11 }, { agentsPerWorker: '3' }]) {
     const providers = manager([]);
     const swarm = new SwarmCoordinator({ providers, dataDir: directory() });
@@ -205,6 +205,7 @@ test('one isolated Fly developer receipt holds further paid review while cloud a
       fleetCalls.push(input);
       assert.equal(await input.assertFlyAccountCurrent(input.flyAccount), true);
       input.onCompany({ verifiedWorkers: 6, verifiedChildConversations: 24 });
+      input.onWorker({ workerId: 'w-observed', parentId: null, depth: 1, status: 'dispatching' });
       return { available: true, text: 'Fly worker ran Node 22 and reported its output.',
         usage: { costUsd: null, costKind: 'unknown', reservedUsd: input.maxUsd, billingPending: true },
         sandbox: { kind: 'fly', workerId: 'fictional-fly-worker', retired: true, cleanupConfirmed: true },
@@ -213,7 +214,7 @@ test('one isolated Fly developer receipt holds further paid review while cloud a
   const input = goal({ maxWorkers: 6, conversationsPerWorker: 5,
     executionMode: 'company', workerTopologyVersion: 2 });
   const admission = await admit(input);
-  await assert.rejects(swarm.execute({ goal: input, admission }), /spend is unknown/);
+  await assert.rejects(swarm.execute({ goal: input, admission, observationId: 'execution-fixture' }), /spend is unknown/);
   assert.equal(fleetCalls.length, 1);
   assert.equal(fleetCalls[0].fleetRoute.providerId, 'fictional');
   assert.deepEqual(fleetCalls[0].sourceBinding, sourceBinding);
@@ -227,6 +228,8 @@ test('one isolated Fly developer receipt holds further paid review while cloud a
   assert.equal(events.find((event) => event.type === 'usage' && event.usage.billingPending)?.usage.reservedUsd, 4.8);
   assert.deepEqual(events.find((event) => event.type === 'company'), { type: 'company',
     goalId: 'goal-one', verifiedWorkers: 6, verifiedChildConversations: 24 });
+  assert.deepEqual(events.find((event) => event.type === 'worker'), { type: 'worker', goalId: 'goal-one',
+    observationId: 'execution-fixture', worker: { workerId: 'w-observed', parentId: null, depth: 1, status: 'dispatching' } });
   assert.deepEqual(providers.calls.map((call) => call.role), ['lead']);
 });
 
@@ -293,7 +296,7 @@ test('company account, topology, and source failure stop before lead spend or re
     && error.outcome === 'not_applied');
   assert.equal(sourceCalls, 0, 'unverified Fly identity cannot launch a source');
   providers.flyFleetLease = verifiedLease;
-  await assert.rejects(swarm.prepareCompany({ ...input, maxWorkers: 7 }, { stage: 'source' }),
+  await assert.rejects(swarm.prepareCompany({ ...input, maxWorkers: 101 }, { stage: 'source' }),
     (error) => error.reasonCode === 'capacity');
   await assert.rejects(swarm.prepareCompany(input, { stage: 'source' }), (error) =>
     error.code === 'COMPANY_UNAVAILABLE' && error.reasonCode === 'source');
@@ -446,8 +449,8 @@ test('a genuine completed company goal remains an idempotent summary across rest
     usage: { inputTokens: 0, outputTokens: 0, costUsd: 0.1, costKind: 'estimated' },
     sandbox: { kind: 'fly', verification: 'original-worker-hierarchy-v1', relayUsed: false,
       retired: true, cleanupConfirmed: true, bootCleanupConfirmed: true, relayCleanupConfirmed: true,
-      workerCount: 1, initialWorkerCount: 1, localConversationCount: 4,
-      conversationCountVerified: 5, teamLeadRuns: ['original-run'] },
+      workerCount: 1, initialWorkerCount: 1, localConversationCount: 9,
+      conversationCountVerified: 10, teamLeadRuns: ['original-run'] },
   }) });
   const input = goal({ executionMode: 'company', workerTopologyVersion: 2 });
   const admission = await admit(input);
@@ -540,3 +543,4 @@ test('understaffed or excessive Worker proof cannot finish a company', async () 
     assert.equal(swarm.registry.goal(input.id).state, 'active');
   }
 });
+

@@ -113,6 +113,56 @@ test('opaque fixture admission stays in memory and only execution events supply 
   assert.ok(!JSON.stringify(publicEvents).includes('PRIVATE_EVENT'));
 });
 
+test('hundred-Worker observations persist only within the admitted hierarchy bounds', async t => {
+  const { app } = fixture(t, { execute: ({ goal }, sink) => {
+    sink({ type: 'company', goalId: goal.id, verifiedWorkers: 100, verifiedChildConversations: 900 });
+    assert.equal(app.snapshot().goals[0].execution.verifiedWorkers, 100);
+    sink({ type: 'company', goalId: goal.id, verifiedWorkers: 201, verifiedChildConversations: 1801 });
+    return { text: 'Offline observation fixture.' };
+  } });
+  const goal = await app.chat('Observe the requested topology', { maxWorkers: 100, conversationsPerWorker: 10 });
+  const result = await app.wait(goal.id);
+  assert.equal(result.execution.verifiedWorkers, 100);
+  assert.equal(result.execution.verifiedChildConversations, 900);
+});
+
+test('worker observations are bounded, sanitized, execution-fenced and historical after completion/restart', async t => {
+  let late, epoch;
+  const publicEvents=[];
+  const {app,dataDir,providers,swarm}=fixture(t,{execute:({goal,observationId},sink)=>{
+    epoch=observationId;late=sink;
+    const send=(worker,token=observationId)=>sink({type:'worker',goalId:goal.id,observationId:token,worker});
+    send({workerId:'w-stale',parentId:null,depth:1,status:'dispatching'},'old-execution');
+    send({workerId:'w-invalid',parentId:null,depth:1,status:'billed'});
+    send({workerId:'w-one',parentId:null,depth:1,status:'provisioning',target:'PRIVATE_WORKER_LINK',token:'PRIVATE_WORKER_TOKEN'});
+    send({workerId:'w-two',parentId:'w-one',depth:2,status:'dispatching',prompt:'PRIVATE_WORKER_PROMPT'});
+    send({workerId:'w-over-capacity',parentId:'w-one',depth:2,status:'ready'});
+    const current=app.snapshot().goals[0];
+    assert.equal(current.workerActivity.current,true);assert.equal(current.workerActivity.workers.length,2);
+    assert.equal(current.execution.verifiedWorkers,0);
+    send({workerId:'w-two',parentId:null,depth:1,status:'dispatching'});
+    assert.equal(app.snapshot().goals[0].workerActivity.workers[1].parentId,'w-one');
+    send({workerId:'w-two',parentId:'w-one',depth:2,status:'retired'});
+    send({workerId:'w-two',parentId:'w-one',depth:2,status:'dispatching'});
+    assert.equal(app.snapshot().goals[0].workerActivity.workers[1].status,'retired');
+    return {text:'Offline worker event fixture.'};
+  }});
+  app.subscribe(event=>publicEvents.push(event));
+  const goal=await app.chat('Observe only accepted execution',{maxWorkers:1});
+  await app.wait(goal.id);
+  assert.equal(app.snapshot().goals[0].workerActivity.current,false);
+  late({type:'worker',goalId:goal.id,observationId:epoch,worker:{workerId:'w-one',parentId:null,depth:1,status:'dispatching'}});
+  assert.equal(app.snapshot().goals[0].workerActivity.current,false);
+  assert.ok(!JSON.stringify(publicEvents).includes('PRIVATE_WORKER'));
+  assert.ok(!readFileSync(path.join(dataDir,'state.json'),'utf8').includes('PRIVATE_WORKER'));
+  await app.close();
+  const saved=JSON.parse(readFileSync(path.join(dataDir,'state.json'),'utf8'));saved.goals[0].workerActivity.current=true;
+  writeFileSync(path.join(dataDir,'state.json'),JSON.stringify(saved));
+  const reopened=createRuntime({dataDir,providers,swarm});
+  try{assert.equal(reopened.snapshot().goals[0].workerActivity.current,false);assert.equal(reopened.snapshot().goals[0].workerActivity.workers.length,2);}
+  finally{await reopened.close();}
+});
+
 test('ready-stage refusal retires the admitted GPU and preserves its estimated receipt', async t => {
   const { app, seen } = fixture(t, { prepare: (_goal, { stage }) => {
     if (stage === 'ready') throw unavailable('provider');

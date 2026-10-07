@@ -2,6 +2,7 @@ import path from 'node:path';
 import { homedir } from 'node:os';
 import { Registry } from '../../upstream/swarm-teams/fleet/registry.mjs';
 import { boundFleetSource, fleetStatus, flyAccountLease, flyUnavailable, goalCapacity, runFleetLeaf } from './fleet.mjs';
+import { budgetCeiling } from '../budget.mjs';
 
 export const TODD_PERSONA = `You are Todd, the lead of a bounded team: busy, blunt, dryly funny, and good at checking actual work. Translate the user's goal into concrete assignments, inspect the developer and reviewer results supplied to you, and revise the plan when evidence warrants it. The host application handles delegation. Do not invoke Codex collaboration, spawn agents, or attempt tool calls yourself; answer only with the requested JSON or prose. Never claim that a plan, fixture, estimate, or proposed change is a completed real-world action. State uncertainty and remaining work plainly. In user-facing prose name downloadable files by filename, without host paths, commands, or ports.`;
 
@@ -24,7 +25,8 @@ const companyStamp = (goal) => JSON.stringify({ id: goal.id, text: goal.text,
   providerId: goal.providerId, budgetUsd: goal.budgetUsd, spentUsd: goal.spentUsd,
   maxWorkers: goal.maxWorkers, conversationsPerWorker: goal.conversationsPerWorker,
   agentsPerWorker: goal.agentsPerWorker, privateH100: goal.privateH100,
-  executionMode: goal.executionMode, workerTopologyVersion: goal.workerTopologyVersion });
+  executionMode: goal.executionMode, workerTopologyVersion: goal.workerTopologyVersion,
+  unlimited: goal.unlimited, memoryMb: goal.memoryMb });
 const sameFlyAccount = (left, right) => left?.orgSlug === right?.orgSlug
   && left?.flyctlPath === right?.flyctlPath && left?.flyConfigDir === right?.flyConfigDir
   && left?.scope === right?.scope && left?.accountRef === right?.accountRef;
@@ -118,8 +120,8 @@ export class SwarmCoordinator {
     if (priorGoal && !companyIdentityMatches(priorGoal, goal, capacity)
       && (priorGoal.state === 'done' || Object.values(this.registry.state.runs).some((run) =>
         run.goalId === goal.id && run.sandbox?.kind === 'fly'))) throw companyUnavailable('unavailable');
-    if (!finite(goal.budgetUsd) || !finite(goal.spentUsd ?? 0)
-      || goal.budgetUsd <= (goal.spentUsd ?? 0)) throw companyUnavailable('budget');
+    if (!(goal.unlimited === true && goal.budgetUsd === null || finite(goal.budgetUsd)) || !finite(goal.spentUsd ?? 0)
+      || budgetCeiling(goal) <= (goal.spentUsd ?? 0)) throw companyUnavailable('budget');
     aborted(signal);
     if (this.fleet !== 'auto') throw companyUnavailable('unavailable');
     if (stage === 'source') {
@@ -240,7 +242,7 @@ export class SwarmCoordinator {
         && sandbox.bootCleanupConfirmed === true && sandbox.relayCleanupConfirmed === true
         && sandbox.relayUsed === (record.requestedWorkers > 1)
         && Number.isInteger(workers) && workers >= record.requestedWorkers
-        && workers <= (sandbox.relayUsed ? Math.min(12, 2 * record.requestedWorkers) : record.requestedWorkers)
+        && workers <= (sandbox.relayUsed ? Math.min(200, 2 * record.requestedWorkers) : record.requestedWorkers)
         && sandbox.initialWorkerCount === record.requestedWorkers
         && sandbox.localConversationCount === workers * record.requestedAgentsPerWorker
         && sandbox.conversationCountVerified === workers * record.requestedConversationsPerWorker
@@ -259,10 +261,10 @@ export class SwarmCoordinator {
   }
 
   /** A new execution never replays a previously accepted provider call. */
-  async execute({ goal, signal, admission } = {}) {
+  async execute({ goal, signal, admission, observationId } = {}) {
     if (!goal || typeof goal.id !== 'string' || !/^[\w-]{1,100}$/.test(goal.id) || !trim(goal.text).trim()) throw new Error('A goal id and text are required.');
     if (goal.text.length > 10_000) throw new Error('This goal is too long for the connected provider. Shorten it to 10,000 characters.');
-    if (!finite(goal.budgetUsd) || goal.budgetUsd <= 0 || !finite(goal.spentUsd ?? 0)) throw new Error('A positive goal budget and valid spend are required.');
+    if (!(goal.unlimited === true && goal.budgetUsd === null || finite(goal.budgetUsd)) || budgetCeiling(goal) <= 0 || !finite(goal.spentUsd ?? 0)) throw new Error('A positive goal budget and valid spend are required.');
     if (!goal.providerId) throw new Error('Connect a provider before starting this goal.');
     const { maxWorkers, conversationsPerWorker, agentsPerWorker } = goalCapacity(goal);
     const company = goal.executionMode === 'company' && goal.workerTopologyVersion === 2;
@@ -296,7 +298,7 @@ export class SwarmCoordinator {
     try { this.providerAvailable(goal.providerId); }
     catch (error) { if (company) throw companyUnavailable('provider'); throw error; }
     aborted(signal);
-    if (goal.spentUsd >= goal.budgetUsd) throw new Error('The goal budget is exhausted.');
+    if (goal.spentUsd >= budgetCeiling(goal)) throw new Error('The goal budget is exhausted.');
 
     const record = saved ?? this.registry.createGoal({ id: goal.id, text: goal.text, limits: {
       maxWorkers, maxChildren: maxWorkers, maxDepth: 1, maxActiveRuns: 1,
@@ -347,7 +349,7 @@ export class SwarmCoordinator {
       }
       if (calls >= MAX_CALLS) throw new Error('The task limit has been reached.');
       if (prompt.length > 16_000) throw new Error('The provider prompt is too long; shorten the goal or task.');
-      const remaining = goal.budgetUsd - spent;
+      const remaining = budgetCeiling(goal) - spent;
       if (remaining <= 0) throw new Error('The goal budget is exhausted.');
       this.providerAvailable(goal.providerId);
       let worker = leader;
@@ -387,6 +389,7 @@ export class SwarmCoordinator {
               reserveCloud: (reservation) => this.emit({ type: 'reservation', goalId: goal.id, reservation }),
               onCompany: ({ verifiedWorkers, verifiedChildConversations }) => this.emit({ type: 'company',
                 goalId: goal.id, verifiedWorkers, verifiedChildConversations }),
+              onWorker: (worker) => this.emit({ type: 'worker', goalId: goal.id, observationId, worker }),
               onStatus: (text) => this.emit({ type: 'task', goalId: goal.id,
                 task: { id: run.id, role, status: 'running', phase: trim(text, 200) } }) });
             if (remote?.available !== true) throw companyUnavailable('unavailable');
@@ -401,7 +404,7 @@ export class SwarmCoordinator {
             this.emit({ type: 'reservation', goalId: goal.id,
               reservation: { id: run.id, amountUsd: PRIVATE_REQUEST_RESERVE_USD } });
           }
-          result = await this.providers.run({ providerId: goal.providerId, prompt, signal, maxUsd: remaining,
+          result = await this.providers.run({ providerId: goal.providerId, prompt, signal, maxUsd: Number.isFinite(remaining) ? remaining : undefined,
             goalId: goal.id, requestId: goal.providerId === 'private-h100' ? run.id : undefined,
             role, onEvent: () => undefined });
         }

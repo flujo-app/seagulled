@@ -12,9 +12,10 @@ test('native bridge preserves explicit worker permission and rejects ambiguous v
 test('native bridge preserves bounded team and currency settings',()=>{
   assert.deepEqual(validateGoalOptions({budget:{amount:25000,currency:'COP'},maxWorkers:4,conversationsPerWorker:2,privateH100:true}),{budget:{amount:25000,currency:'COP'},maxWorkers:4,conversationsPerWorker:2,privateH100:true});
   assert.deepEqual(validateGoalOptions({maxWorkers:2,conversationsPerWorker:3}),{maxWorkers:2,conversationsPerWorker:3});
-  assert.deepEqual(validateGoalOptions(),{maxWorkers:5,conversationsPerWorker:5});
-  assert.deepEqual(validateGoalOptions({executionMode:'company',providerId:'codex'}),{maxWorkers:5,conversationsPerWorker:5,executionMode:'company',providerId:'codex'});
-  assert.throws(()=>validateGoalOptions({maxWorkers:100}),/Workers/);
+  assert.deepEqual(validateGoalOptions(),{maxWorkers:10,conversationsPerWorker:10});
+  assert.deepEqual(validateGoalOptions({executionMode:'company',providerId:'codex'}),{maxWorkers:10,conversationsPerWorker:10,executionMode:'company',providerId:'codex'});
+  assert.throws(()=>validateGoalOptions({maxWorkers:101}),/Workers/);
+  assert.deepEqual(validateGoalOptions({maxWorkers:100,unlimited:true,budgetUsd:null,memoryMb:4096}),{maxWorkers:100,conversationsPerWorker:10,unlimited:true,budgetUsd:null,memoryMb:4096});
   assert.throws(()=>validateGoalOptions({budget:{amount:1,currency:'US$'}}),/Budget/);
   assert.throws(()=>validateGoalOptions({privateH100:'true'}),/Private H100/);
   assert.throws(()=>validateGoalOptions({executionMode:'local'}),/Company execution mode/);
@@ -28,3 +29,4 @@ test('native bridge accepts only bounded WAV payloads',()=>{
   assert.throws(()=>validateVoiceInput({...recording,mimeType:'audio/webm'}),/Recording/);
   assert.throws(()=>validateVoiceInput({...recording,dataBase64:'x'.repeat(2_800_001)}),/Recording/);
 });
+

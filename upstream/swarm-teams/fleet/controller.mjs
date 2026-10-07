@@ -59,7 +59,7 @@ export class Controller {
    */
   constructor({ registryPath, operatorToken, publicUrl, remoteUrl, provisioner, runTimeoutMs, deadlineAt,
     maxRunsPerWorker,
-    beforeRetire, specialists,
+    beforeRetire, specialists, onActivity = () => undefined,
     log = () => undefined }) {
     if (!operatorToken || operatorToken.length < 32) throw new Error('operatorToken must be at least 32 characters.');
     this.releaseOwner = claimController(registryPath);
@@ -78,8 +78,21 @@ export class Controller {
     this.maxRunsPerWorker = maxRunsPerWorker;
     this.beforeRetire = beforeRetire;
     this.specialists = specialists;
+    this.onActivity = onActivity;
+    this.retiring = new Set();
     this.provisioning = new Map(); // workerId -> Promise<target>
     this.settled = new Map();      // runId -> Promise (in-flight runs)
+  }
+
+  observe(worker, status) {
+    if (worker.depth === 0) return;
+    const current = this.registry.worker(worker.id);
+    if (current.state === 'retired') status = current.cleanup?.confirmed === false ? 'cleanup-unconfirmed' : 'retired';
+    else if (this.retiring.has(worker.id)) status = 'retiring';
+    // Observation cannot change dispatch/cleanup decisions or expose a target.
+    try { this.onActivity({ workerId: worker.id, parentId: worker.depth === 1 ? null : worker.parentId,
+      depth: worker.depth, status }); }
+    catch { this.log('Worker activity observer failed.'); }
   }
 
   fleetFor(token, { remote = false } = {}) {
@@ -126,6 +139,7 @@ export class Controller {
       throw new FleetError('CAPACITY', 'This Worker has reached its conversation run limit.', 409);
     }
     const run = this.registry.startRun({ workerId: worker.id, startedBy, task, flowName });
+    this.observe(worker, worker.state === 'ready' ? 'queued' : 'provisioning');
     const job = (async () => {
       let connection;
       let submitted = false;
@@ -144,11 +158,14 @@ export class Controller {
         const timeoutMs = this.deadlineAt
           ? Math.min(this.runTimeoutMs ?? 6 * 3600_000, Math.max(1, this.deadlineAt - Date.now()))
           : this.runTimeoutMs;
+        this.observe(worker, 'dispatching');
         const result = await connection.client.runFlow({ flowName, prompt: task, conversationId: run.conversationId,
           ...(timeoutMs ? { timeoutMs } : {}) });
         this.registry.settleRun(run.id, result);
+        this.observe(worker, this.registry.run(run.id).state);
       } catch (error) {
         this.registry.settleRun(run.id, { status: submitted ? 'unknown' : 'failed', output: '', error: error.message });
+        this.observe(worker, this.registry.run(run.id).state);
       } finally {
         await connection?.close().catch(() => undefined);
         this.settled.delete(run.id);
@@ -168,15 +185,18 @@ export class Controller {
     if (this.deadlineAt && Date.now() >= this.deadlineAt) throw new FleetError('DEADLINE', 'The fleet deadline has passed.', 409);
     if (typeof task !== 'string' || !task.trim()) throw new FleetError('INVALID', 'A task is required.');
     const { worker, token } = this.registry.reserve({ goalId: actor.goalId, parentId: actor.id, role: 'team', name });
+    this.observe(worker, 'provisioning');
     const provisioning = (async () => {
       try {
         const target = await this.provisioner.provision(worker, this.fleetFor(token),
           { isLeaf: worker.depth >= this.registry.goal(worker.goalId).limits.maxDepth,
             teamLimits: this.registry.goal(worker.goalId).teamLimits, specialists: this.specialists });
         this.registry.enroll(worker.id, target);
+        this.observe(worker, 'ready');
         return target;
       } catch (error) {
         this.registry.markFailed(worker.id, error.message, error.cleanup);
+        this.observe(worker, 'failed');
         this.log(`provision ${worker.id} failed: ${error.message}`);
         throw error;
       }
@@ -225,6 +245,8 @@ export class Controller {
         if (worker.cleanup?.confirmed === false) cleanupUnconfirmed.push(worker.id);
         continue;
       }
+      this.retiring.add(worker.id);
+      this.observe(worker, 'retiring');
       await this.provisioning.get(worker.id)?.catch(() => undefined);
       const current = this.registry.worker(worker.id);
       let cleanupError;
@@ -254,6 +276,7 @@ export class Controller {
             // A completed Worker may hold the only copy of its deliverables. Preserve
             // that exact app and block admission until its output is reconciled.
             this.registry.retire(worker.id, `Before-retire output capture failed: ${error.message}`);
+            this.observe(worker, 'cleanup-unconfirmed');
             cleanupUnconfirmed.push(worker.id);
             retired.push(worker.id);
             this.log(`before-retire collection of ${worker.id} failed: ${error.message}`);
@@ -266,6 +289,7 @@ export class Controller {
       // A failed attempt can have no enrolled target. Retiring that node does
       // not prove destruction; report any retained cleanup hold from the registry.
       const node = this.registry.retire(worker.id, cleanupError);
+      this.observe(worker, 'retired');
       if (node.cleanup?.confirmed === false) cleanupUnconfirmed.push(worker.id);
       retired.push(worker.id);
     }

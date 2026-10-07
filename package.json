@@ -1,6 +1,6 @@
 {
   "name": "seagulled",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Talk to Todd. He puts a company of agents on your goal, then comes back to judge the work.",
   "type": "module",
   "main": "electron/main.mjs",
@@ -10,6 +10,16 @@
   "engines": {
     "node": ">=22"
   },
+  "files": [
+    "bin/**/*", "src/**/*", "electron/**/*", "ui/**/*",
+    "!**/__pycache__/**", "!**/*.pyc",
+    "upstream/swarm-teams/fleet/**/*", "upstream/swarm-teams/lib/**/*",
+    "upstream/swarm-teams/template/**/*", "upstream/swarm-teams/install.mjs",
+    "upstream/swarm-teams/swarm.mjs", "upstream/factory/receipts.mjs",
+    "docs/provenance.json", "docs/helpers-lock.json", "docs/journey-media-lock.json",
+    "scripts/check-release.mjs", "scripts/prepare-helpers.mjs", "scripts/prepare-journey-media.mjs",
+    "LICENSE", "THIRD_PARTY_NOTICES.md"
+  ],
   "scripts": {
     "start": "electron .",
     "cli": "node bin/seagulled.mjs",
@@ -18,8 +28,8 @@
     "package": "electron-builder --dir",
     "dist": "electron-builder --win portable --publish never",
     "check": "node scripts/check-release.mjs",
-    "prepackage": "node scripts/prepare-helpers.mjs",
-    "predist": "node scripts/prepare-helpers.mjs"
+    "prepackage": "node scripts/prepare-helpers.mjs && node scripts/prepare-journey-media.mjs",
+    "predist": "node scripts/prepare-helpers.mjs && node scripts/prepare-journey-media.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.56.0",
@@ -34,7 +44,11 @@
     },
     "files": [
       "electron/**/*",
-      "ui/**/*",
+      {
+        "from": "ui",
+        "to": "ui",
+        "filter": ["**/*", "!journey-media/**/*"]
+      },
       "src/**/*",
       "!**/__pycache__/**",
       "!**/*.pyc",
@@ -46,7 +60,12 @@
       "THIRD_PARTY_NOTICES.md",
       "upstream/swarm-teams/install.mjs",
       "upstream/swarm-teams/swarm.mjs",
-      "docs/provenance.json"
+      "docs/provenance.json",
+      {
+        "from": ".private/journey-media",
+        "to": "ui/journey-media",
+        "filter": ["intro.mp4", "selected.mp4", "removed.mp4", "confirmed.mp4", "confirmed-alternate.mp4", "fly-complete.mp4", "starfield-loading.mp4", "manifest.json"]
+      }
     ],
     "asar": true,
     "win": {

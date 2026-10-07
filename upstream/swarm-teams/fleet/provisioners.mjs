@@ -54,8 +54,11 @@ export async function flyProvisioner({ flujoCloudPath, templateWorkspace, source
     || typeof onRetiredApp !== 'function' || typeof verifyNetwork !== 'function')) {
     throw new Error('The pinned cloud SDK and goal network journal are not ready for private Worker creation.');
   }
+  if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 100) {
+    throw new Error('Worker provisioning concurrency must be between 1 and 100.');
+  }
   if (network && (!Number.isSafeInteger(initialWorkers) || initialWorkers < 0
-    || initialWorkers > concurrency)) {
+    || initialWorkers > 100)) {
     throw new Error('The initial Worker network barrier does not match the bounded fleet.');
   }
   let initialOutstanding = initialWorkers;
@@ -136,6 +139,8 @@ export async function flyProvisioner({ flujoCloudPath, templateWorkspace, source
         region, memoryMb, flowIds: [BOOT_FLOW],
         ...(network ? { profile: 'private-workspace' } : {}) }); }
       catch (error) { if (initialOutstanding) rejectInitial(error); throw error; }
+      // The provisioning slot is released before the group barrier. More initial
+      // Workers than capture slots can therefore finish without deadlocking.
       finally { release(); }
       const app = result.worker;
       let confirmedAppId;

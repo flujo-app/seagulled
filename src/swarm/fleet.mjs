@@ -12,6 +12,7 @@ import { collectFlyArtifacts } from '../artifacts/fly.mjs';
 import { createOwnedRelay, relayFailureCleanupConfirmed } from './relay.mjs';
 import { assertNetworkVacant, assertPlannedNetworkMembers, readFlyOrgApps,
   verifyFreshAppPlan } from './fly-network.mjs';
+import { planSwarm } from '../budget.mjs';
 
 const legacyProfilePath = () => path.join(process.env.SWARM_TEAMS_HOME || path.join(homedir(), '.swarm-teams'), 'config.json');
 const profilePath = () => process.env.SEAGULLED_FLEET_PROFILE || legacyProfilePath();
@@ -150,12 +151,13 @@ export function goalCapacity(goal = {}) {
   if (goal.workerTopologyVersion !== undefined && ![1, 2].includes(goal.workerTopologyVersion)) {
     throw new RangeError('workerTopologyVersion must be 1 or 2.');
   }
-  const maxWorkers = boundedCount(goal.maxWorkers, 5, 6, 'maxWorkers');
+  const maxWorkers = boundedCount(goal.maxWorkers, 10, 100, 'maxWorkers');
+  if (goal.memoryMb !== undefined && ![1024, 2048, 4096].includes(goal.memoryMb)) throw new RangeError('Memory must be 1, 2, or 4 GB.');
   // Earlier saved goals allowed ten child agents (eleven total conversations).
   // Preserve that exact legacy capacity only when its derived child count agrees.
   const legacyEleven = goal.conversationsPerWorker === 11 && goal.agentsPerWorker === 10;
   const selected = goal.conversationsPerWorker === undefined ? undefined
-    : legacyEleven ? 11 : boundedCount(goal.conversationsPerWorker, 5, 10, 'conversationsPerWorker');
+    : legacyEleven ? 11 : boundedCount(goal.conversationsPerWorker, 10, 10, 'conversationsPerWorker');
   const legacy = goal.agentsPerWorker;
   if (legacy !== undefined && (!Number.isInteger(legacy) || legacy < 0 || legacy > 10)) {
     throw new RangeError('agentsPerWorker must be an integer from 0 to 10.');
@@ -163,14 +165,14 @@ export function goalCapacity(goal = {}) {
   if (selected !== undefined && legacy !== undefined && legacy !== selected - 1) {
     throw new RangeError('conversationsPerWorker and agentsPerWorker disagree.');
   }
-  const conversationsPerWorker = selected ?? (legacy === undefined ? 5 : legacy + 1);
+  const conversationsPerWorker = selected ?? (legacy === undefined ? 10 : legacy + 1);
   return { maxWorkers, conversationsPerWorker, agentsPerWorker: conversationsPerWorker - 1 };
 }
 export function fleetTopology(goal, { workerCap, relay = false } = {}) {
-  if (!Number.isInteger(workerCap) || workerCap < 1 || workerCap > 6) throw new RangeError('Worker count must be 1 to 6.');
+  if (!Number.isInteger(workerCap) || workerCap < 1 || workerCap > 100) throw new RangeError('Worker count must be 1 to 100.');
   const version = goal?.workerTopologyVersion === 2 ? 2 : 1;
   const initialWorkers = version === 2 ? workerCap : 1;
-  const maxWorkers = version === 2 ? Math.min(12, workerCap * 2) : workerCap;
+  const maxWorkers = version === 2 ? Math.min(200, workerCap * 2) : workerCap;
   return { initialWorkers, limits: { maxWorkers,
     maxDepth: relay ? version === 2 ? 3 : 2 : 1,
     maxChildren: relay ? Math.max(1, workerCap - 1) : 1, maxActiveRuns: 2 } };
@@ -196,7 +198,7 @@ const STAFF_BRANCHES = Object.freeze([
 /** Admit real controller Worker runs, with one coordinating parent and bounded descendants. */
 export function staffOwnedTeam(controller, root, { task, workerCap, localChildTarget = 4,
   onReserved = () => undefined, onStaffed = () => undefined } = {}) {
-  if (!Number.isInteger(workerCap) || workerCap < 1 || workerCap > 6) throw new RangeError('Worker count must be 1 to 6.');
+  if (!Number.isInteger(workerCap) || workerCap < 1 || workerCap > 100) throw new RangeError('Worker count must be 1 to 100.');
   if (!Number.isInteger(localChildTarget) || localChildTarget < 0 || localChildTarget > 10) {
     throw new RangeError('Local child conversation count must be 0 to 10.');
   }
@@ -215,7 +217,10 @@ export function staffOwnedTeam(controller, root, { task, workerCap, localChildTa
   onReserved(lead);
   const leadWorker = controller.registry.worker(lead.workerId);
   const prepared = [{ actor: root, worker: leadWorker, task: leadTask }];
-  for (const branch of STAFF_BRANCHES.slice(0, workerCap - 1)) {
+  for (const branch of Array.from({ length: workerCap - 1 }, (_, index) => {
+    const angle = STAFF_BRANCHES[index % STAFF_BRANCHES.length];
+    return { name: `${angle.name}-${index + 1}`, angle: `${angle.angle} Own partition ${index + 1} of ${workerCap - 1}; coordinate concrete non-overlapping work with the team lead.` };
+  })) {
     const childTask = `${task}\n\n` +
       `YOUR DISTINCT ANGLE: ${branch.angle} ${localStaffing}` +
       'post findings with evidence to the shared board, and report actual conversation IDs and remaining uncertainty. ' +
@@ -504,7 +509,7 @@ export async function fleetDiagnosticStatus({ dataDir } = {}) {
 export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetRoute,
   diagnostic = false, reservationId, reserveCloud, flyAccount, sourceBinding,
   assertFlyAccountCurrent,
-  onStatus = () => undefined, onCompany = () => undefined }) {
+  onStatus = () => undefined, onCompany = () => undefined, onWorker = () => undefined }) {
   if (!goal || typeof goal.id !== 'string' || !/^[\w-]{1,100}$/.test(goal.id)) throw new Error('A safe goal id is required for isolated fleet work.');
   goalCapacity(goal);
   const fleetDeadlineAt = Date.now() + 30 * 60_000;
@@ -582,6 +587,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
   let bootCleanupConfirmed = false;
   let remoteAccepted = false;
   let cloudReserved = false;
+  let reservedUsd = Number.isFinite(maxUsd) ? maxUsd : undefined;
   let cleanupConfirmed = false;
   let relayCleanupConfirmed = true;
   let result;
@@ -678,12 +684,15 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     const { workerCap, teamLimits } = fleetExecutionLimits({ goal, config, diagnostic, native: !multiWorker });
     if (!diagnostic && goal.providerId === 'private-h100') {
       if (typeof reservationId !== 'string' || !/^[\w-]{1,100}$/.test(reservationId)
-        || typeof reserveCloud !== 'function' || !Number.isFinite(maxUsd) || maxUsd <= 0) {
+        || typeof reserveCloud !== 'function' || !(maxUsd === Infinity && goal.unlimited === true || Number.isFinite(maxUsd)) || maxUsd <= 0) {
         throw Object.assign(new Error('Private Fly work needs a durable allowance reservation.'), { outcome: 'not_applied' });
       }
-      reserveCloud({ id: reservationId, amountUsd: maxUsd });
+      const cloudAllowance = Number.isFinite(maxUsd) ? maxUsd : Math.ceil((planSwarm({ unlimited: true, workers: workerCap,
+        agents: goal.conversationsPerWorker ?? 10, memoryMb: goal.memoryMb ?? 4096, hours: .5 }).estimate.computeUsd + .01) * 100) / 100;
+      reservedUsd = cloudAllowance;
+      reserveCloud({ id: reservationId, amountUsd: cloudAllowance });
       cloudReserved = true;
-      record({ state: 'budget-reserved', reservationId, reservedUsd: maxUsd });
+      record({ state: 'budget-reserved', reservationId, reservedUsd: cloudAllowance });
     }
     if (multiWorker) {
       assertAdmission(signal, fleetDeadlineAt);
@@ -724,8 +733,9 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     assertAdmission(signal, fleetDeadlineAt);
     const topology = fleetTopology(goal, { workerCap, relay: Boolean(relay) });
     const provisioner = await flyProvisioner({ ...config.provisioner, templateWorkspace: bootWorkspace,
+      memoryMb: goal.memoryMb ?? 4096,
       source: workerSource,
-      fleetReachable: Boolean(relay), concurrency: workerCap,
+      fleetReachable: Boolean(relay), concurrency: Math.min(workerCap, 8),
       initialWorkers: topology.initialWorkers,
       teamLimits, flyEnv, cloudDirectory, network: intent.network,
       accountRef: intent.accountRef,
@@ -754,7 +764,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     };
     controller = new Controller({ registryPath, operatorToken: randomBytes(32).toString('base64url'),
       publicUrl: 'http://127.0.0.1:1', remoteUrl: relay?.remoteUrl,
-      provisioner, log: () => undefined, runTimeoutMs: 20 * 60_000, deadlineAt: fleetDeadlineAt,
+      provisioner, onActivity: onWorker, log: () => undefined, runTimeoutMs: 20 * 60_000, deadlineAt: fleetDeadlineAt,
       maxRunsPerWorker: goal.workerTopologyVersion === 2 ? 1 : undefined,
       beforeRetire: async ({ worker, target }) => {
         if (target.kind !== 'fly') return;
@@ -863,7 +873,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     controller.registry.finishGoal(goal.id, result.result);
     record({ state: 'fly-retired', flyCleanupConfirmed: true });
     delivered = { available: true, text: result.result, artifacts, usage: { inputTokens: 0, outputTokens: 0, costUsd: null, costKind: 'unknown',
-      reservedUsd: maxUsd, billingPending: true, ...(cloudReserved ? { reservationId } : {}) },
+      reservedUsd, billingPending: true, ...(cloudReserved ? { reservationId } : {}) },
       sandbox: { kind: 'fly', workerId: child.workerId, runId: child.runId, retired: true, cleanupConfirmed: true,
         verification: 'original-worker-hierarchy-v1', relayUsed: Boolean(relay),
         workerCount: localConversations.length, initialWorkerCount: staffed.length,
@@ -881,7 +891,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
       error.message = error.message.replaceAll(config.model.apiKey, '[redacted]');
     }
     const usage = remoteAccepted || !relayCleanupConfirmed || cloudReserved ? { inputTokens: 0, outputTokens: 0, costUsd: null, costKind: 'unknown',
-      reservedUsd: maxUsd, billingPending: true, ...(cloudReserved ? { reservationId } : {}) } : undefined;
+      reservedUsd, billingPending: true, ...(cloudReserved ? { reservationId } : {}) } : undefined;
     if (remoteAccepted && child && controller && !cleanupConfirmed) {
       try {
         const retirement = await controller.retire('operator', { workerId: child.workerId });
@@ -941,7 +951,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     if (!relayCleanupConfirmed && !remoteAccepted) {
       throw Object.assign(unknown('Owned relay cleanup is unconfirmed; inspect its exact private intent before another cloud attempt.'),
         { outcome: 'unknown', usage: { inputTokens: 0, outputTokens: 0, costUsd: null, costKind: 'unknown',
-          reservedUsd: maxUsd, billingPending: true } });
+          reservedUsd, billingPending: true } });
     }
     if (delivered) {
       delivered.sandbox.bootCleanupConfirmed = bootCleanupConfirmed;

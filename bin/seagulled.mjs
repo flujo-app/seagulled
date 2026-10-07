@@ -16,15 +16,16 @@ const HELP = `Seagulled — talk to Todd, supervise the team.
   seagulled providers                Discover providers
   seagulled connect PROVIDER          Use native sign-in, or a saved key
   seagulled connect PROVIDER --key-env ENV_NAME --method key
+  seagulled auth modal|fly           Open the account browser sign-in
   seagulled edit GOAL --text "…" --budget 50
-  seagulled pause|resume|stop GOAL
+  seagulled pause|resume|stop|delete GOAL
   seagulled pause-all|resume-all|stop-all
 
-Options: --budget AMOUNT [--currency ISO_CODE], --workers COUNT,
+Options: --budget AMOUNT|unlimited [--currency ISO_CODE], --workers COUNT,
          --conversations COUNT, --private-h100 | --no-private-h100,
          --provider ID, --home DIRECTORY, --json, --no-open
          --execution-mode company|local (local is a bounded diagnostic)
-Defaults: 50 USD, five workers, five total conversations per worker.
+Defaults: 50 USD, ten workers (1–100), ten total conversations per worker (1–10).
 Saved state lives in your private Seagulled folder. Keys stay out of arguments.
 `;
 const { positionals, values } = parseArgs({ allowPositionals: true, options: {
@@ -74,6 +75,8 @@ async function client() {
     snapshot: () => request(session, '/api/state'), discover: () => request(session, '/api/providers/discover', 'POST'),
     chat: (text, options) => request(session, '/api/chat', 'POST', { text, ...options }),
     connect: payload => request(session, '/api/providers/connect', 'POST', payload),
+    authConnect: payload => request(session, '/api/auth/connect', 'POST', payload),
+    deleteGoal: id => request(session, `/api/goals/${encodeURIComponent(id)}`, 'DELETE'),
     updateGoal: (id, patch) => request(session, `/api/goals/${encodeURIComponent(id)}`, 'PATCH', patch),
     controlGoal: (id, action) => request(session, `/api/goals/${encodeURIComponent(id)}/${action}`, 'POST'),
     controlSwarm: action => request(session, `/api/swarm/${action}`, 'POST'),
@@ -93,7 +96,7 @@ async function client() {
 function showState(state) {
   if (values.json) return print(state);
   print(`Spend: $${state.spend.usd.toFixed(4)} (reported + estimates); ${state.spend.subscriptionCalls} subscription calls; ${state.spend.unknownCalls} unpriced calls.`);
-  for (const g of state.goals) print(`${g.id}  ${g.status}  $${g.spentUsd.toFixed(4)} / $${g.budgetUsd.toFixed(2)}\n  ${g.text}${g.error ? `\n  ${g.error}` : ''}`);
+  for (const g of state.goals.filter(goal => !goal.deletedAt)) print(`${g.id}  ${g.status}  $${g.spentUsd.toFixed(4)} / ${g.unlimited ? 'unlimited' : `$${g.budgetUsd.toFixed(2)}`}\n  ${g.text}${g.error ? `\n  ${g.error}` : ''}`);
   if (!state.goals.length) print('Tell Todd what to build.');
 }
 async function cleanup() { await service?.close(); await runtime?.close(); }
@@ -101,11 +104,12 @@ try {
   if (values.help || command === 'help') { print(HELP); }
   else {
     if (values.currency !== undefined && values.budget === undefined) throw new Error('Choose an amount with the budget currency.');
+    if (values.budget === 'unlimited' && values.currency !== undefined) throw new Error('Unlimited has no currency amount.');
     if (values['private-h100'] && values['no-private-h100']) throw new Error('Choose one private inference setting.');
     if (values['execution-mode'] !== undefined && !['company', 'local'].includes(values['execution-mode'])) throw new Error('Choose company or local execution.');
     if (command === 'edit' && values['execution-mode'] !== undefined) throw new Error('Execution mode is fixed when a goal is created.');
     const options = {
-      ...(values.budget !== undefined ? values.currency !== undefined
+      ...(values.budget === 'unlimited' ? { unlimited: true, budgetUsd: null } : values.budget !== undefined ? values.currency !== undefined
         ? { budget: { amount: Number(values.budget), currency: values.currency.toUpperCase() } }
         : { budgetUsd: Number(values.budget) } : {}),
       ...(values.workers !== undefined ? { maxWorkers: Number(values.workers) } : {}),
@@ -127,7 +131,9 @@ try {
       const key = values['key-env'] ? process.env[values['key-env']] : undefined;
       if (values['key-env'] && !key) throw new Error('The selected key environment variable is empty.');
       print(await app.connect({ id: args[0], method: values.method || (key ? 'key' : 'subscription'), ...(key ? { key } : {}) }));
-    } else if (['pause', 'resume', 'stop'].includes(command)) print(await app.controlGoal(args[0], command));
+    } else if (command === 'auth') print(await app.authConnect({ id: args[0] }));
+    else if (command === 'delete') print(await app.deleteGoal(args[0]));
+    else if (['pause', 'resume', 'stop'].includes(command)) print(await app.controlGoal(args[0], command));
     else if (['pause-all', 'resume-all', 'stop-all'].includes(command)) showState(await app.controlSwarm(command.split('-')[0]));
     else if (command === 'edit') print(await app.updateGoal(args[0], { ...(values.text ? { text: values.text } : {}), ...options }));
     else if (command === 'goal') {

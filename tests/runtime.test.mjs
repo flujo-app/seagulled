@@ -46,6 +46,103 @@ function fixture(t, { connected = true, mode = 'complete', receipt, providerIds 
   return { app, dataDir, providers, swarm };
 }
 
+test('unlimited goals persist null allowance and require a finite budget when disabled', async t => {
+  const { app, dataDir, providers, swarm } = fixture(t, { connected: false });
+  const goal = await app.chat('Run without a planning allowance', { unlimited: true, budgetUsd: null });
+  assert.equal(goal.maxWorkers, 10); assert.equal(goal.conversationsPerWorker, 10);
+  assert.equal(goal.memoryMb, 4096); assert.equal(goal.budgetUsd, null);
+  assert.equal(goal.budget.unlimited, true);
+  await assert.rejects(app.updateGoal(goal.id, { unlimited: false }), /finite budget/);
+  assert.equal(app.snapshot().goals[0].unlimited, true);
+  await app.close();
+  const reopened = createRuntime({ executionMode: 'local', dataDir, providers, swarm });
+  try {
+    assert.equal(reopened.snapshot().goals[0].budgetUsd, null);
+    const edited = await reopened.updateGoal(goal.id, { budgetUsd: 100, unlimited: false, conversationsPerWorker: 2 });
+    assert.equal(edited.budgetUsd, 100); assert.equal(edited.unlimited, false);
+    assert.equal(edited.memoryMb, 1024);
+  } finally { await reopened.close(); }
+});
+
+test('selecting a native provider clears the old private compute route flag', async t => {
+  const { app } = fixture(t, { connected: false, providerIds: ['codex', 'private-h100'] });
+  const goal = await app.chat('Select one provider', { privateH100: true });
+  assert.equal(goal.privateH100, true);
+  const edited = await app.updateGoal(goal.id, { providerId: 'codex', privateH100: false });
+  assert.equal(edited.providerId, 'codex'); assert.equal(edited.privateH100, false);
+});
+
+test('swarm deletion preserves receipts and conversation across reopening and forbids revival', async t => {
+  const { app, dataDir, providers, swarm } = fixture(t);
+  const goal = await app.chat('Keep the original evidence');
+  await app.wait(goal.id);
+  const before = app.snapshot();
+  const deleted = await app.deleteGoal(goal.id);
+  assert.ok(deleted.deletedAt);
+  assert.equal((await app.deleteGoal(goal.id)).deletedAt, deleted.deletedAt);
+  assert.deepEqual(app.snapshot().conversation, before.conversation);
+  assert.deepEqual(app.snapshot().spend, before.spend);
+  assert.deepEqual(deleted.tasks, before.goals[0].tasks);
+  await assert.rejects(app.controlGoal(goal.id, 'resume'), /deleted/);
+  await assert.rejects(app.updateGoal(goal.id, { text: 'Revive' }), /deleted/);
+  await app.close();
+  const reopened = createRuntime({ executionMode: 'local', dataDir, providers, swarm });
+  try { assert.equal(reopened.snapshot().goals[0].deletedAt, deleted.deletedAt); }
+  finally { await reopened.close(); }
+});
+
+test('swarm deletion stops active execution before marking removal', async t => {
+  const { app } = fixture(t, { mode: 'wait' });
+  const goal = await app.chat('Stop my owned execution');
+  const deleted = await app.deleteGoal(goal.id);
+  assert.equal(deleted.status, 'stopped');
+  assert.ok(deleted.deletedAt);
+});
+
+test('swarm deletion cannot conceal unknown outcomes or pending billing', async t => {
+  const unknown = fixture(t, { mode: 'unknown' });
+  const goal = await unknown.app.chat('Unknown original');
+  await unknown.app.wait(goal.id);
+  await assert.rejects(unknown.app.deleteGoal(goal.id), /reconciliation/);
+  assert.equal(unknown.app.snapshot().goals[0].deletedAt, undefined);
+  const pending = fixture(t, { receipt: { costKind: 'unknown', costUsd: null, reservedUsd: 0.5, billingPending: true } });
+  const held = await pending.app.chat('Keep billing hold');
+  await pending.app.wait(held.id);
+  await assert.rejects(pending.app.deleteGoal(held.id), /reconciliation/);
+  assert.equal(pending.app.snapshot().goals[0].deletedAt, undefined);
+  assert.equal(pending.app.snapshot().goals[0].pendingUsd, 0.5);
+});
+
+test('swarm HTTP deletion requires session authentication and persists removal', async t => {
+  const { app } = fixture(t, { connected: false });
+  const goal = await app.chat('Remove queued card');
+  const server = await createServer({ runtime: app });
+  t.after(() => server.close());
+  const url = `${server.url}/api/goals/${goal.id}`;
+  assert.equal((await fetch(url, { method: 'DELETE' })).status, 401);
+  assert.equal(app.snapshot().goals[0].deletedAt, undefined);
+  const response = await fetch(url, { method: 'DELETE', headers: { Authorization: `Bearer ${server.token}` } });
+  assert.equal(response.status, 200);
+  assert.ok((await response.json()).deletedAt);
+});
+
+test('swarm planning API is authenticated and never creates work or alters spend', async t => {
+  const { app } = fixture(t, { connected: false });
+  const server = await createServer({ runtime: app });
+  t.after(() => server.close());
+  const before = app.snapshot();
+  const url = `${server.url}/api/budget/plan`;
+  assert.equal((await fetch(url, { method: 'POST', body: '{}' })).status, 401);
+  const headers = { Authorization: `Bearer ${server.token}`, 'Content-Type': 'application/json' };
+  const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ workers: 100, agents: 10, unlimited: true }) });
+  assert.equal(response.status, 200);
+  const plan = await response.json();
+  assert.equal(plan.workers, 100); assert.equal(plan.memoryMb, 4096);
+  assert.equal(plan.budgetUsd, null); assert.equal(plan.estimate.totalUsd, null);
+  assert.deepEqual(app.snapshot(), before);
+  assert.equal((await fetch(url, { method: 'POST', headers, body: JSON.stringify({ workers: 101 }) })).status, 400);
+});
+
 test('durable goal and conversation count emitted usage once, not aggregate twice', async t => {
   const { app, dataDir, providers, swarm } = fixture(t);
   const goal = await app.chat('Build a checked output', { budgetUsd: 2 });

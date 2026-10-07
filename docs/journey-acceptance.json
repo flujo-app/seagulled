@@ -1,0 +1,96 @@
+{
+  "schema": 1,
+  "kind": "unreleased-offline-journey-candidate",
+  "checkedAt": "2026-10-07",
+  "source": "Pre-patch-version candidate; runtime changes passed 345 offline tests and native/portable validation. Patch package verification follows separately.",
+  "tests": {
+    "passed": 345,
+    "failed": 0,
+    "dependencyCompleteIsolatedCheckout": true,
+    "focusedUiAndMediaPassed": 14,
+    "loadingFocusedPassed": 3
+  },
+  "payload": {
+    "sourceMismatches": 0,
+    "privateEntries": 0,
+    "helperFiles": 1325,
+    "helperMismatches": 0,
+    "mediaAssets": 7,
+    "asarSha256": "3b1cdda2a0b1df112be42860a28a683f595729249c4451376dc35893b61c6c79",
+    "runtimeFiles": 56
+  },
+  "native": {
+    "firstLaunch": true,
+    "helpersAvailable": true,
+    "decodedVideoAndAudioCues": 6,
+    "saveEditDelete": true,
+    "pauseResume": true,
+    "shutdownClean": true,
+    "setupCompletionFixture": true,
+    "topRightAppClose": true,
+    "dialogueInsideModal": true,
+    "flyCompletionDurationSeconds": 7,
+    "flyCompletionPlayedToEnd": true
+  },
+  "portable": {
+    "normalLauncher": true,
+    "archiveMatchesAuditedPayload": true,
+    "firstLaunch": true,
+    "saveEditDelete": true,
+    "pauseResume": true,
+    "shutdownClean": true,
+    "setupCompletionFixture": true,
+    "topRightAppClose": true,
+    "dialogueInsideModal": true
+  },
+  "cli": {
+    "entries": 79,
+    "standaloneStatus": true,
+    "noHostProviderClis": true,
+    "sha256": "fdf321c89c4ae24a1edd9d329d355b1974cccb8d23a8720559c5011e17566c7e"
+  },
+  "windows": {
+    "sha256": "6e526d02535068114a7ca8d234381f77652b7820ae3035385a1d1c27a838c4e6"
+  },
+  "qualification": {
+    "actualFreshBrowserLogin": false,
+    "providerCalls": 0,
+    "cloudMutations": 0,
+    "verifiedDeployedWorkers": 0,
+    "remoteSubscriptionRoutesEnabled": false,
+    "billedSpend": false,
+    "completeAudibleCueReview": false,
+    "publicRelease": false
+  },
+  "authFirst": {
+    "checksBeforeButtonsOfflineVerified": true,
+    "pureActivationTogglesOfflineVerified": true,
+    "modalToggleWithReadOnlyExistingSessionNativeVerified": true,
+    "selectionSurvivesDiscoveryNativeVerified": true,
+    "signInSeparateFromActivation": true,
+    "activatedProvidersPersistedOfflineVerified": true
+  },
+  "workerObservation": {
+    "controllerWiringOfflineVerified": true,
+    "executionFencingOfflineVerified": true,
+    "historicalHierarchyNativeFixtureVerified": true,
+    "restartLivenessCleared": true,
+    "historicalActiveNodes": 0
+  },
+  "loading": {
+    "sourceSegmentSeconds": [
+      81,
+      86
+    ],
+    "durationSeconds": 5,
+    "muted": true,
+    "fadeSeconds": 0.18,
+    "dialogPulseSeconds": 0.8,
+    "initialAuthHoldOfflineVerified": true,
+    "overlappingChecksOfflineVerified": true,
+    "cancellationOfflineVerified": true,
+    "nativeTransitionsVerified": true,
+    "portableTransitionsVerified": true
+  },
+  "candidateVersion": "0.1.0"
+}

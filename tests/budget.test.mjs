@@ -3,11 +3,25 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { createBudgets } from '../src/budget.mjs';
+import { createBudgets, planSwarm } from '../src/budget.mjs';
 import { createRuntime } from '../src/runtime.mjs';
 
 const clock = () => Date.parse('2026-10-05T12:00:00Z');
 const quote = () => ({ result: 'success', base_code: 'USD', time_last_update_unix: clock() / 1000 - 3600, rates: { USD: 1, COP: 4000, EUR: 0.9 } });
+test('swarm planning prices compute separately and scales memory without claiming execution', () => {
+  const plan = planSwarm();
+  assert.equal(plan.workers, 10); assert.equal(plan.agents, 10); assert.equal(plan.memoryMb, 4096);
+  assert.equal(plan.estimate.computeUsd, 10 * (24.70 / 720) * 24);
+  assert.equal(plan.estimate.totalUsd, null); assert.equal(plan.estimate.inferenceUsd, null);
+  assert.equal(plan.estimate.costKind, 'estimated'); assert.equal(plan.executionVerified, false);
+  for (const [agents, memoryMb] of [[1, 1024], [2, 1024], [3, 2048], [5, 2048], [6, 4096], [10, 4096]]) assert.equal(planSwarm({ agents }).memoryMb, memoryMb);
+  assert.equal(planSwarm({ unlimited: true, workers: 100 }).budgetUsd, null);
+  assert.equal(planSwarm({ unlimited: true }).affordableWorkers, 100);
+  assert.equal(planSwarm({ budgetUsd: 0.01 }).affordableWorkers, 0);
+  assert.equal(planSwarm({ budgetUsd: 0.01 }).withinComputeAllowance, false);
+  assert.equal(planSwarm({ workers: 100, budgetUsd: 25 }).withinComputeAllowance, false);
+  for (const options of [{ workers: 101 }, { workers: 0 }, { agents: 11 }, { agents: 0 }, { hours: Infinity }, { hours: 0 }, { region: 'bog' }, { unlimited: 'yes' }]) assert.throws(() => planSwarm(options));
+});
 function folder(t) { const dir = mkdtempSync(path.join(tmpdir(), 'seagulled-budget-')); t.after(() => rmSync(dir, { force: true, recursive: true })); return dir; }
 test('currency budget converts from a dated quote, retains entered currency, caches privately, and leaves USD independent', async t => {
   const dataDir = folder(t); let requests = 0;
@@ -35,7 +49,7 @@ test('goal budgets and capacity persist, and invalid limits are rejected before 
   const budgets = createBudgets({ dataDir, clock, fetchImpl: async () => new Response(JSON.stringify(quote())) });
   const runtime = createRuntime({ executionMode: 'local', dataDir, providers, budgets, swarm: {} });
   t.after(() => runtime.close());
-  for (const options of [{ maxWorkers: 7 }, { agentsPerWorker: 11 }, { maxWorkers: '3' }, { agentsPerWorker: 0 }]) await assert.rejects(runtime.chat('Build a planner.', options));
+  for (const options of [{ maxWorkers: 101 }, { agentsPerWorker: 11 }, { maxWorkers: '3' }, { agentsPerWorker: 0 }]) await assert.rejects(runtime.chat('Build a planner.', options));
   assert.equal(discoveries, 0); assert.equal(runtime.snapshot().goals.length, 0);
   const goal = await runtime.chat('Build a planner.', { budget: { amount: 20000, currency: 'COP' }, maxWorkers: 2, agentsPerWorker: 4 });
   assert.equal(goal.budgetUsd, 5); assert.equal(goal.maxWorkers, 2); assert.equal(goal.agentsPerWorker, 4);
