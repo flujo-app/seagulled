@@ -35,7 +35,7 @@ export function packageSource({ root = process.cwd(), outputDir = path.join(root
   const checksumsPath = path.join(outputDir, `${stem}.SHA256SUMS.txt`);
   for (const file of [archive, inventoryPath, checksumsPath]) if (existsSync(file)) throw new Error(`Preserve existing export: ${file}`);
   mkdirSync(outputDir, { recursive: true });
-  git(['archive', '--format=zip', `--prefix=${prefix}`, `--output=${archive}`, commit]);
+  git(['-c', 'core.autocrlf=false', '-c', 'core.eol=lf', 'archive', '--format=zip', `--prefix=${prefix}`, `--output=${archive}`, commit]);
   const archiveBytes = readFileSync(archive);
   const inventory = { schemaVersion: 1, version: pkg.version, sourceCommit: commit, prefix,
     archive: { file: path.basename(archive), bytes: archiveBytes.length, sha256: sha256(archiveBytes) }, files };
