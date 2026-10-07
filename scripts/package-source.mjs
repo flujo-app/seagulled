@@ -5,7 +5,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
-const forbiddenPath = /(^|\/)(?:\.git|\.private|\.env[^/]*|node_modules|release|dist|coverage|\.seagulled|__pycache__|credentials?\.[^/]+|auth\.json|session\.json|state\.json|runtime\.lock|modal\.toml|config\.yml)(\/|$)|\.(?:pem|key|db|sqlite3?|log|pyc)$|\.local\.json$/i;
+const forbiddenPath = /(^|\/)(?:\.git|\.private|\.env[^/]*|node_modules|release|dist|coverage|\.seagulled|__pycache__|credentials?\.(?:json|ya?ml|toml|ini|txt)|auth\.json|session\.json|state\.json|runtime\.lock|modal\.toml|config\.yml)(\/|$)|\.(?:pem|key|db|sqlite3?|log|pyc)$|\.local\.json$/i;
 const credentialPattern = /gh[pousr]_[A-Za-z0-9]{25,}|sk-(?:proj-)?[A-Za-z0-9_-]{24,}|-----BEGIN (?:RSA |OPENSSH )?PRIVATE KEY-----/;
 
 export function packageSource({ root = process.cwd(), outputDir = path.join(root, 'release', 'source') } = {}) {
