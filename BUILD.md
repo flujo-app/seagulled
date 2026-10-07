@@ -10,7 +10,7 @@ branch has a separate dependency migration and is not this build.
 
 ## Requirements and build
 
-- Windows x64, Node.js 22 or newer, npm and Windows' `tar.exe`.
+- Windows x64, Node.js 22.12 or newer, npm and Windows' `tar.exe`.
 - Internet access to public npm, Electron, Python, Fly and PyPI downloads.
 - Git for cloning/exporting. Building an extracted ZIP does not require Git
   or access to a private repository.
@@ -100,3 +100,17 @@ node scripts/verify-source.mjs C:\absolute\path\seagulled-0.1.1-source.inventory
 
 Dependency/media licenses remain separate from the application MIT license;
 see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+## Verified rebuild
+
+On 2026-10-07, the source ZIP exported from `daef6be` was extracted into a
+new directory without Git metadata, installed dependencies, helper bundles
+or account state. All 155 committed input hashes matched; `npm ci`, release
+checks, 350 offline tests, public helper preparation, `npm run dist` and
+CLI packaging passed. The resulting Electron archive matched 56 runtime
+files, all seven clips and 1,325 helper hashes with no private-state entries.
+Actual packaged playback, transitions, controls and X-button shutdown passed.
+[Hosted Windows checks](https://github.com/flujo-app/seagulled/actions/runs/37671625699)
+also passed tests, source export and unpacked packaging on attempt 2 after an
+initial background-video timeout. The final source tag adds this documentation
+to the tested build inputs. No account login or cloud deployment was performed.
