@@ -6,6 +6,6 @@ Download the Windows portable app from [Releases](https://github.com/flujo-app/s
 
 https://github.com/user-attachments/assets/e9a59051-38ae-480f-ab02-e69adafc685d
 
-<img width="1800" height="1260" alt="image" src="https://github.com/user-attachments/assets/51dc3f86-20e7-42e6-ad4c-76a2cb0c28fa" />
+<img width="1800" height="1260" alt="Todd’s 10×10 swarm: ten worker teams, each with one lead and nine specialists" src="docs/system-landscape.png" />
 
 This is an independent, unofficial parody interface, with a fictional Todd persona. No affiliation or endorsement is implied.
