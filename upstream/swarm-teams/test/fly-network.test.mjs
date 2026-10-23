@@ -170,7 +170,7 @@ test('legacy Worker provisioning does not opt into the private-workspace profile
   } finally { delete globalThis.__networkSdkFixture; f.close(); }
 });
 
-test('both initial Workers must confirm group membership before either starts its run template', async () => {
+test('initial Workers exceed capture concurrency but all confirm membership before templates start', async () => {
   const f = setup();
   const plans = new Map();
   const order = [];
@@ -187,7 +187,7 @@ test('both initial Workers must confirm group membership before either starts it
   try {
     const provisioner = await flyProvisioner({ flujoCloudPath: f.root, templateWorkspace: 'boot',
       source: 'http://127.0.0.1:4200', org: 'personal', network, accountRef,
-      initialWorkers: 2, concurrency: 2, captureSpacingMs: 1,
+      initialWorkers: 2, concurrency: 1, captureSpacingMs: 1,
       verifyFreshApp: async () => undefined, onPlannedApp: ({ app }) => { plans.set(app, 'planned'); order.push(`plan:${app}`); },
       onConfirmedApp: ({ app }) => { plans.set(app, 'confirmed'); order.push(`confirmed:${app}`); },
       onRetiredApp: () => undefined,

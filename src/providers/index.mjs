@@ -7,6 +7,7 @@ import { runProcess } from './process.mjs';
 import { ptyAvailable, runPty } from './pty.mjs';
 import { resolveAccountHelpers } from './helpers.mjs';
 import { PrivateH100Manager } from './private-h100.mjs';
+import { validateInferenceOptions } from '../inference-options.mjs';
 
 const NAMES = { codex: 'Codex', claude: 'Claude', antigravity: 'Antigravity', openai: 'OpenAI API', anthropic: 'Anthropic API', modal: 'Modal inference', 'private-h100': 'Private H100 + Qwen' };
 const MAX_PROMPT = 16_000;
@@ -15,6 +16,7 @@ const DEFAULT_MODEL = { openai: 'gpt-6.1-sol', anthropic: 'claude-sonnet-5-5' };
 const PRICES_PER_MILLION = { 'gpt-6-luna': [0.1, 0.5], 'gpt-6.1-sol': [2, 10], 'gpt-6-astra': [10, 50], 'claude-sonnet-5-5': [2, 10] };
 const METHOD = { codex: ['subscription'], claude: ['subscription'], antigravity: [], openai: ['key'], anthropic: ['key'], modal: ['key'], 'private-h100': [] };
 const FLEET_MODEL = {
+  codex: { provider: 'codex', adapter: 'codex-cli', apiKey: '', baseUrl: '' },
   openai: { baseUrl: 'https://api.openai.com/v1', provider: 'openai', adapter: 'openai-responses' },
   anthropic: { baseUrl: 'https://api.anthropic.com', provider: 'anthropic', adapter: 'anthropic' },
 };
@@ -125,8 +127,17 @@ export class ProviderManager {
     renameSync(temp, path);
   }
 
-  async #probe(command, args, timeoutMs = 4000) {
-    try { return await this.commandRunner(command, args, { timeoutMs, maxBytes: 8_000, env: this.env }); }
+  #nativeEnv() {
+    const env = { ...this.env };
+    for (const key of Object.keys(env)) {
+      if ((/KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL|AUTH/i.test(key) && key !== 'CODEX_HOME')
+        || /^(?:ANTHROPIC_|OPENAI_|AWS_|GOOGLE_|CLAUDE_CODE_USE_|CODEX_(?:PERMISSION_PROFILE|TASK_WORKSPACE_VERIFYING_IDENTITY|THREAD_ID|SESSION_ID|CI|INTERNAL_ORIGINATOR_OVERRIDE))/i.test(key)) delete env[key];
+    }
+    return env;
+  }
+
+  async #probe(command, args, timeoutMs = 4000, env = this.env) {
+    try { return await this.commandRunner(command, args, { timeoutMs, maxBytes: 8_000, env }); }
     catch { return null; }
   }
 
@@ -339,7 +350,7 @@ export class ProviderManager {
           || !['PERSONAL', 'SHARED'].includes(details.Type)) return organizationUnavailable();
         if (details.Type === 'PERSONAL') personal.push(details);
       }
-      if (personal.length !== 1 || !Array.isArray(personal[0].Apps?.Nodes)) return organizationUnavailable();
+      if (personal.length !== 1 || !await this.#verifyFlyOrgInventory(personal[0], env, signal)) return organizationUnavailable();
       if (await this.#flyIdentity(scope, signal) !== accountEmail) {
         return unavailable('Fly account changed while verifying its organization.');
       }
@@ -395,7 +406,7 @@ export class ProviderManager {
         if (details.Type === 'PERSONAL') personal.push(details);
       }
       if (personal.length !== 1 || personal[0].Slug !== lease.orgSlug
-        || !Array.isArray(personal[0].Apps?.Nodes)) throw changed();
+        || !await this.#verifyFlyOrgInventory(personal[0], env, signal)) throw changed();
       if (await this.#flyIdentity(lease.scope, signal) !== email) throw changed();
       if (signal?.aborted) throw cancelled('not_applied');
       return true;
@@ -405,23 +416,44 @@ export class ProviderManager {
     }
   }
 
+  async #verifyFlyOrgInventory(org, env, signal) {
+    if (Array.isArray(org.Apps?.Nodes)) return true;
+    // flyctl orgs show does not query Apps. Null is not an empty inventory:
+    // obtain a fresh explicit org-scoped listing before admitting this identity.
+    if (org.Apps?.Nodes !== null) return false;
+    const result = await this.commandRunner(this.authHelpers.fly.command,
+      ['apps', 'list', '--org', org.Slug, '--json'],
+      {signal, timeoutMs:10_000, maxBytes:8*1024*1024, env});
+    const apps = result?.code === 0 ? json(result.stdout) : null;
+    return Array.isArray(apps) && apps.length <= 1000 && apps.every(app =>
+      app && typeof app === 'object' && typeof app.Name === 'string'
+      && /^[a-z0-9][a-z0-9-]{0,62}$/.test(app.Name)
+      && (!app.Organization?.Slug || app.Organization.Slug === org.Slug));
+  }
+
   async flyFleetLease(options) { return this.flyAccountLease(options); }
 
   async discover() {
     const [codex, codexAuth, claude, claudeAuth, antigravity] = await Promise.all([
       this.#probe(this.commands.codex, ['--version']),
-      this.#probe(this.commands.codex, ['login', 'status']),
+      this.#probe(this.commands.codex, ['login', 'status'], 4000, this.#nativeEnv()),
       this.#probe(this.commands.claude, ['--version']),
-      this.#probe(this.commands.claude, ['auth', 'status']),
+      this.#probe(this.commands.claude, ['auth', 'status'], 4000, this.#nativeEnv()),
       this.#probe(this.commands.antigravity, ['--version']),
     ]);
-    this.detected.set('codex', { installed: codex?.code === 0, loggedIn: codexAuth?.code === 0 });
+    const codexSubscription = codexAuth?.code === 0 && /Logged in using ChatGPT/i.test(`${codexAuth.stdout ?? ''}\n${codexAuth.stderr ?? ''}`);
+    this.detected.set('codex', { installed: codex?.code === 0, loggedIn: codexSubscription,
+      otherAuth: codexAuth?.code === 0 && !codexSubscription });
     const auth = json(claudeAuth?.stdout);
-    this.detected.set('claude', { installed: claude?.code === 0, loggedIn: claudeAuth?.code === 0 && auth?.loggedIn === true, blocked: this.detected.get('claude')?.blocked ?? false });
+    const claudeSubscription = claudeAuth?.code === 0 && auth?.loggedIn === true && auth.authMethod === 'claude.ai';
+    this.detected.set('claude', { installed: claude?.code === 0, loggedIn: claudeSubscription,
+      otherAuth: claudeAuth?.code === 0 && auth?.loggedIn === true && !claudeSubscription,
+      blocked: this.detected.get('claude')?.blocked ?? false });
     this.detected.set('antigravity', { installed: antigravity?.code === 0, loggedIn: false });
     for (const id of ['codex', 'claude']) {
       if (this.detected.get(id)?.loggedIn && !this.detected.get(id)?.blocked && !this.explicitlyDisconnected.has(id) && !this.connected.has(id)) {
-        this.connected.set(id, { method: 'subscription', model: this.saved[id]?.model });
+        this.connected.set(id, { method: 'subscription', model: this.saved[id]?.model,
+          ...(id === 'codex' ? { fleetAllowed: this.saved[id]?.fleetAllowed === true } : {}) });
       }
     }
     for (const [id, envKey] of [['openai', this.env.OPENAI_API_KEY], ['anthropic', this.env.ANTHROPIC_API_KEY], ['modal', this.env.MODAL_PROXY_TOKEN]]) {
@@ -459,7 +491,7 @@ export class ProviderManager {
       const keyAvailable = id === 'openai' ? Boolean(this.env.OPENAI_API_KEY) : id === 'anthropic' ? Boolean(this.env.ANTHROPIC_API_KEY) : id === 'modal' ? Boolean(this.env.MODAL_PROXY_TOKEN) : false;
       let detail;
       if (id === 'antigravity') detail = detected?.installed ? 'CLI found; unattended execution is unsupported.' : 'CLI not found; unattended execution is unsupported.';
-      else if (id === 'codex' || id === 'claude') detail = detected?.blocked ? 'Native sign-in exists, but subscription execution was denied. Use an API key or update native access.' : detected?.loggedIn ? 'Native sign-in found; execution is verified on first run. Subscription usage is separate from API billing.' : detected?.installed ? 'Sign in through the native app or CLI first.' : 'CLI not installed.';
+      else if (id === 'codex' || id === 'claude') detail = detected?.blocked ? 'Native sign-in exists, but subscription execution was denied. Use an API key or update native access.' : detected?.loggedIn ? 'Native subscription sign-in found; execution is verified on first run. Subscription usage is separate from API billing.' : detected?.otherAuth ? 'Native login exists, but subscription authentication is not verified. Connect the subscription account.' : detected?.installed ? 'Sign in through the native app or CLI first.' : 'CLI not installed.';
       else if (apiBlocked) detail = apiBlocked;
       else if (id === 'modal') detail = 'Requires a Modal inference Proxy Token and an available endpoint model. Modal account tokens are not inference tokens.';
       else detail = 'Requires an API key; API billing is separate from CLI subscriptions.';
@@ -468,11 +500,22 @@ export class ProviderManager {
     });
   }
 
-  fleetRoute(providerId, goalId) {
+  fleetRoute(providerId, goalId, inference = {}) {
     if (providerId === 'private-h100') return this.privateH100.fleetRoute(goalId);
     if (!Object.hasOwn(NAMES, providerId)) return { available: false, detail: 'Unknown provider.' };
     if (this.apiBlocked.has(providerId)) return { available: false, detail: this.apiBlocked.get(providerId) };
-    if (providerId === 'codex' || providerId === 'claude') return { available: false, detail: 'Native subscription credentials are not qualified for isolated FLUJO workers.' };
+    if (providerId === 'codex') {
+      const detected = this.detected.get(providerId), connection = this.connected.get(providerId);
+      if (!detected?.installed || !detected.loggedIn || detected.blocked || this.explicitlyDisconnected.has(providerId)
+        || connection?.method !== 'subscription' || connection.fleetAllowed !== true) {
+        return { available: false, detail: 'Connect Codex and allow its login in isolated FLUJO Workers.' };
+      }
+      const choices = validateInferenceOptions(inference);
+      return { available: true, providerId, model: { ...FLEET_MODEL.codex,
+        name: choices.model ?? connection.model ?? 'gpt-6-luna', reasoningEffort: choices.reasoningEffort ?? 'medium' },
+        verification: 'unverified', costPolicy: 'subscription-and-pending-cloud', authTransfer: 'encrypted-workspace-snapshot' };
+    }
+    if (providerId === 'claude') return { available: false, detail: 'Native subscription credentials are not qualified for isolated FLUJO workers.' };
     if (providerId === 'antigravity') return { available: false, detail: 'Unattended Antigravity execution is unsupported.' };
     if (providerId === 'modal') return { available: false, detail: 'Modal inference is available locally, but its FLUJO worker adapter is unqualified.' };
     const connection = this.connected.get(providerId);
@@ -488,7 +531,8 @@ export class ProviderManager {
     };
   }
 
-  async connect({ id, method, key, model, fleetAllowed = false } = {}) {
+  async connect({ id, method, key, model, fleetAllowed = false, signal } = {}) {
+    if (signal?.aborted) throw cancelled('not_applied');
     if (!Object.hasOwn(NAMES, id)) throw new Error('Unknown provider.');
     if (id === 'private-h100') throw new Error('Use the private H100 switch and its bounded account flow.');
     if (method === 'oauth' || method === 'login') throw new Error('Use the provider’s native sign-in. This app does not handle OAuth tokens.');
@@ -501,13 +545,15 @@ export class ProviderManager {
       if (!this.detected.get(id)?.installed) throw new Error(`${NAMES[id]} CLI is not installed.`);
       if (!this.detected.get(id)?.loggedIn) {
         const args = id === 'codex' ? ['login'] : ['auth', 'login', '--claudeai'];
-        const login = await this.#probe(this.commands[id], args, 90_000);
+        const login = await this.commandRunner(this.commands[id], args, { signal, timeoutMs: 300_000,
+          maxBytes: 64_000, env: this.#nativeEnv(), killTree: true });
         await this.discover();
         if (login?.code !== 0 || !this.detected.get(id)?.loggedIn) throw new Error(`${NAMES[id]} sign-in was not completed. Try Connect again after finishing the provider browser sign-in.`);
       }
+      if (signal?.aborted) throw cancelled('not_applied');
       this.explicitlyDisconnected.delete(id);
-      this.connected.set(id, { method, model });
-      this.saved[id] = { method, model }; this.#save();
+      this.connected.set(id, { method, model, ...(id === 'codex' ? { fleetAllowed } : {}) });
+      this.saved[id] = { method, model, ...(id === 'codex' ? { fleetAllowed } : {}) }; this.#save();
       return this.publicState().find((item) => item.id === id);
     }
     const supplied = typeof key === 'string' ? key.trim() : '';
@@ -545,7 +591,8 @@ export class ProviderManager {
     return this.publicState().find((item) => item.id === id);
   }
 
-  async run({ providerId, prompt, signal, onEvent, maxUsd, role, goalId, requestId } = {}) {
+  async run({ providerId, prompt, signal, onEvent, maxUsd, role, goalId, requestId, model, reasoningEffort } = {}) {
+    const inference = validateInferenceOptions({model, reasoningEffort});
     if (!positiveBudget(maxUsd)) throw notApplied('Remaining budget must be positive.');
     if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > MAX_PROMPT) throw notApplied('Prompt is empty or too long.');
     if (this.apiBlocked.has(providerId)) throw unavailable(this.apiBlocked.get(providerId));
@@ -557,7 +604,7 @@ export class ProviderManager {
     const result = providerId === 'private-h100'
       ? await this.privateH100.run({ prompt: fullPrompt, signal, maxUsd, goalId, requestId })
       : connection.method === 'subscription'
-      ? await this.#runCli(providerId, connection, fullPrompt, { signal, maxUsd, goalId, role })
+      ? await this.#runCli(providerId, {...connection,...inference}, fullPrompt, { signal, maxUsd, goalId, role })
       : await this.#runApi(providerId, connection, fullPrompt, { signal, maxUsd });
     onEvent?.({ type: 'message', text: result.text });
     onEvent?.({ type: 'usage', usage: result.usage });
@@ -581,8 +628,9 @@ export class ProviderManager {
         const args = ['exec', '--json', '--ephemeral', '--ignore-user-config', '--ignore-rules', '--sandbox', 'read-only', '--skip-git-repo-check', '-c', 'shell_environment_policy.ignore_default_excludes=false'];
         if (ownedWorkspace) args.push('-C', cwd);
         if (connection.model) args.push('--model', connection.model);
+        if (connection.reasoningEffort) args.push('-c', `model_reasoning_effort="${connection.reasoningEffort}"`);
         args.push('-');
-        const env = { ...this.env };
+        const env = this.#nativeEnv();
         for (const key of Object.keys(env)) {
           if (/KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL|AUTH/i.test(key) && key !== 'CODEX_HOME') delete env[key];
           if (/^CODEX_(?:PERMISSION_PROFILE|TASK_WORKSPACE_VERIFYING_IDENTITY|THREAD_ID|SESSION_ID|CI|INTERNAL_ORIGINATOR_OVERRIDE)$/i.test(key)) delete env[key];
@@ -607,7 +655,7 @@ export class ProviderManager {
       if (Number.isFinite(maxUsd)) args.push('--max-budget-usd', String(Math.min(maxUsd, 100)));
       if (connection.model) args.push('--model', connection.model);
       const result = await this.commandRunner(this.commands.claude, args, { cwd, input: prompt, signal,
-        timeoutMs: 120_000, maxBytes: 256_000, env: this.env, killTree: true });
+        timeoutMs: 120_000, maxBytes: 256_000, env: this.#nativeEnv(), killTree: true });
       const body = json(result.stdout);
       if (result.code !== 0 || body?.is_error) {
         if (/disabled.*subscription access|subscription access.*disabled/i.test(String(body?.result ?? ''))) this.detected.set('claude', { ...this.detected.get('claude'), blocked: true });

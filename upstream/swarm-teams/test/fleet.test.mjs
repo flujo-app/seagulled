@@ -87,6 +87,37 @@ test('registry enforces worker count, depth and fan-out', () => {
   assert.equal(registry.reserve({ goalId: goal.id, parentId: a.id }).worker.depth, 2, 'a retired Worker frees its slot');
 });
 
+test('worker activity observes real dispatch/retirement without leaking targets or reviving late completions', async () => {
+  const {controller,model,flujo,close}=await fixture({delayMs:150});
+  const events=[];controller.onActivity=event=>events.push(event);
+  try{
+    const goal=await controller.createGoal({text:'Offline activity fixture',supervisor:{origin:flujo.origin,workspace:'default'},model,start:false});
+    const root=controller.registry.worker(goal.supervisorId);
+    const child=controller.delegate(root,{name:'branch',task:'Offline request'});
+    for(let i=0;i<100&&!events.some(e=>e.status==='dispatching');i++)await new Promise(resolve=>setTimeout(resolve,5));
+    assert.ok(events.some(e=>e.workerId===child.workerId&&e.status==='provisioning'));
+    assert.ok(events.some(e=>e.workerId===child.workerId&&e.status==='ready'));
+    assert.ok(events.some(e=>e.workerId===child.workerId&&e.status==='dispatching'));
+    await controller.retire('operator',{workerId:child.workerId});
+    await controller.settled.get(child.runId);
+    assert.equal(events.at(-1).status,'retired');
+    assert.ok(events.some(e=>e.status==='retiring'));
+    assert.ok(events.every(e=>Object.keys(e).sort().join(',')==='depth,parentId,status,workerId'));
+    assert.ok(!JSON.stringify(events).includes(flujo.origin));
+  }finally{await close();}
+});
+
+test('failed activity observers do not alter the original flow or retirement', async () => {
+  const {controller,model,flujo,close}=await fixture();controller.onActivity=()=>{throw new Error('observer fixture');};
+  try{
+    const goal=await controller.createGoal({text:'Observer failure fixture',supervisor:{origin:flujo.origin,workspace:'default'},model,start:false});
+    const child=controller.delegate(controller.registry.worker(goal.supervisorId),{name:'branch',task:'One original request'});
+    const settled=await controller.waitRun('operator',{runId:child.runId});assert.equal(settled.state,'completed');
+    assert.equal(flujo.state.runs.length,1);await controller.retire('operator',{workerId:child.workerId});
+    assert.equal(controller.registry.worker(child.workerId).state,'retired');
+  }finally{await close();}
+});
+
 test('registry survives a restart and marks in-flight runs unknown instead of replaying them', () => {
   const file = temporary();
   const first = new Registry(file);

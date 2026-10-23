@@ -48,6 +48,8 @@ export async function createServer({ runtime, port = 0, uiDir = uiRoot } = {}) {
         const artifactMatch = /^\/api\/goals\/([^/]+)\/artifacts\/([^/]+)\/(\d+)$/.exec(url.pathname);
         if (artifactMatch && req.method === 'GET') return send(200, runtime.readArtifact(decodeURIComponent(artifactMatch[1]), decodeURIComponent(artifactMatch[2]), Number(artifactMatch[3])));
         const input = ['POST', 'PATCH'].includes(req.method) ? await body(req, url.pathname === '/api/voice/transcribe' ? 2_900_000 : 100000) : {};
+        if (url.pathname === '/api/budget/plan' && req.method === 'POST') return send(200, runtime.planSwarm(input));
+        if (url.pathname === '/api/setup' && req.method === 'POST') return send(200, await runtime.completeSetup(input));
         if (url.pathname === '/api/auth/connect' && req.method === 'POST') return send(200, await runtime.authConnect(input));
         if (url.pathname === '/api/auth/cancel' && req.method === 'POST') return send(200, await runtime.authCancel());
         if (url.pathname === '/api/voice/transcribe' && req.method === 'POST') return send(200, await runtime.transcribeAudio(input));
@@ -59,6 +61,7 @@ export async function createServer({ runtime, port = 0, uiDir = uiRoot } = {}) {
         let match = /^\/api\/providers\/([^/]+)$/.exec(url.pathname);
         if (match && req.method === 'DELETE') return send(200, await runtime.disconnect(decodeURIComponent(match[1])));
         match = /^\/api\/goals\/([^/]+)(?:\/(pause|resume|stop))?$/.exec(url.pathname);
+        if (match && req.method === 'DELETE' && !match[2]) return send(200, await runtime.deleteGoal(decodeURIComponent(match[1])));
         if (match && req.method === 'PATCH' && !match[2]) return send(200, await runtime.updateGoal(decodeURIComponent(match[1]), input));
         if (match && req.method === 'POST' && match[2]) return send(200, await runtime.controlGoal(decodeURIComponent(match[1]), match[2]));
         match = /^\/api\/swarm\/(pause|resume|stop)$/.exec(url.pathname);
