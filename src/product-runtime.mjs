@@ -5,13 +5,13 @@ import {pathToFileURL} from 'node:url';
 
 const require = createRequire(import.meta.url);
 const unpacked = file => file.replace(/([\\/])app\.asar([\\/])/, '$1app.asar.unpacked$2');
-export const PRODUCT_WORKER_IMAGE = 'ghcr.io/mario-andreschak/flujo@sha256:05291a19605d276b7e2fd9e0a10790ac6a20d13439deea5f91b247fe821f2621';
+export const PRODUCT_WORKER_IMAGE = 'ghcr.io/mario-andreschak/flujo@sha256:d736dc60c548e5a924c4f50ee5763fb4d602971ac0147ed09cf8f13e677c7acf';
 
 /** Retain the SDK's source/capability checks and bind their result to this release. */
 export function productImageResolver(cloudSdkRoot) {
   return async input => {
     const {resolveWorkerImage}=await import(pathToFileURL(path.join(cloudSdkRoot,'lib','images.mjs')).href);
-    const resolved=await resolveWorkerImage({...input,channel:'3.48.0'});
+    const resolved=await resolveWorkerImage({...input,channel:'3.48.1'});
     if(resolved.image!==PRODUCT_WORKER_IMAGE)throw Object.assign(new Error('The published Worker image changed; update Seagulled before running this goal.'),{code:'IMAGE_IDENTITY',outcome:'not_applied'});
     return resolved;
   };

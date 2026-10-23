@@ -9,6 +9,7 @@ npm ci
 $env:SEAGULLED_MEDIA_DIR = Join-Path (Get-Location) 'ui/journey-media'
 npm run check
 npm test
+$env:ELECTRON_BUILDER_COMPRESSION_LEVEL = '1'
 npm run dist
 ```
 
@@ -18,7 +19,7 @@ the committed SHA256 locks. Dialogue assets must match the seven-file media
 lock. No credentials, account files, conversations or runtime database are
 needed for the build. Keep personal runtime data outside this source tree.
 
-Production dependencies resolve from the lock: FLUJO 3.48.0 from npm, FACTORY
+Production dependencies resolve from the lock: FLUJO 3.48.1 from npm, FACTORY
 0.3.0 and flujo-cloud 0.2.0 from their versioned public GitHub releases. FACTORY
 uses its public SDK exports; no private compatibility package is needed.
 The Electron package unpacks dependencies so its bundled Node can start FLUJO

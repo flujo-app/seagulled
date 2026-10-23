@@ -145,8 +145,10 @@
   "productDependencies": {
     "flujo": {
       "name": "flujo-ai",
-      "version": "3.48.0",
-      "distribution": "npm"
+      "version": "3.48.1",
+      "distribution": "npm",
+      "sourceRevision": "7a48a7bb3903feda12232d5634337b408707ea7c",
+      "workerImage": "ghcr.io/mario-andreschak/flujo@sha256:d736dc60c548e5a924c4f50ee5763fb4d602971ac0147ed09cf8f13e677c7acf"
     },
     "factory": {
       "name": "flujo-factory",

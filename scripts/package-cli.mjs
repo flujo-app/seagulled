@@ -29,8 +29,8 @@ const bundled = Object.keys(pkg.dependencies);
 pkg.bundleDependencies = bundled;
 writeFileSync(path.join(source, 'package.json'), JSON.stringify(pkg, null, 2) + '\n');
 const npm = args => execFileSync(process.execPath, [npmCli, ...args],
-  { cwd: source, encoding: 'utf8', windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
-npm(['ci', '--ignore-scripts', '--no-audit', '--no-fund']);
+  { cwd: source, encoding: 'utf8', windowsHide: true, maxBuffer: 64 * 1024 * 1024 });
+npm(['ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund']);
 const [packed] = JSON.parse(npm(['pack', '--ignore-scripts', '--json']));
 const forbidden = /(?:^|\/)(?:\.private|__pycache__)\/|(?:^|\/)(?:\.env(?:\.|$)|state\.json|session\.json|runtime\.lock|modal\.toml|auth\.json)|\.pyc$/;
 assert.deepEqual(packed.files.filter(file => !file.path.startsWith('node_modules/') && forbidden.test(file.path)), [], 'Private state entered the CLI package.');
@@ -79,9 +79,10 @@ execFileSync(process.execPath, ['--input-type=module', '--eval', smoke],
   {env, windowsHide:true, timeout:120000, maxBuffer:8 * 1024 * 1024});
 const output = path.join(root, 'release');
 mkdirSync(output, { recursive: true });
-const target = path.join(output, `Seagulled-${pkg.version}-${commit.slice(0, 7)}-cli.tgz`);
+const target = path.join(output, `Seagulled-${pkg.version}-${process.platform}-${process.arch}-${commit.slice(0, 7)}-cli.tgz`);
 copyFileSync(archive, target, constants.COPYFILE_EXCL);
 const receipt = { sourceCommit: commit, version: pkg.version, artifact: path.basename(target),
+  platform:process.platform, arch:process.arch,
   bytes: statSync(target).size, sha256: createHash('sha256').update(readFileSync(target)).digest('hex'),
   entries: packed.entryCount, bundled, cleanGitExport: true, standaloneCli: true,
   lifecycleScriptsExecuted: false, factoryLedger:true, localFlujoStartup:true,
