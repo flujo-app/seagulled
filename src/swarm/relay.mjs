@@ -5,10 +5,10 @@ import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { importCloudSdk } from './cloud-sdk.mjs';
-import { startRelayAgent } from '@flujo-app/swarm-teams/fleet/relay.mjs';
+import { startRelayAgent } from '../../upstream/swarm-teams/fleet/relay.mjs';
 import { assertAppNetwork, assertFreshAppName, assertProductNetwork, readFlyOrgApps } from './fly-network.mjs';
 
-const RELAY_SOURCE = fileURLToPath(import.meta.resolve('@flujo-app/swarm-teams/fleet/relay.mjs'));
+const RELAY_SOURCE = fileURLToPath(import.meta.resolve('../../upstream/swarm-teams/fleet/relay.mjs'));
 // Ten waiting team leads must leave room for all ninety child conversations.
 export const PRODUCT_RELAY_LIMITS = Object.freeze({ maxConcurrentServes: 128 });
 const API = 'https://api.machines.dev/v1';
@@ -80,6 +80,20 @@ export async function createOwnedRelay({ journalPath, flujoCloudPath, org, netwo
   const request = async (method, suffix, body) => fetchImpl(`${API}${suffix}`, { method,
     headers: { Authorization: `Bearer ${token}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
     ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(30_000) });
+  const assertOrganization = async (details) => {
+    if (details.organization?.slug === org) return;
+    const numericId = details.organization?.internal_numeric_id;
+    if (!Number.isSafeInteger(numericId) || numericId < 1) {
+      throw new Error('Relay app organization identity is unconfirmed.');
+    }
+    let selected;
+    try { selected = JSON.parse(await fly.run(['orgs', 'show', org, '--json'])); }
+    catch { throw new Error('Selected Fly organization identity is unconfirmed.'); }
+    if (selected?.Slug !== org || !/^[1-9][0-9]*$/.test(String(selected.InternalNumericID ?? ''))
+      || String(selected.InternalNumericID) !== String(numericId)) {
+      throw new Error('Relay app organization identity changed; preserve its private intent.');
+    }
+  };
   const stopTransport = async () => {
     await agent?.stop();
     if (proxy) { proxy.stdin.end(); proxy.kill(); proxy = undefined; }
@@ -89,9 +103,10 @@ export async function createOwnedRelay({ journalPath, flujoCloudPath, org, netwo
     if (response.status === 404) return false;
     if (response.status !== 200 || !state.appId) throw new Error('Relay app identity is unconfirmed.');
     const details = await response.json();
-    if (details.id !== state.appId || details.name !== app || details.organization?.slug !== org) {
+    if (details.id !== state.appId || details.name !== app) {
       throw new Error('Relay app identity changed; preserve the journal without deleting this app.');
     }
+    await assertOrganization(details);
     assertAppNetwork(await readFlyOrgApps({ org, token, fetchImpl }), { app, appId: state.appId, network });
     if (!state.ownershipConfirmed) throw new Error('Relay app ownership marker was not confirmed.');
     const secrets = flyArray(await fly.run(['secrets', 'list', '--app', app, '--json']), 'secret');
@@ -155,9 +170,10 @@ export async function createOwnedRelay({ journalPath, flujoCloudPath, org, netwo
     const details = await request('GET', `/apps/${app}`);
     if (details.status !== 200) throw new Error('New relay app readback is unavailable.');
     const value = await details.json();
-    if (typeof value.id !== 'string' || !value.id || value.name !== app || value.organization?.slug !== org) {
+    if (typeof value.id !== 'string' || !value.id || value.name !== app) {
       throw new Error('New relay app identity could not be confirmed.');
     }
+    await assertOrganization(value);
     record({ appId: value.id, state: 'marking-app' });
     assertAppNetwork(await readFlyOrgApps({ org, token, fetchImpl }), { app, appId: value.id, network });
     await verifyNetwork?.({ allowPending: true });
@@ -188,12 +204,22 @@ export async function createOwnedRelay({ journalPath, flujoCloudPath, org, netwo
         const binary = flyctlPath ?? flyEnv?.FLYCTL_PATH ?? process.env.FLYCTL_PATH ?? 'flyctl';
         proxy = spawnImpl(binary, ['proxy', `${port}:4300`, `${machine.id}.vm.${app}.internal`,
           '--app', app, '--org', org, '--bind-addr', '127.0.0.1', '--watch-stdin', '--quiet'],
-        { windowsHide: true, shell: false, stdio: ['pipe', 'ignore', 'ignore'], ...(flyEnv ? { env: flyEnv } : {}) });
+        { windowsHide: true, shell: false, stdio: ['pipe', 'ignore', 'pipe'], ...(flyEnv ? { env: flyEnv } : {}) });
+        let proxyDiagnostic = '';
+        proxy.stderr?.on('data', (chunk) => {
+          proxyDiagnostic = (proxyDiagnostic + String(chunk)).slice(-8192);
+        });
+        const preserveProxyDiagnostic = () => {
+          if (proxyDiagnostic) writeFileSync(`${journalPath}.proxy-stderr`, proxyDiagnostic, { mode: 0o600 });
+        };
         let exited = false;
         proxy.on('error', () => { exited = true; });
         proxy.on('exit', () => { exited = true; });
         for (let attempt = 0; attempt < 40; attempt++) {
-          if (exited) throw new Error('Owned relay proxy exited before readiness.');
+          if (exited) {
+            preserveProxyDiagnostic();
+            throw new Error('Owned relay proxy exited before readiness.');
+          }
           const healthy = await fetchImpl(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1000) })
             .then((res) => res.status === 200, () => false);
           if (healthy) {
@@ -202,6 +228,7 @@ export async function createOwnedRelay({ journalPath, flujoCloudPath, org, netwo
           }
           await sleep(250);
         }
+        preserveProxyDiagnostic();
         throw new Error('Owned relay proxy did not become ready.');
       },
       close: stopTransport,

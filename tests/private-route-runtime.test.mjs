@@ -19,7 +19,7 @@ test('large requested topology persists and H100 is never selected without its e
   const ordinary = await runtime.chat('Build an ordinary project.');
   assert.equal(ordinary.budgetUsd, 50); assert.equal(ordinary.maxWorkers, 10);
   assert.equal(ordinary.conversationsPerWorker, 10); assert.equal(ordinary.agentsPerWorker, 9);
-  assert.equal(ordinary.workerTopologyVersion, 3);
+  assert.equal(ordinary.workerTopologyVersion, 2);
   assert.equal(ordinary.privateH100, false); assert.equal(ordinary.providerId, null); assert.equal(executions, 0);
   assert.equal(runtime.snapshot().goals[0].status, 'queued');
   await assert.rejects(runtime.chat('Bypass the switch.', { providerId: 'private-h100' }), /Enable private/);

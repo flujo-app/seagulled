@@ -132,7 +132,7 @@ test('an already aborted goal creates no registry work', async () => {
 });
 
 test('invalid worker and per-worker agent settings create no provider or registry work', async () => {
-  for (const patch of [{ maxWorkers: 7 }, { maxWorkers: 1.5 }, { conversationsPerWorker: 0 },
+  for (const patch of [{ maxWorkers: 101 }, { maxWorkers: 1.5 }, { conversationsPerWorker: 0 },
     { conversationsPerWorker: 11 }, { agentsPerWorker: 11 }, { agentsPerWorker: '3' }]) {
     const providers = manager([]);
     const swarm = new SwarmCoordinator({ providers, dataDir: directory() });
@@ -188,7 +188,7 @@ test('six calls across a correction cycle end in Todd review without extra submi
   assert.equal(providers.calls.length, 6);
 });
 
-test('one isolated Fly developer receipt holds further paid review while cloud allowance is unknown', async () => {
+test('company execution preserves pending cloud spend and performs no desktop inference', async () => {
   const providers = manager([
     JSON.stringify({ done: false, tasks: [{ task: 'Measure a worker' }] }),
   ]);
@@ -205,15 +205,20 @@ test('one isolated Fly developer receipt holds further paid review while cloud a
       fleetCalls.push(input);
       assert.equal(await input.assertFlyAccountCurrent(input.flyAccount), true);
       input.onCompany({ verifiedWorkers: 6, verifiedChildConversations: 24 });
+      input.onWorker({ workerId: 'w-observed', parentId: null, depth: 1, status: 'dispatching' });
       return { available: true, text: 'Fly worker ran Node 22 and reported its output.',
         usage: { costUsd: null, costKind: 'unknown', reservedUsd: input.maxUsd, billingPending: true },
-        sandbox: { kind: 'fly', workerId: 'fictional-fly-worker', retired: true, cleanupConfirmed: true },
+        sandbox: { kind: 'fly', workerId: 'fictional-fly-worker', retired: true, cleanupConfirmed: true,
+          verification: 'original-worker-hierarchy-v1', relayUsed: true,
+          bootCleanupConfirmed: true, relayCleanupConfirmed: true, workerCount: 6, initialWorkerCount: 6,
+          localConversationCount: 24, conversationCountVerified: 30,
+          teamLeadRuns: ['r-1', 'r-2', 'r-3', 'r-4', 'r-5', 'r-6'] },
         artifacts: [{ path: '/fictional/fly-result.txt', bytes: 42, sha256: 'a'.repeat(64), kind: 'run-result' }] };
     }, onEvent: (event) => events.push(event) });
   const input = goal({ maxWorkers: 6, conversationsPerWorker: 5,
     executionMode: 'company', workerTopologyVersion: 2 });
   const admission = await admit(input);
-  await assert.rejects(swarm.execute({ goal: input, admission }), /spend is unknown/);
+  assert.equal((await swarm.execute({ goal: input, admission, observationId: 'execution-fixture' })).completed, true);
   assert.equal(fleetCalls.length, 1);
   assert.equal(fleetCalls[0].fleetRoute.providerId, 'fictional');
   assert.deepEqual(fleetCalls[0].sourceBinding, sourceBinding);
@@ -222,12 +227,14 @@ test('one isolated Fly developer receipt holds further paid review while cloud a
   assert.equal(fleetCalls[0].goal.agentsPerWorker, 4);
   assert.equal(readFileSync(path.join(dataDir, 'swarm', 'registry.json'), 'utf8').includes(privateKey), false);
   assert.equal(readFileSync(path.join(dataDir, 'swarm', 'registry.json'), 'utf8').includes(sourceBinding.cloudSdkRoot), false);
-  assert.equal(swarm.tasks('goal-one')[1].sandbox.kind, 'fly');
-  assert.equal(swarm.tasks('goal-one')[1].artifacts[0].kind, 'run-result');
-  assert.equal(events.find((event) => event.type === 'usage' && event.usage.billingPending)?.usage.reservedUsd, 4.8);
+  assert.equal(swarm.tasks('goal-one')[0].sandbox.kind, 'fly');
+  assert.equal(swarm.tasks('goal-one')[0].artifacts[0].kind, 'run-result');
+  assert.equal(events.find((event) => event.type === 'usage' && event.usage.billingPending)?.usage.reservedUsd, 5);
   assert.deepEqual(events.find((event) => event.type === 'company'), { type: 'company',
     goalId: 'goal-one', verifiedWorkers: 6, verifiedChildConversations: 24 });
-  assert.deepEqual(providers.calls.map((call) => call.role), ['lead']);
+  assert.deepEqual(events.find((event) => event.type === 'worker'), { type: 'worker', goalId: 'goal-one',
+    observationId: 'execution-fixture', worker: { workerId: 'w-observed', parentId: null, depth: 1, status: 'dispatching' } });
+  assert.equal(providers.calls.length, 0);
 });
 
 test('private Fly admission reserves the full remaining allowance before cloud work', async () => {
@@ -239,24 +246,26 @@ test('private Fly admission reserves the full remaining allowance before cloud w
     fleetRunner: async (input) => {
       assert.equal(input.goal.workerTopologyVersion, 2);
       input.reserveCloud({ id: input.reservationId, amountUsd: input.maxUsd });
-      assert.equal(events.filter((event) => event.type === 'reservation').length, 2,
-        'native lead and Fly team each have a durable before-call reservation');
+      assert.equal(events.filter((event) => event.type === 'reservation').length, 1,
+        'the remote company has a durable before-call reservation without a desktop model call');
       return { available: true, text: 'Fixture Worker result', usage: {
         costUsd: null, costKind: 'unknown', reservedUsd: input.maxUsd,
         reservationId: input.reservationId, billingPending: true },
-        sandbox: { kind: 'fly', workerCount: 5, conversationCountVerified: 25 } };
+        sandbox: { kind: 'fly', verification: 'original-worker-hierarchy-v1', relayUsed: true,
+          retired: true, cleanupConfirmed: true, bootCleanupConfirmed: true, relayCleanupConfirmed: true,
+          workerCount: 5, initialWorkerCount: 5, localConversationCount: 45, conversationCountVerified: 50,
+          teamLeadRuns: ['r-1','r-2','r-3','r-4','r-5'] } };
     }, onEvent: (event) => events.push(event) });
   const input = goal({ providerId: 'private-h100', budgetUsd: 10, maxWorkers: 5,
     workerTopologyVersion: 2, executionMode: 'company' });
   const admission = await admit(input);
-  await assert.rejects(swarm.execute({ goal: input, admission }), /spend is unknown/);
+  assert.equal((await swarm.execute({ goal: input, admission })).completed, true);
   const reservations = events.filter((event) => event.type === 'reservation').map((event) => event.reservation);
-  assert.equal(reservations.length, 2);
-  assert.equal(reservations[0].amountUsd, 2.5);
-  assert.equal(reservations[1].amountUsd, 9.8);
-  assert.equal(reservations[1].id.endsWith('-fly'), true);
-  assert.equal(events.filter((event) => event.type === 'usage' && event.usage.reservationId === reservations[1].id).length, 1);
-  assert.equal(providers.calls.length, 1, 'the developer task did not submit a direct native request');
+  assert.equal(reservations.length, 1);
+  assert.equal(reservations[0].amountUsd, 10);
+  assert.equal(reservations[0].id.endsWith('-fly'), true);
+  assert.equal(events.filter((event) => event.type === 'usage' && event.usage.reservationId === reservations[0].id).length, 1);
+  assert.equal(providers.calls.length, 0);
 });
 
 test('an unavailable or mismatched company route fails before the first provider call', async () => {
@@ -293,7 +302,7 @@ test('company account, topology, and source failure stop before lead spend or re
     && error.outcome === 'not_applied');
   assert.equal(sourceCalls, 0, 'unverified Fly identity cannot launch a source');
   providers.flyFleetLease = verifiedLease;
-  await assert.rejects(swarm.prepareCompany({ ...input, maxWorkers: 7 }, { stage: 'source' }),
+  await assert.rejects(swarm.prepareCompany({ ...input, maxWorkers: 101 }, { stage: 'source' }),
     (error) => error.reasonCode === 'capacity');
   await assert.rejects(swarm.prepareCompany(input, { stage: 'source' }), (error) =>
     error.code === 'COMPANY_UNAVAILABLE' && error.reasonCode === 'source');
@@ -354,7 +363,7 @@ test('ready stage rejects a changed verified Fly account reference before lead w
   assert.equal(swarm.registry.state.goals[input.id], undefined);
 });
 
-test('an unavailable owned fleet cannot replay the lead or substitute a local developer call', async () => {
+test('an unavailable owned fleet cannot invoke desktop inference or replay its dispatch', async () => {
   const providers = manager([JSON.stringify({ done: false, tasks: [{ task: 'Build it' }] })]);
   providers.fleetRoute = (providerId) => ({ available: true, providerId,
     model: { name: 'offline-model', apiKey: 'offline-secret' } });
@@ -368,11 +377,11 @@ test('an unavailable owned fleet cannot replay the lead or substitute a local de
   await assert.rejects(swarm.execute({ goal: input, admission }), (error) =>
     error.code === 'COMPANY_UNAVAILABLE' && error.reasonCode === 'unavailable'
     && !error.message.includes('private path'));
-  assert.deepEqual(providers.calls.map((call) => call.role), ['lead']);
+  assert.equal(providers.calls.length, 0);
   assert.equal(fleetCalls, 1);
-  assert.deepEqual(swarm.tasks(input.id).map((task) => task.status), ['completed', 'failed']);
+  assert.deepEqual(swarm.tasks(input.id).map((task) => task.status), ['failed']);
   await assert.rejects(swarm.execute({ goal: input, admission }), (error) => error.code === 'COMPANY_UNAVAILABLE');
-  assert.equal(providers.calls.length, 1);
+  assert.equal(providers.calls.length, 0);
   assert.equal(fleetCalls, 1);
 });
 
@@ -446,13 +455,14 @@ test('a genuine completed company goal remains an idempotent summary across rest
     usage: { inputTokens: 0, outputTokens: 0, costUsd: 0.1, costKind: 'estimated' },
     sandbox: { kind: 'fly', verification: 'original-worker-hierarchy-v1', relayUsed: false,
       retired: true, cleanupConfirmed: true, bootCleanupConfirmed: true, relayCleanupConfirmed: true,
-      workerCount: 1, initialWorkerCount: 1, localConversationCount: 4,
-      conversationCountVerified: 5, teamLeadRuns: ['original-run'] },
+      workerCount: 1, initialWorkerCount: 1, localConversationCount: 9,
+      conversationCountVerified: 10, teamLeadRuns: ['original-run'] },
   }) });
   const input = goal({ executionMode: 'company', workerTopologyVersion: 2 });
   const admission = await admit(input);
   const first = await swarm.execute({ goal: input, admission });
-  assert.equal(first.text, 'Owned company result reviewed.');
+  assert.equal(first.text, 'Owned Worker completed its task.');
+  assert.equal(providers.calls.length, 0, 'company result does not launch a desktop reviewer');
   assert.equal(swarm.registry.goal(input.id).executionMode, 'company');
   assert.equal(swarm.registry.goal(input.id).workerTopologyVersion, 2);
   const calls = providers.calls.length;
@@ -472,7 +482,7 @@ test('a genuine completed company goal remains an idempotent summary across rest
   assert.equal(providers.calls.length, calls, 'missing original proof cannot cause replay');
 });
 
-test('a lead done:true cannot complete a new company before the owned Worker runs', async () => {
+test('desktop planner output is never consulted before the owned Worker runs', async () => {
   const providers = manager([JSON.stringify({ done: true, response: 'Host lead says done.' })]);
   providers.fleetRoute = (providerId) => ({ available: true, providerId,
     model: { name: 'offline-model', apiKey: 'offline-secret' } });
@@ -487,9 +497,9 @@ test('a lead done:true cannot complete a new company before the owned Worker run
   await assert.rejects(swarm.execute({ goal: input, admission }),
     (error) => error.code === 'COMPANY_UNAVAILABLE');
   assert.equal(workerCalls, 1);
-  assert.deepEqual(providers.calls.map((call) => call.role), ['lead']);
+  assert.equal(providers.calls.length, 0);
   assert.equal(swarm.registry.goal(input.id).state, 'active');
-  assert.deepEqual(swarm.tasks(input.id).map((task) => task.status), ['completed', 'failed']);
+  assert.deepEqual(swarm.tasks(input.id).map((task) => task.status), ['failed']);
 });
 
 test('completed initial Workers plus verified subworkers count as one bounded company', async () => {
@@ -511,7 +521,8 @@ test('completed initial Workers plus verified subworkers count as one bounded co
   const input = goal({ executionMode: 'company', workerTopologyVersion: 2, maxWorkers: 5,
     conversationsPerWorker: 5, agentsPerWorker: 4 });
   const admission = await admit(input);
-  assert.equal((await swarm.execute({ goal: input, admission })).text, 'Company tree verified.');
+  assert.equal((await swarm.execute({ goal: input, admission })).text, 'Seven original Worker runs completed.');
+  assert.equal(providers.calls.length, 0);
   assert.equal(swarm.registry.goal(input.id).state, 'done');
 });
 
@@ -570,9 +581,10 @@ test('10x10 completion requires exact completed hierarchy proof and preserves or
       assert.equal((await swarm.execute({ goal: input, admission })).completed, true);
       const reopened = new SwarmCoordinator({ providers, dataDir });
       const calls = providers.calls.length;
-      assert.equal((await reopened.execute({ goal: input })).text, 'Offline company proof accepted.');
+      assert.equal((await reopened.execute({ goal: input })).text, 'Offline fixture result.');
       await assert.rejects(reopened.execute({ goal: { ...input, workerTopologyVersion: 2 } }));
       assert.equal(providers.calls.length, calls, 'original provider calls are never replayed');
+      assert.equal(calls, 0, 'company execution never consults the desktop planner fixture');
     }
   }
 });

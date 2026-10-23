@@ -1,6 +1,6 @@
 {
   "name": "seagulled",
-  "version": "0.2.0-rc.1",
+  "version": "0.2.0",
   "description": "Talk to Todd. He puts a company of agents on your goal, then comes back to judge the work.",
   "type": "module",
   "main": "electron/main.mjs",
@@ -8,19 +8,43 @@
     "seagulled": "bin/seagulled.mjs"
   },
   "engines": {
-    "node": ">=22"
+    "node": "^24.22.1"
   },
+  "files": [
+    "bin/**/*",
+    "src/**/*",
+    "electron/**/*",
+    "ui/**/*",
+    "!**/__pycache__/**",
+    "!**/*.pyc",
+    "upstream/swarm-teams/fleet/**/*",
+    "upstream/swarm-teams/lib/**/*",
+    "upstream/swarm-teams/template/**/*",
+    "upstream/swarm-teams/install.mjs",
+    "upstream/swarm-teams/swarm.mjs",
+    "upstream/factory/receipts.mjs",
+    "docs/provenance.json",
+    "docs/helpers-lock.json",
+    "docs/journey-media-lock.json",
+    "scripts/check-release.mjs",
+    "scripts/prepare-helpers.mjs",
+    "scripts/prepare-journey-media.mjs",
+    "scripts/prepare-product-node.mjs",
+    "docs/product-node-lock.json",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
+  ],
   "scripts": {
     "start": "electron .",
     "cli": "node bin/seagulled.mjs",
     "dev": "node bin/seagulled.mjs serve",
-    "test": "node --test tests/*.test.mjs",
+    "test": "node --test tests/*.test.mjs upstream/swarm-teams/test/fleet.test.mjs upstream/swarm-teams/test/recovery.test.mjs upstream/swarm-teams/test/diagnostics-guard.test.mjs upstream/swarm-teams/test/specialists.test.mjs upstream/swarm-teams/test/flujo-client-cancellation.test.mjs upstream/swarm-teams/test/fly-network.test.mjs",
     "package": "electron-builder --dir",
     "dist": "electron-builder --win portable --publish never",
+    "package:cli": "node scripts/package-cli.mjs",
     "check": "node scripts/check-release.mjs",
-    "prepackage": "node scripts/prepare-helpers.mjs",
-    "predist": "node scripts/prepare-helpers.mjs",
-    "package:cli": "node scripts/package-cli.mjs"
+    "prepackage": "node scripts/prepare-helpers.mjs && node scripts/prepare-journey-media.mjs && node scripts/prepare-product-node.mjs",
+    "predist": "node scripts/prepare-helpers.mjs && node scripts/prepare-journey-media.mjs && node scripts/prepare-product-node.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.56.0",
@@ -31,27 +55,64 @@
     "appId": "app.flujo.seagulled",
     "productName": "Seagulled",
     "directories": {
-      "output": "release"
+      "output": "release/0.2.0"
     },
     "files": [
       "electron/**/*",
-      "ui/**/*",
+      {
+        "from": "ui",
+        "to": "ui",
+        "filter": [
+          "**/*",
+          "!journey-media/**/*"
+        ]
+      },
       "src/**/*",
       "!**/__pycache__/**",
       "!**/*.pyc",
       "bin/**/*",
+      "upstream/swarm-teams/{fleet,lib,template}/**/*",
+      "upstream/factory/receipts.mjs",
       "package.json",
       "LICENSE",
       "THIRD_PARTY_NOTICES.md",
-      "docs/provenance.json"
+      "upstream/swarm-teams/install.mjs",
+      "upstream/swarm-teams/swarm.mjs",
+      "docs/provenance.json",
+      {
+        "from": ".private/journey-media",
+        "to": "ui/journey-media",
+        "filter": [
+          "intro.mp4",
+          "selected.mp4",
+          "removed.mp4",
+          "confirmed.mp4",
+          "confirmed-alternate.mp4",
+          "fly-complete.mp4",
+          "starfield-loading.mp4",
+          "manifest.json"
+        ]
+      }
     ],
     "asar": true,
+    "asarUnpack": [
+      "node_modules/**/*"
+    ],
     "win": {
       "target": [
         "portable"
       ],
       "artifactName": "Seagulled-${version}-${arch}.${ext}",
       "extraResources": [
+        {
+          "from": ".private/product-node",
+          "to": "node-runtime",
+          "filter": [
+            "node.exe",
+            "LICENSE",
+            "manifest.json"
+          ]
+        },
         {
           "from": ".private/helpers/win32-x64",
           "to": "helpers",
@@ -75,15 +136,6 @@
     "npmRebuild": false
   },
   "license": "MIT",
-  "files": [
-    "bin/",
-    "electron/",
-    "ui/",
-    "src/",
-    "docs/provenance.json",
-    "LICENSE",
-    "THIRD_PARTY_NOTICES.md"
-  ],
   "author": "flujo-app",
   "repository": {
     "type": "git",
@@ -91,19 +143,14 @@
   },
   "dependencies": {
     "@huggingface/transformers": "4.3.0",
+    "flujo-ai": "3.48.1",
+    "flujo-cloud": "https://github.com/flujo-app/flujo-cloud/releases/download/v0.2.0/flujo-cloud-0.2.0.tgz",
+    "flujo-factory": "https://github.com/flujo-app/FACTORY/releases/download/v0.3.0/flujo-factory-0.3.0.tgz",
     "kokoro-js": "1.2.1",
-    "node-pty": "1.1.0",
-    "@flujo-app/swarm-teams": "0.1.0",
-    "@flujo-app/factory-receipts": "0.1.0",
-    "flujo-cloud": "npm:@flujo-app/flujo-cloud@0.1.1"
+    "node-pty": "1.1.0"
   },
   "overrides": {
     "sharp": "0.35.5",
     "onnxruntime-node": "1.30.0"
-  },
-  "bundleDependencies": [
-    "@flujo-app/swarm-teams",
-    "@flujo-app/factory-receipts",
-    "flujo-cloud"
-  ]
+  }
 }

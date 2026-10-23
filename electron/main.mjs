@@ -31,14 +31,18 @@ async function invoke(_event, method, args = []) {
   if (_event.sender !== mainWindow?.webContents || _event.sender.isDestroyed()) throw new Error('Request came from an unknown window.');
   if (!Array.isArray(args)) throw new Error('Request is invalid.');
   switch(method) {
+    case 'closeApp': setImmediate(()=>mainWindow?.close()); return {closing:true};
     case 'state': return runtime.snapshot();
+    case 'planSwarm': return runtime.planSwarm(args[0]);
+    case 'completeSetup': return runtime.completeSetup(args[0]);
+    case 'deleteGoal': return runtime.deleteGoal(assertId(args[0]));
     case 'defaultBudget': {
       const currency=assertString(args[0] ?? 'USD','Currency',3).toUpperCase();
       if(!/^[A-Z]{3}$/.test(currency))throw new Error('Currency is invalid.');
       return runtime.defaultBudget(currency);
     }
     case 'chat': {
-      return runtime.chat(assertString(args[0], 'Message'),validateGoalOptions(args[1] || {}));
+      return runtime.chat(assertString(args[0], 'Message',50000),validateGoalOptions(args[1] || {}));
     }
     case 'authState': return runtime.authState();
     case 'authConnect': {
@@ -53,7 +57,7 @@ async function invoke(_event, method, args = []) {
     case 'updateGoal': {
       const patch=args[1];
       if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('Goal changes are invalid.');
-      const text=assertString(patch.text,'Goal text',4000);
+      const text=assertString(patch.text,'Goal text',50000);
       return runtime.updateGoal(assertId(args[0]),{text,...validateGoalOptions(patch)});
     }
     case 'controlGoal': {

@@ -13,10 +13,10 @@ import { assertFleetAccountCurrent, conversationFailure, fleetStatus, fleetDiagn
 import { createOwnedRelay, isRelayPreCreationFailure,
   relayFailureCleanupConfirmed } from '../src/swarm/relay.mjs';
 import { assertFreshAppName, readFlyOrgApps, verifyFreshAppPlan } from '../src/swarm/fly-network.mjs';
-import { buildSpecs } from '@flujo-app/swarm-teams/template/flows.mjs';
-import { Controller } from '@flujo-app/swarm-teams/fleet/controller.mjs';
-import { flyProvisioner } from '@flujo-app/swarm-teams/fleet/provisioners.mjs';
-import { FlujoClient } from '@flujo-app/swarm-teams/lib/flujo-client.mjs';
+import { buildSpecs } from '../upstream/swarm-teams/template/flows.mjs';
+import { Controller } from '../upstream/swarm-teams/fleet/controller.mjs';
+import { flyProvisioner } from '../upstream/swarm-teams/fleet/provisioners.mjs';
+import { FlujoClient } from '../upstream/swarm-teams/lib/flujo-client.mjs';
 
 const relayNetwork = 'seagulled-g-0123456789abcdef0123456789abcdef';
 const accountRef = `fly-account-sha256:${'a'.repeat(64)}`;
@@ -147,17 +147,21 @@ test('Stop blocks dispatch but permits a fresh same-account fence for exact clea
 });
 
 test('goal capacity maps selected worker and agent counts to bounded Fly execution limits', async () => {
-  assert.deepEqual(goalCapacity({}), { maxWorkers: 5, conversationsPerWorker: 5, agentsPerWorker: 4 });
+  assert.deepEqual(goalCapacity({}), { maxWorkers: 10, conversationsPerWorker: 10, agentsPerWorker: 9 });
   assert.deepEqual(fleetExecutionLimits({ goal: { maxWorkers: 6, conversationsPerWorker: 5 }, config: { maxWorkers: 2 } }), {
     workerCap: 6, teamLimits: { agentTurns: 6, leadTurns: 12, concurrency: 4 },
   });
   assert.deepEqual(goalCapacity({ agentsPerWorker: 10 }),
-    { maxWorkers: 5, conversationsPerWorker: 11, agentsPerWorker: 10 }, 'legacy child limit is not silently reduced');
+    { maxWorkers: 10, conversationsPerWorker: 11, agentsPerWorker: 10 }, 'legacy child limit is not silently reduced');
   assert.deepEqual(goalCapacity({ conversationsPerWorker: 11, agentsPerWorker: 10 }),
-    { maxWorkers: 5, conversationsPerWorker: 11, agentsPerWorker: 10 }, 'migrated legacy goal remains valid');
-  assert.equal(fleetExecutionLimits({ goal: { maxWorkers: 6, conversationsPerWorker: 5 }, native: true }).workerCap, 1);
+    { maxWorkers: 10, conversationsPerWorker: 11, agentsPerWorker: 10 }, 'migrated legacy goal remains valid');
+  assert.equal(fleetExecutionLimits({ goal: { maxWorkers: 6, conversationsPerWorker: 5 }, native: true }).workerCap, 6);
+  assert.deepEqual(fleetExecutionLimits({ goal: { maxWorkers: 25, conversationsPerWorker: 2 }, native: true }), {
+    workerCap: 25, teamLimits: { agentTurns: 6, leadTurns: 12, concurrency: 1 },
+  });
+  assert.equal(fleetExecutionLimits({ goal: { maxWorkers: 6, conversationsPerWorker: 5 }, native: true, diagnostic: true }).workerCap, 1);
   assert.equal(fleetExecutionLimits({ goal: {}, config: { maxWorkers: 4 }, diagnostic: true }).workerCap, 4);
-  for (const setting of [{ maxWorkers: 0 }, { maxWorkers: 7 }, { maxWorkers: 2.5 },
+  for (const setting of [{ maxWorkers: 0 }, { maxWorkers: 101 }, { maxWorkers: 2.5 },
     { conversationsPerWorker: 0 }, { conversationsPerWorker: 11 },
     { agentsPerWorker: 11 }, { agentsPerWorker: '4' }]) {
     const dataDir = mkdtempSync(path.join(tmpdir(), 'seagulled-invalid-capacity-'));
@@ -497,7 +501,7 @@ test('Fly provisioner gives ManagedCloud only the selected account and owned rec
   } finally { delete globalThis.__seagulledManagedLeaseFixture; }
 });
 
-test('default staffing admits five actual Worker runs beneath one external supervisor', async () => {
+test('selected five-Worker staffing admits actual runs beneath one external supervisor', async () => {
   const registryPath = path.join(mkdtempSync(path.join(tmpdir(), 'seagulled-staff-')), 'registry.json');
   const provisioned = [];
   const controller = new Controller({ registryPath, operatorToken: 'fixture-operator-token-more-than-32-characters',
@@ -514,7 +518,7 @@ test('default staffing admits five actual Worker runs beneath one external super
   try {
     const goal = controller.registry.createGoal({ id: 'staff-fixture', text: 'Fixture work',
       limits: { maxWorkers: 5, maxDepth: 2, maxChildren: 4, maxActiveRuns: 2 } });
-    goal.teamLimits = fleetExecutionLimits({ goal: {} }).teamLimits;
+    goal.teamLimits = fleetExecutionLimits({ goal: { maxWorkers: 5, conversationsPerWorker: 5 } }).teamLimits;
     controller.registry.save();
     const root = controller.registry.reserve({ goalId: goal.id, role: 'supervisor', name: 'Todd' }).worker;
     controller.registry.enroll(root.id, { kind: 'external', origin: 'http://127.0.0.1:1', workspace: 'fixture' });
@@ -875,6 +879,10 @@ test('owned relay journals before Fly mutation, forwards through its own proxy, 
   const calls = [];
   const flyRunner = { run: async (args, { input } = {}) => {
     calls.push(args.slice(0, 2).join(' '));
+    if (args[0] === 'orgs' && args[1] === 'show') {
+      assert.deepEqual(args, ['orgs', 'show', 'personal', '--json']);
+      return JSON.stringify({ Slug: 'personal', InternalNumericID: '1784604' });
+    }
     if (args[0] === 'apps' && args[1] === 'create') {
       const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
       assert.equal(journal.state, 'creating-app');
@@ -938,7 +946,7 @@ test('owned relay journals before Fly mutation, forwards through its own proxy, 
       if (url.includes('/apps/seagulled-relay-') && options.method === 'GET') {
         if (calls.includes('apps destroy')) return new Response('{}', { status: 404 });
         return new Response(JSON.stringify({ id: 'fixture-app-id', name: journal.app,
-          organization: { slug: journal.org } }), { status: 200 });
+          organization: { slug: 'canonical-personal-slug', internal_numeric_id: 1784604 } }), { status: 200 });
       }
       throw new Error(`Unexpected relay fixture URL: ${url}`);
     },
@@ -950,8 +958,8 @@ test('owned relay journals before Fly mutation, forwards through its own proxy, 
   assert.ok(networkOperations.includes('cleanup'));
   assert.equal(agentStopped, true);
   assert.equal(proxyStopped, true);
-  assert.deepEqual(calls, ['auth token', 'apps create', 'secrets import', 'secrets list',
-    'secrets list', 'secrets list', 'volumes list', 'apps destroy']);
+  assert.deepEqual(calls, ['auth token', 'apps create', 'orgs show', 'secrets import', 'secrets list',
+    'orgs show', 'secrets list', 'orgs show', 'secrets list', 'volumes list', 'apps destroy']);
   assert.equal(JSON.parse(readFileSync(journalPath, 'utf8')).state, 'retired');
 });
 

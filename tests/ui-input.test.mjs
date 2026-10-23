@@ -14,7 +14,8 @@ test('native bridge preserves bounded team and currency settings',()=>{
   assert.deepEqual(validateGoalOptions({maxWorkers:2,conversationsPerWorker:3}),{maxWorkers:2,conversationsPerWorker:3});
   assert.deepEqual(validateGoalOptions(),{maxWorkers:10,conversationsPerWorker:10});
   assert.deepEqual(validateGoalOptions({executionMode:'company',providerId:'codex'}),{maxWorkers:10,conversationsPerWorker:10,executionMode:'company',providerId:'codex'});
-  assert.throws(()=>validateGoalOptions({maxWorkers:100}),/Workers/);
+  assert.throws(()=>validateGoalOptions({maxWorkers:101}),/Workers/);
+  assert.deepEqual(validateGoalOptions({maxWorkers:100,unlimited:true,budgetUsd:null,memoryMb:4096}),{maxWorkers:100,conversationsPerWorker:10,unlimited:true,budgetUsd:null,memoryMb:4096});
   assert.throws(()=>validateGoalOptions({budget:{amount:1,currency:'US$'}}),/Budget/);
   assert.throws(()=>validateGoalOptions({privateH100:'true'}),/Private H100/);
   assert.throws(()=>validateGoalOptions({executionMode:'local'}),/Company execution mode/);

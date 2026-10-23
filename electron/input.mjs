@@ -1,3 +1,5 @@
+import {validateInferenceOptions} from '../src/inference-options.mjs';
+
 function requiredString(value,label,max) {
   if (typeof value !== 'string' || !value.trim() || value.length > max) throw new Error(`${label} is invalid.`);
   return value;
@@ -22,9 +24,13 @@ export function validateGoalOptions(value={}) {
   if(!value||typeof value!=='object'||Array.isArray(value))throw new Error('Goal settings are invalid.');
   if(value.privateH100!==undefined&&typeof value.privateH100!=='boolean')throw new Error('Private H100 choice is invalid.');
   const maxWorkers=Number(value.maxWorkers??10),conversationsPerWorker=Number(value.conversationsPerWorker??10);
-  if(!Number.isInteger(maxWorkers)||maxWorkers<1||maxWorkers>10)throw new Error('Workers must be between 1 and 10.');
+  if(!Number.isInteger(maxWorkers)||maxWorkers<1||maxWorkers>100)throw new Error('Workers must be between 1 and 100.');
   if(!Number.isInteger(conversationsPerWorker)||conversationsPerWorker<1||conversationsPerWorker>10)throw new Error('Conversations per worker must be between 1 and 10.');
   const options={maxWorkers,conversationsPerWorker};
+  if(value.unlimited!==undefined){if(typeof value.unlimited!=='boolean')throw new Error('Unlimited choice is invalid.');options.unlimited=value.unlimited;}
+  if(value.budgetUsd!==undefined){if(value.unlimited===true&&value.budgetUsd===null)options.budgetUsd=null;else{if(typeof value.budgetUsd!=='number'||!Number.isFinite(value.budgetUsd)||value.budgetUsd<=0)throw new Error('Budget is invalid.');options.budgetUsd=value.budgetUsd;}}
+  if(value.memoryMb!==undefined){if(![1024,2048,4096].includes(value.memoryMb))throw new Error('Machine size is invalid.');options.memoryMb=value.memoryMb;}
+  if(value.memoryOverride!==undefined){if(typeof value.memoryOverride!=='boolean')throw new Error('Memory choice is invalid.');options.memoryOverride=value.memoryOverride;}
   if(value.executionMode!==undefined) {
     if(value.executionMode!=='company')throw new Error('Company execution mode is invalid.');
     options.executionMode='company';
@@ -42,7 +48,7 @@ export function validateGoalOptions(value={}) {
     if(!Number.isFinite(amount)||amount<=0||typeof currency!=='string'||!/^[A-Z]{3}$/.test(currency))throw new Error('Budget is invalid.');
     options.budget={amount,currency};
   }
-  return options;
+  return {...options,...validateInferenceOptions(value)};
 }
 
 export function validateVoiceInput(value) {

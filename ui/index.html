@@ -1,73 +1,26 @@
 <!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
-  <title>Seagulled</title>
-  <link rel="stylesheet" href="./styles.css">
-  <script type="module" src="./app.js"></script>
-</head>
-<body>
-  <main id="movie" class="movie" aria-label="Seagulled stage">
-    <div id="frame" class="frame" aria-hidden="true"><video id="movie-video" class="movie-video" muted playsinline autoplay loop preload="auto"></video></div>
-    <div class="film-grain" aria-hidden="true"></div>
-    <div class="film-vignette" aria-hidden="true"></div>
-    <button id="advanced-toggle" class="chrome-button advanced-toggle" type="button" aria-label="Open advanced controls">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>
-    </button>
-    <div class="action-dock">
-      <div id="voice-level" class="voice-level" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
-      <button id="action" class="action-button" type="button" aria-label="Start" data-action="start">
-        <svg id="action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.7v12.6L18.2 12 8 5.7Z"/></svg>
-      </button>
-    </div>
-    <span id="live-status" class="sr-only" role="status" aria-live="polite"></span>
-    <audio id="todd-audio" preload="none" hidden></audio>
-  </main>
-
-  <dialog id="setup-dialog" class="sheet setup-sheet" aria-labelledby="setup-title">
-    <div class="sheet-head"><h1 id="setup-title">Get the team ready</h1><button class="close-button" type="button" data-close="setup-dialog" aria-label="Close setup">×</button></div>
-    <p class="sheet-intro">Sign in with Fly and Modal in your browser; inference access and credits are checked separately.</p>
-    <div class="auth-row"><div><strong>Fly</strong><small id="fly-state">Checking…</small></div><button id="fly-connect" class="line-button" type="button">Connect</button></div>
-    <div class="auth-row"><div><strong>Modal</strong><small id="modal-state">Checking…</small></div><button id="modal-connect" class="line-button" type="button">Connect</button></div>
-    <div class="auth-row inference-row"><div><strong>Inference</strong><small id="inference-state">Checking providers…</small></div></div>
-    <p id="setup-error" class="sheet-error" role="alert" hidden></p>
-  </dialog>
-
-  <dialog id="advanced-dialog" class="sheet advanced-sheet" aria-labelledby="advanced-title">
-    <div class="sheet-head"><h1 id="advanced-title">Advanced</h1><button class="close-button" type="button" data-close="advanced-dialog" aria-label="Close advanced controls">×</button></div>
-    <div class="setting-grid">
-      <label class="setting-label" for="budget-amount">Budget</label>
-      <div class="budget-controls"><input id="budget-amount" type="number" min="0.01" step="0.01" placeholder="Default" inputmode="decimal" aria-label="Goal budget amount"><select id="budget-currency" aria-label="Budget currency"><option value="USD">USD</option><option value="EUR">EUR</option><option value="GBP">GBP</option><option value="COP">COP</option><option value="CAD">CAD</option><option value="AUD">AUD</option></select></div>
-      <div class="budget-presets" role="group" aria-label="USD budget steps"><button type="button" data-budget-usd="25">$25</button><button type="button" data-budget-usd="50" aria-pressed="true">$50</button><button type="button" data-budget-usd="100">$100</button><button type="button" data-budget-usd="500">$500</button><button type="button" data-budget-usd="1000">$1000</button></div>
-      <small id="budget-note" class="budget-note" aria-live="polite"></small>
-      <label class="setting-label" for="goal-provider">Goal provider</label>
-      <select id="goal-provider" aria-label="Goal provider"><option value="">Choose a connected provider</option></select>
-      <small id="goal-provider-note" class="budget-note">Choose an inference provider for this goal. The company starts when its workers are ready.</small>
-      <label class="setting-label" for="workers">Workers <output id="workers-value">10</output></label><input id="workers" type="range" min="1" max="10" value="10">
-      <label class="setting-label" for="conversations">Conversations per worker <output id="conversations-value">10</output></label><input id="conversations" type="range" min="1" max="10" value="10">
-      <small id="team-size-note" class="budget-note">100 conversations requested: 10 teams, each with 1 lead + 9 agents. Todd supervises separately. Actual staffing is verified during execution.</small>
-      <label class="private-h100-switch" for="private-h100"><span>Private H100 + Qwen</span><input id="private-h100" type="checkbox"></label>
-      <small id="private-h100-status" class="budget-note">Off. If enabled, Go may start paid private inference within this goal's allowance.</small>
-    </div>
-    <div id="text-fallback" class="text-fallback" hidden><label for="fallback-goal">Voice is unavailable. Enter one sentence here.</label><textarea id="fallback-goal" rows="2" maxlength="4000"></textarea><button id="fallback-go" class="solid-button" type="button">Go</button></div>
-    <div class="quiet-actions"><button id="pause-all" class="line-button" type="button" hidden>Pause</button><button id="resume-all" class="line-button" type="button" hidden>Resume</button><button id="stop-all" class="line-button danger" type="button" hidden>Stop</button></div>
-    <details id="provider-connect-details" class="work-details provider-connect-details"><summary>Connect inference</summary>
-      <label for="provider-choice">Provider</label><select id="provider-choice"><option value="">Choose provider</option><option value="codex">Codex native</option><option value="claude">Claude native</option><option value="openai">OpenAI API</option><option value="anthropic">Anthropic API</option></select>
-      <p id="provider-guidance" class="provider-guidance">Choose a supported provider to connect inference.</p>
-      <label id="provider-model-row" for="provider-model" hidden>Model <select id="provider-model"></select></label>
-      <label id="provider-key-row" for="provider-key" hidden>API key <input id="provider-key" type="password" maxlength="500" autocomplete="off" spellcheck="false"></label>
-      <p id="provider-storage-note" class="provider-guidance" hidden>Keys stay outside Git; desktop saves them encrypted. API billing is separate from account sign-in.</p>
-      <label id="provider-worker-row" class="worker-consent" for="provider-worker-consent" hidden><input id="provider-worker-consent" type="checkbox"><span>Allow isolated Workers to use this API key for goals with this provider; desktop saves it encrypted outside Git.</span></label>
-      <div class="provider-actions"><button id="provider-connect" class="solid-button" type="button" disabled>Connect</button><button id="provider-disconnect" class="line-button" type="button" hidden>Disconnect</button></div>
-    </details>
-    <details class="work-details"><summary>Provider and spend</summary><div id="provider-details"></div><div id="spend-details"></div></details>
-    <p id="movie-status" class="movie-status">Checking approved local movie.</p>
-    <p id="narration-status" class="narration-status">Checking narration source.</p>
-    <p class="sheet-intro">F11 toggles fullscreen. Ctrl+Q quits (Command+Q on Mac).</p>
-    <details id="work-details" class="work-details"><summary>Work details</summary><div id="goal-details"></div></details>
-    <p id="advanced-error" class="sheet-error" role="alert" hidden></p>
-  </dialog>
-</body>
-</html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Seagulled</title><link rel="stylesheet" href="./journey.css"><link rel="stylesheet" href="./inference-options.css"><script type="module" src="./journey.js"></script></head><body>
+<main id="movie" aria-label="Seagulled" data-scene="idle" data-loading="true"><div id="frame" aria-hidden="true"><video id="movie-video" muted playsinline autoplay loop></video><video id="loading-video" src="journey-media/starfield-loading.mp4" muted playsinline autoplay loop preload="auto"></video></div><div class="shade"></div><section id="swarm-cards" aria-label="Swarms"></section><button id="new-swarm" type="button" aria-label="New swarm" hidden>+</button><span class="sr-only">F11 toggles fullscreen. Ctrl+Q quits. Ctrl+, opens accounts.</span><span id="live-status" class="sr-only" role="status" aria-live="polite"></span></main>
+<div id="app-window-controls" popover="manual"><button id="app-close" class="icon" type="button" aria-label="Close app" title="Close app">×</button></div><dialog id="setup-dialog" class="glass setup" aria-label="Account setup">
+<button id="setup-close" class="icon close" type="button" aria-label="Close setup">×</button>
+<video id="cue-video" playsinline preload="auto" aria-label="Todd dialogue" hidden></video><button id="cue-replay" class="icon replay" type="button" aria-label="Play dialogue audio" hidden>▶</button><div id="setup-checking" class="checking" role="status" aria-label="Checking account sign-in" hidden><i></i></div>
+<div id="provider-step"><div class="logos" role="group" aria-label="Inference accounts">
+<div class="account"><button class="logo" type="button" data-provider="modal" aria-label="Modal" aria-pressed="false"><img src="brands/modal.svg" alt=""><i></i></button><button class="signin" type="button" data-signin="modal" aria-label="Sign in Modal" hidden>Sign in ↗</button></div>
+<div class="account"><button class="logo" type="button" data-provider="claude" aria-label="Claude" aria-pressed="false"><img src="brands/claude.svg" alt=""><i></i></button><button class="signin" type="button" data-signin="claude" aria-label="Sign in Claude" hidden>Sign in ↗</button></div>
+<div class="account"><button class="logo" type="button" data-provider="codex" aria-label="Codex" aria-pressed="false"><img src="brands/codex.png" alt=""><i></i></button><button class="signin" type="button" data-signin="codex" aria-label="Sign in Codex" hidden>Sign in ↗</button></div>
+</div><button id="setup-confirm" class="primary" type="button" aria-label="Confirm accounts" disabled>→</button></div>
+<div id="fly-step" hidden><button id="fly-connect" class="logo fly" type="button" aria-label="Connect Fly"><img src="brands/fly.svg" alt=""></button><button id="setup-back" class="icon back" type="button" aria-label="Back to inference accounts">←</button></div>
+<div class="dots" aria-hidden="true"><i class="selected"></i><i></i></div><p id="setup-error" class="error" role="alert" hidden></p></dialog>
+<dialog id="project-dialog" class="glass project" aria-labelledby="project-title"><header><h1 id="project-title">New swarm</h1><button class="icon" type="button" data-close="project-dialog" aria-label="Close swarm settings">×</button></header>
+<form id="project-form"><label for="goal">Goal</label><textarea id="goal" rows="3" maxlength="50000" required></textarea>
+<div class="slider-label"><label for="budget-slider">Budget</label><output id="budget-value">$50</output></div><input id="budget-slider" type="range" min="0" max="4" value="1" step="1" aria-valuetext="$50"><div class="ticks" aria-hidden="true"><span>$25</span><span>$50</span><span>$100</span><span>$500</span><span>∞</span></div>
+<div class="slider-label"><label for="workers">Workers</label><output id="workers-value">10</output></div><input id="workers" type="range" min="1" max="100" value="10">
+<div class="slider-label"><label for="agents">Agents per worker</label><output id="agents-value">10</output></div><input id="agents" type="range" min="1" max="10" value="10">
+<div class="slider-label"><span>RAM</span><output id="memory-value">4 GB</output></div><div id="memory-edit-row" class="slider-label" hidden><label for="memory">Machine size</label><select id="memory"><option value="1024">1 GB</option><option value="2048">2 GB</option><option value="4096">4 GB</option></select></div>
+<label for="goal-provider">Provider</label><div class="provider-select"><select id="goal-provider"><option value="modal">Modal</option><option value="claude">Claude</option><option value="codex">Codex</option></select><button id="manage-accounts" class="icon" type="button" aria-label="Connect accounts">↗</button></div>
+<div id="model-options"><label for="goal-model">Model</label><select id="goal-model"><option value="gpt-6-luna">Codex Luna</option><option value="gpt-6.1-sol">Codex 6.1 Sol</option><option value="gpt-6-sol">Codex Sol</option></select><label for="goal-effort">Reasoning effort</label><select id="goal-effort"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option><option value="xhigh">Extra high</option><option value="max">Max</option></select></div>
+<output id="compute-price" class="price" aria-label="Estimated compute price"></output><p id="project-error" class="error" role="alert" hidden></p><button id="project-save" class="primary" type="submit">Save</button></form></dialog>
+</body></html>

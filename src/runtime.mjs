@@ -1,12 +1,16 @@
-import { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync, unlinkSync, realpathSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync, unlinkSync, realpathSync, lstatSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { ProviderManager } from './providers/index.mjs';
+import { productHelperRoot, productProviderCommands } from './product-helpers.mjs';
+import { createProductSource } from './product-source.mjs';
+import { validateInferenceOptions } from './inference-options.mjs';
 import { SwarmCoordinator } from './swarm/index.mjs';
+import { runFactoryFleet } from './swarm/factory.mjs';
 import { createVoice } from './voice/index.mjs';
-import { createBudgets, capacity, usdAmount, DEFAULT_BUDGET_USD } from './budget.mjs';
+import { createBudgets, capacity, usdAmount, DEFAULT_BUDGET_USD, planSwarm, budgetCeiling, unlimitedBudget } from './budget.mjs';
 
 export const defaultDataDir = () => process.env.SEAGULLED_HOME || path.join(homedir(), '.seagulled');
 const now = () => new Date().toISOString();
@@ -15,9 +19,13 @@ const copy = (value) => structuredClone(value);
 const companyReasons = {
   source: 'The crew is still getting ready.', account: 'Sign in to Fly so the crew can start.',
   provider: 'Your provider is not ready to run the company yet.', capacity: 'The crew has no room for this goal yet.',
+  factory: 'FACTORY is not ready to start this crew yet.',
   budget: 'The allowance cannot cover the requested crew yet.', unavailable: 'The crew is not ready yet.',
 };
 const company = goal => goal.executionMode === 'company';
+const workerStatuses = new Set(['queued', 'provisioning', 'ready', 'dispatching', 'completed', 'failed', 'unknown', 'cancelled', 'retiring', 'retired', 'cleanup-unconfirmed']);
+const workerId = value => typeof value === 'string' && /^[\w-]{1,100}$/.test(value)
+  && !['__proto__', 'constructor', 'prototype'].includes(value);
 function mode(value) {
   if (!['company', 'local'].includes(value)) throw new Error('Choose company execution or an explicit local diagnostic.');
   return value;
@@ -25,12 +33,19 @@ function mode(value) {
 function conversations(options, previous) {
   if (options.conversationsPerWorker !== undefined && options.agentsPerWorker !== undefined) throw new Error('Choose one conversation limit.');
   if (options.conversationsPerWorker !== undefined) return capacity(options.conversationsPerWorker, 10, 10);
-  if (options.agentsPerWorker !== undefined) return capacity(options.agentsPerWorker, 9, !previous || previous.workerTopologyVersion === 3 ? 9 : 10) + 1;
-  return previous?.conversationsPerWorker ?? (previous?.agentsPerWorker === undefined ? previous ? 5 : 10 : previous.agentsPerWorker + 1);
+  if (options.agentsPerWorker !== undefined) return capacity(options.agentsPerWorker, 4, 10) + 1;
+  return previous?.conversationsPerWorker ?? (previous?.agentsPerWorker === undefined ? 10 : previous.agentsPerWorker + 1);
 }
-export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, voice, budgets, fleetSource, sourceProvider, executionMode = 'company' } = {}) {
+export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, voice, budgets, fleetSource, sourceProvider,
+  sourceInspector, readyInspector,
+  fleetRunner = runFactoryFleet, executionMode = 'company' } = {}) {
   mode(executionMode);
   if (sourceProvider !== undefined && typeof sourceProvider !== 'function') throw new Error('The owned source getter is invalid.');
+  if (sourceProvider?.closeGoal !== undefined && typeof sourceProvider.closeGoal !== 'function') throw new Error('The owned Source cleanup is invalid.');
+  if (typeof fleetRunner !== 'function') throw new Error('The owned fleet runner is invalid.');
+  for (const inspector of [sourceInspector, readyInspector]) {
+    if (inspector !== undefined && typeof inspector !== 'function') throw new Error('The owned company inspector is invalid.');
+  }
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const statePath = path.join(dataDir, 'state.json');
   const lockPath = path.join(dataDir, 'runtime.lock');
@@ -54,7 +69,8 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
     if (state.version !== 1 || !Array.isArray(state.goals) || !Array.isArray(state.conversation) || !state.spend) throw new Error('Unsupported saved state.');
   } catch (e) { unlinkSync(lockPath); throw new Error(`Saved conversation needs recovery: ${e.message}. Your original file is preserved.`); }
   for (const goal of state.goals) {
-    // Unfinished topology-v2 goals from earlier builds must pass company
+    if (goal.workerActivity) goal.workerActivity.current = false;
+    // Unfinished fleet goals from earlier builds must pass company
     // admission; terminal historical results retain their original provenance.
     if (goal.executionMode === undefined && [2, 3].includes(goal.workerTopologyVersion)
       && ['queued', 'paused', 'running', 'pausing', 'stopping', 'interrupted'].includes(goal.status)) {
@@ -82,9 +98,16 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
   let closed = false;
   let discovering;
   let accountLogin;
-  const manager = providers || new ProviderManager({ dataDir: path.join(dataDir, 'providers') });
+  const manager = providers || new ProviderManager({ dataDir: path.join(dataDir, 'providers'), helperRoot: productHelperRoot(), commands: productProviderCommands(dataDir) });
   const speech = voice || createVoice({ dataDir });
   const allowances = budgets || createBudgets({ dataDir });
+  const validateJourneyOptions = options => {
+    validateInferenceOptions(options);
+    if (options.unlimited !== undefined && typeof options.unlimited !== 'boolean') throw new Error('Unlimited must be on or off.');
+    if (options.unlimited === true && (options.budget !== undefined || options.budgetUsd !== undefined && options.budgetUsd !== null)) throw new Error('Choose unlimited or a finite budget.');
+    if (options.memoryMb !== undefined && ![1024, 2048, 4096].includes(options.memoryMb)) throw new Error('Choose 1, 2, or 4 GB of memory.');
+    if (options.memoryOverride !== undefined && typeof options.memoryOverride !== 'boolean') throw new Error('Memory scaling choice is invalid.');
+  };
   const persist = () => {
     state.swarm = { admissionPaused: Boolean(state.swarm?.admissionPaused), status: jobs.size
       ? [...jobs.values()].some(job => job.phase === 'executing') ? 'working' : 'checking'
@@ -113,7 +136,7 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
       if (previous.amountUsd !== reservation.amountUsd) throw Object.assign(new Error('An accepted reservation changed amount.'), { code: 'UNKNOWN', unknown: true });
       return;
     }
-    if (reservation.amountUsd > goal.budgetUsd - goal.spentUsd - (goal.pendingUsd || 0)) {
+    if (reservation.amountUsd > budgetCeiling(goal) - goal.spentUsd - (goal.pendingUsd || 0)) {
       throw Object.assign(new Error('The remaining allowance cannot reserve this private request.'), { outcome: 'not_applied' });
     }
     goal.reservations[reservation.id] = { amountUsd: reservation.amountUsd, status: 'pending', at: now() };
@@ -151,21 +174,39 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
     else { state.spend.unknownCalls++; }
     goal.usage = { inputTokens: (goal.usage?.inputTokens || 0) + (Number(usage.inputTokens) || 0), outputTokens: (goal.usage?.outputTokens || 0) + (Number(usage.outputTokens) || 0), costKind: kind };
     goal.updatedAt = now();
-    if (goal.spentUsd >= goal.budgetUsd && jobs.has(goal.id)) {
+    if (goal.spentUsd >= budgetCeiling(goal) && jobs.has(goal.id)) {
       goal.status = 'pausing'; goal.error = 'Budget reached. Increase it to continue.';
       jobs.get(goal.id).controller.abort(new Error('Budget reached.'));
     }
   }
   function onEvent(event) {
     const goal = event.goalId ? state.goals.find(g => g.id === event.goalId) : undefined;
+    if (event.type === 'worker') {
+      const job = goal && jobs.get(goal.id), worker = event.worker;
+      if (!job || !company(goal) || job.phase !== 'executing' || event.observationId !== job.observationId
+        || !worker || !workerId(worker.workerId) || !workerStatuses.has(worker.status)
+        || !Number.isInteger(worker.depth) || worker.depth < 1 || worker.depth > 2
+        || (worker.depth === 1 ? worker.parentId !== null : !workerId(worker.parentId) || worker.parentId === worker.workerId)) return;
+      goal.workerActivity ||= { current: true, workers: [] };
+      const workers = goal.workerActivity.workers;
+      const index = workers.findIndex(item => item.id === worker.workerId);
+      if (index < 0 && workers.length >= Math.min(200, goal.maxWorkers * 2)) return;
+      if (index >= 0 && (workers[index].parentId !== worker.parentId || workers[index].depth !== worker.depth
+        || ['retired', 'cleanup-unconfirmed'].includes(workers[index].status)
+          && !['retired', 'cleanup-unconfirmed'].includes(worker.status))) return;
+      const safe = { id: worker.workerId, parentId: worker.parentId, depth: worker.depth, status: worker.status, observedAt: now() };
+      if (index < 0) workers.push(safe); else workers[index] = safe;
+      goal.workerActivity.current = true;
+      goal.updatedAt = now();
+      events.emit('event', { type: 'worker', goalId: goal.id, worker: copy(safe) }); publish(); return;
+    }
     if (event.type === 'company' && (!goal || !company(goal))) return;
     let publicEvent = event;
     if (goal) {
       if (event.type === 'company' && company(goal)) {
         for (const key of ['verifiedWorkers', 'verifiedChildConversations']) {
-          const limit = goal.workerTopologyVersion === 3
-            ? key === 'verifiedWorkers' ? goal.maxWorkers : goal.maxWorkers * (goal.conversationsPerWorker - 1)
-            : key === 'verifiedWorkers' ? 12 : 120;
+          const workerLimit = Math.min(200, 2 * goal.maxWorkers);
+          const limit = key === 'verifiedWorkers' ? workerLimit : workerLimit * goal.agentsPerWorker;
           if (Number.isInteger(event[key]) && event[key] >= 0 && event[key] <= limit) goal.execution[key] = event[key];
         }
         publicEvent = { type: 'company', goalId: goal.id,
@@ -190,7 +231,40 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
     }
     events.emit('event', copy(publicEvent)); publish();
   }
-  const coordinator = swarm || new SwarmCoordinator({ providers: manager, onEvent, dataDir: path.join(dataDir, 'swarm'), sourceBinding: fleetSource, sourceProvider, fleet: process.env.SEAGULLED_DISABLE_FLEET === '1' ? undefined : 'auto' });
+  const productSource = !swarm && !fleetSource && !sourceProvider ? createProductSource({dataDir}) : null;
+  const ownedSourceProvider = sourceProvider && (async options => {
+    const job = jobs.get(options.goalId), goal = find(options.goalId);
+    if (!job || job.controller.signal !== options.signal || !company(goal)) {
+      throw Object.assign(new Error('The owning company preparation is unavailable.'), {code:'NATIVE_GOAL_SCOPE'});
+    }
+    // Source construction precedes final admission. Its private transport may
+    // be assembled now, but effects only reach this actual job's admitted scope.
+    const admitted = () => {
+      if (jobs.get(goal.id) !== job || job.controller.signal !== options.signal || !job.nativeScope?.scope) {
+        throw Object.assign(new Error('The owning company execution is not admitted.'), {code:'NATIVE_GOAL_SCOPE'});
+      }
+      return job.nativeScope.scope;
+    };
+    const nativeScope = Object.freeze({signal:options.signal,
+      async assertCurrent(actor){return admitted().assertCurrent(actor);},
+      async commit(task,actor){return admitted().commit(task,actor);},
+      async retainUncertainty(context,evidence){return admitted().retainUncertainty(context,evidence);}});
+    job.sourcePrepared = true;
+    return sourceProvider({...options,goal:copy(goal),nativeScope});
+  });
+  const coordinator = swarm || new SwarmCoordinator({ providers: manager, onEvent, dataDir: path.join(dataDir, 'swarm'),
+    sourceInspector, readyInspector,
+    sourceBinding: fleetSource, sourceProvider: ownedSourceProvider ?? (productSource ? options=>productSource.source(options) : undefined),
+    fleetRunner: input => {
+      const job = jobs.get(input.goal?.id);
+      if (!job?.nativeScope?.scope || job.controller.signal !== input.signal) {
+        throw Object.assign(new Error('The owning runtime execution is unavailable.'), { code: 'NATIVE_GOAL_SCOPE' });
+      }
+      // Resolve from the owning job, rather than trusting a coordinator/caller
+      // scope. The current generic runner may ignore this private capability;
+      // the native Source composition consumes it without another scheduler.
+      return fleetRunner({ ...input, nativeScope: job.nativeScope.scope });
+    }, fleet: process.env.SEAGULLED_DISABLE_FLEET === '1' ? undefined : 'auto' });
   // Test/integration injection supports the same event sink without a mock-only runtime branch.
   if (swarm?.setEventHandler) swarm.setEventHandler(onEvent);
   const privateLifecycle = () => typeof manager.privateComputeEnable === 'function'
@@ -209,7 +283,7 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
     if (job.controller.signal.aborted) throw Object.assign(new Error('Private startup was cancelled before admission.'), { name: 'AbortError' });
     if (!status.provisionable) throw Object.assign(new Error(status.detail || 'Private H100 is unavailable.'), { outcome: 'not_applied' });
     const reserve = status.admission?.enableUsd;
-    if (!Number.isFinite(reserve) || reserve <= 0 || goal.budgetUsd - goal.spentUsd - (goal.pendingUsd || 0) < reserve) {
+    if (!Number.isFinite(reserve) || reserve <= 0 || budgetCeiling(goal) - goal.spentUsd - (goal.pendingUsd || 0) < reserve) {
       throw Object.assign(new Error('The remaining budget cannot reserve private H100 startup.'), { outcome: 'not_applied' });
     }
     goal.privateCompute = { admissionId: id('gpu'), reservedUsd: reserve, reservationStatus: 'pending', cleanupStatus: 'not-started' };
@@ -218,7 +292,7 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
     goal.billingPending = true;
     publish();
     try {
-      const result = await manager.privateComputeEnable({ budgetUsd: goal.budgetUsd - goal.spentUsd,
+      const result = await manager.privateComputeEnable({ budgetUsd: goal.unlimited ? reserve : goal.budgetUsd - goal.spentUsd,
         signal: job.controller.signal, workerAllowed: true, admissionId: goal.privateCompute.admissionId });
       job.privateOwned = true;
       const cost = result?.usage?.costUsd;
@@ -266,8 +340,81 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
     }
     state.providers = manager.publicState(); publish();
   }
+  // Runtime controls only. Controller authentication, immutable Source plans,
+  // native profile and image qualification remain separate mandatory gates.
+  function nativeGoalScope(goal, job) {
+    const intent = () => JSON.stringify({ id: goal.id, text: goal.text, providerId: goal.providerId,
+      model: goal.model, reasoningEffort: goal.reasoningEffort, budgetUsd: goal.budgetUsd,
+      unlimited: goal.unlimited, maxWorkers: goal.maxWorkers, conversationsPerWorker: goal.conversationsPerWorker,
+      memoryMb: goal.memoryMb, privateH100: goal.privateH100 });
+    const acceptedIntent = intent();
+    const acceptedAdmission = job.admission;
+    const acceptedRoute = JSON.stringify(acceptedAdmission?.fleetRoute);
+    let ending = false, uncertaintyPersisted = false, tail = Promise.resolve();
+    const refuse = () => { throw Object.assign(new Error('The native goal scope is no longer current.'), { code: 'NATIVE_GOAL_SCOPE' }); };
+    function local(actor) {
+      let lease;
+      try {
+        const stat = lstatSync(lockPath);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > 1024) refuse();
+        lease = JSON.parse(readFileSync(lockPath, 'utf8'));
+      } catch { refuse(); }
+      if (closed || ending || jobs.get(goal.id) !== job || job.admission !== acceptedAdmission
+        || lease?.pid !== process.pid || lease?.owner !== owner || actor?.goalId !== goal.id
+        || !company(goal) || job.phase !== 'executing' || goal.status !== 'running'
+        || goal.deletedAt || goal.recoveryHold || job.pauseRequested || state.swarm.admissionPaused
+        || intent() !== acceptedIntent || goal.spentUsd + (goal.pendingUsd || 0) >= budgetCeiling(goal)) refuse();
+      job.controller.signal.throwIfAborted();
+    }
+    async function assertCurrent(actor) {
+      local(actor);
+      if (typeof manager.fleetRoute !== 'function' || !acceptedAdmission?.fleetRoute?.available
+        || acceptedAdmission.fleetRoute.providerId !== goal.providerId) refuse();
+      const route = await manager.fleetRoute(goal.providerId, goal.id,
+        { model: goal.model, reasoningEffort: goal.reasoningEffort });
+      local(actor);
+      if (!route?.available || JSON.stringify(route) !== acceptedRoute) refuse();
+    }
+    const scope = Object.freeze({
+      signal: job.controller.signal, assertCurrent,
+      commit(task, actor) {
+        if (typeof task !== 'function') return Promise.reject(new Error('A native mutation callback is required.'));
+        const operation = tail.then(async () => {
+          await assertCurrent(actor);
+          try {
+            const result = await task();
+            await assertCurrent(actor);
+            return result;
+          } catch {
+            if (!uncertaintyPersisted) {
+              try { await scope.retainUncertainty(undefined, { ticket: randomUUID() }); }
+              catch { await new Promise(() => {}); } // Failed durable retention keeps this fence held.
+            }
+            throw Object.assign(new Error('A native Source mutation outcome is unconfirmed.'), { code: 'UNKNOWN', unknown: true });
+          }
+        });
+        tail = operation.catch(() => {});
+        return operation;
+      },
+      async retainUncertainty(_context, evidence) {
+        if (jobs.get(goal.id) !== job || !evidence || typeof evidence.ticket !== 'string'
+          || !/^[a-f0-9-]{36}$/.test(evidence.ticket)) refuse();
+        goal.nativeUncertainty ||= [];
+        if (!goal.nativeUncertainty.some(item => item.ticket === evidence.ticket)) {
+          if (goal.nativeUncertainty.length >= 100) refuse();
+          goal.nativeUncertainty.push({ ticket: evidence.ticket, executionId: job.observationId, at: now() });
+        }
+        goal.recoveryHold = true; goal.status = 'interrupted';
+        goal.error = 'A native Source mutation needs reconciliation before more work can run.';
+        publish(); // Persistence must succeed before the owning mutation fence releases.
+        uncertaintyPersisted = true;
+        job.controller.abort(new Error('Native Source outcome needs reconciliation.'));
+      },
+    });
+    return { scope, async close() { ending = true; await tail; } };
+  }
   function start(goal) {
-    if (closed || jobs.has(goal.id) || goal.recoveryHold || goal.status !== 'queued') return;
+    if (closed || goal.deletedAt || jobs.has(goal.id) || goal.recoveryHold || goal.status !== 'queued') return;
     if (state.swarm.admissionPaused) { goal.error = 'The team is paused. Resume the team to start new work.'; publish(); return; }
     if (state.goals.some(g => g.recoveryHold)) { goal.error = 'A previous run needs reconciliation. New work is held.'; publish(); return; }
     if (goal.privateH100 && [...jobs.keys()].some(goalId => find(goalId).privateH100)) {
@@ -284,7 +431,8 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
     goal.error = undefined; goal.status = company(goal) ? 'queued' : 'running'; goal.updatedAt = now();
     if (company(goal)) goal.execution = { requested: 'company', readiness: 'checking', verifiedWorkers: 0, verifiedChildConversations: 0 };
     const controller = new AbortController();
-    const job = { controller, usageEvents: 0, promise: null, phase: company(goal) ? 'preflight' : 'executing' };
+    const job = { controller, usageEvents: 0, promise: null, observationId: id('execution'), phase: company(goal) ? 'preflight' : 'executing' };
+    if (company(goal)) goal.workerActivity = { current: false, workers: [] };
     jobs.set(goal.id, job); publish();
     job.promise = (async () => {
       try {
@@ -302,7 +450,10 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
           goal.status = 'running'; goal.execution.readiness = 'working';
           job.phase = 'executing'; publish();
         }
-        const result = await coordinator.execute({ goal: copy(goal), signal: controller.signal, ...(company(goal) ? { admission: job.admission } : {}) });
+        if (company(goal)) job.nativeScope = nativeGoalScope(goal, job);
+        const result = await coordinator.execute({ goal: copy(goal), signal: controller.signal,
+          observationId: job.observationId, ...(company(goal) ? { admission: job.admission, nativeScope: job.nativeScope.scope } : {}) });
+        if (goal.recoveryHold) throw Object.assign(new Error('The native Source outcome needs reconciliation.'), { code: 'UNKNOWN', unknown: true });
         // The coordinator emits each terminal receipt once. Aggregates may include
         // prior checkpoints and are never charged again after a resume.
         if (controller.signal.aborted) {
@@ -334,6 +485,14 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
           if (!closed) message('todd', `The team hit a blocker: ${goal.error}`, goal.id);
         }
       } finally {
+        await job.nativeScope?.close();
+        if (job.sourcePrepared && sourceProvider?.closeGoal) {
+          try { await sourceProvider.closeGoal(goal.id); }
+          catch {
+            goal.status = 'interrupted'; goal.recoveryHold = true;
+            goal.error = 'The owned Source cleanup needs reconciliation before more work can run.';
+          }
+        }
         await retirePrivate(goal, job);
         if (company(goal) && !['queued', 'running'].includes(goal.status)) {
           goal.execution.readiness = 'blocked';
@@ -341,6 +500,7 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
             : goal.recoveryHold ? 'The previous work needs reconciliation.' : 'The work is held.';
         }
         if (goal.status === 'completed' && job.completionText && !state.conversation.some(m => m.goalId === goal.id && m.text === job.completionText)) message('todd', job.completionText, goal.id);
+        if (goal.workerActivity) goal.workerActivity.current = false;
         jobs.delete(goal.id); goal.updatedAt = now(); publish();
       }
     })();
@@ -350,6 +510,19 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
     dataDir,
     snapshot: () => copy(state),
     defaultBudget: currency => allowances.default(currency),
+    planSwarm: options => planSwarm(options),
+    async completeSetup({ providers: selectedProviders } = {}) {
+      if (!Array.isArray(selectedProviders) || !selectedProviders.length || selectedProviders.length > 3
+        || new Set(selectedProviders).size !== selectedProviders.length || selectedProviders.some(id => !['modal', 'codex', 'claude'].includes(id))) throw new Error('Choose at least one account.');
+      const auth = await this.authState();
+      if (!auth.fly?.connected) throw new Error('Fly sign-in must be verified.');
+      await this.discover();
+      for (const id of selectedProviders) {
+        if (id === 'modal' ? !auth.modal?.connected : !state.providers.some(p => p.id === id && p.connected && p.available)) throw new Error('Selected account sign-in must be verified.');
+      }
+      state.setup = { completedAt: now(), providers: [...selectedProviders] };
+      publish(); return copy(state.setup);
+    },
     voiceCapabilities: () => speech.capabilities(),
     transcribeAudio: payload => speech.transcribe(payload),
     speak: text => speech.speak(text),
@@ -396,7 +569,12 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
       return discovering;
     },
     async connect(payload) {
-      await manager.connect(payload);
+      if (payload.method === 'subscription') {
+        if (accountLogin) throw new Error('Another account sign-in is already in progress.');
+        const controller = new AbortController(), job = { controller }; accountLogin = job;
+        job.promise = manager.connect({ ...payload, signal: controller.signal });
+        try { await job.promise; } finally { if (accountLogin === job) accountLogin = undefined; }
+      } else await manager.connect(payload);
       state.providers = manager.publicState();
       if (state.providers.some(p => p.id === payload.id && p.connected)) state.preferredProviderId = payload.id;
       publish();
@@ -418,16 +596,20 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
       if (options.budget !== undefined && options.budgetUsd !== undefined) throw new Error('Choose one budget currency.');
       if (options.privateH100 !== undefined && typeof options.privateH100 !== 'boolean') throw new Error('Private inference must be on or off.');
       if (options.providerId === 'private-h100' && options.privateH100 !== true) throw new Error('Enable private inference to use H100.');
+      validateJourneyOptions(options);
       const requestedMode = mode(options.executionMode ?? executionMode);
-      const maxWorkers = capacity(options.maxWorkers, 10, 10), conversationsPerWorker = conversations(options);
-      const budget = await allowances.resolve(options.budget, options.budgetUsd ?? DEFAULT_BUDGET_USD);
+      const maxWorkers = capacity(options.maxWorkers, 10, 100), conversationsPerWorker = conversations(options);
+      const budget = options.unlimited === true ? unlimitedBudget() : await allowances.resolve(options.budget, options.budgetUsd ?? DEFAULT_BUDGET_USD);
       if (!state.providers.length) await this.discover();
       if (closed) throw new Error('This session has closed.');
       const goal = { id: id('goal'), text: text.trim(), status: 'queued', budgetUsd: budget.allowanceUsd, budget, spentUsd: 0,
+        ...validateInferenceOptions(options),
         providerId: options.privateH100 === true ? 'private-h100' : options.providerId || (state.preferredProviderId !== 'private-h100' ? state.preferredProviderId : null) || null,
-        privateH100: options.privateH100 === true, executionMode: requestedMode,
+        privateH100: options.privateH100 === true, executionMode: requestedMode, unlimited: options.unlimited === true,
+        memoryOverride: options.memoryOverride === true,
+        memoryMb: options.memoryOverride === true ? options.memoryMb ?? 4096 : conversationsPerWorker <= 2 ? 1024 : conversationsPerWorker <= 5 ? 2048 : 4096,
         execution: { requested: requestedMode, readiness: 'blocked', verifiedWorkers: 0, verifiedChildConversations: 0 },
-        workerTopologyVersion: 3, maxWorkers, conversationsPerWorker, agentsPerWorker: conversationsPerWorker - 1, tasks: [], createdAt: now(), updatedAt: now(),
+        workerTopologyVersion: 2, maxWorkers, conversationsPerWorker, agentsPerWorker: conversationsPerWorker - 1, tasks: [], createdAt: now(), updatedAt: now(),
         context: state.conversation.slice(-12).map(m => ({ role: m.role, text: m.text })) };
       state.goals.push(goal); message('user', goal.text, goal.id);
       message('todd', requestedMode === 'company' ? 'Your goal is saved; I’m checking whether the crew is ready.' : 'Your local diagnostic goal is saved.', goal.id);
@@ -435,31 +617,37 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
     },
     async updateGoal(goalId, patch) {
       const goal = find(goalId);
-      if (!patch || typeof patch !== 'object' || Array.isArray(patch) || Object.keys(patch).some(k => !['text', 'budget', 'budgetUsd', 'providerId', 'maxWorkers', 'conversationsPerWorker', 'agentsPerWorker', 'privateH100'].includes(k))) throw new Error('You can edit the goal, budget, provider, and team limits.');
+      if (goal.deletedAt) throw new Error('This swarm has been deleted.');
+      if (!patch || typeof patch !== 'object' || Array.isArray(patch) || Object.keys(patch).some(k => !['text', 'budget', 'budgetUsd', 'providerId', 'maxWorkers', 'conversationsPerWorker', 'agentsPerWorker', 'privateH100', 'unlimited', 'memoryMb', 'memoryOverride', 'model', 'reasoningEffort'].includes(k))) throw new Error('You can edit the goal, budget, provider, and team limits.');
+      validateJourneyOptions(patch);
+      const inference = validateInferenceOptions({ model: patch.model ?? goal.model, reasoningEffort: patch.reasoningEffort ?? goal.reasoningEffort });
       if (patch.text !== undefined) {
         if (typeof patch.text !== 'string' || !patch.text.trim() || patch.text.length > 50000) throw new Error('Enter a goal in 1–50,000 characters.');
       }
       if (patch.budget !== undefined && patch.budgetUsd !== undefined) throw new Error('Choose one budget currency.');
       if (patch.privateH100 !== undefined && typeof patch.privateH100 !== 'boolean') throw new Error('Private inference must be on or off.');
-      if (patch.privateH100 !== undefined && patch.providerId !== undefined) throw new Error('Choose one inference route.');
+      if (patch.privateH100 === true && patch.providerId !== undefined) throw new Error('Choose one inference route.');
       if (patch.providerId === 'private-h100') throw new Error('Use the private inference switch to select H100.');
-      const nextWorkers = capacity(patch.maxWorkers, goal.maxWorkers ?? (goal.workerTopologyVersion === 3 ? 10 : 5), goal.workerTopologyVersion === 3 ? 10 : 6), nextConversations = conversations(patch, goal);
-      if (patch.budgetUsd !== undefined) usdAmount(patch.budgetUsd);
+      const nextWorkers = capacity(patch.maxWorkers, goal.maxWorkers ?? 10, 100), nextConversations = conversations(patch, goal);
+      if (goal.unlimited && patch.unlimited === false && patch.budget === undefined && patch.budgetUsd === undefined) throw new Error('Choose a finite budget when turning off unlimited.');
+      if (patch.budgetUsd !== undefined && patch.unlimited !== true) usdAmount(patch.budgetUsd);
       if (patch.budget !== undefined && (!patch.budget || typeof patch.budget !== 'object' || Array.isArray(patch.budget) ||
           Object.keys(patch.budget).some(k => !['amount', 'currency'].includes(k)) || typeof patch.budget.amount !== 'number' ||
           !Number.isFinite(patch.budget.amount) || patch.budget.amount <= 0 || !/^[A-Z]{3}$/.test(patch.budget.currency))) throw new Error('Choose a positive allowance and currency.');
       // Fence admission before waiting on a currency quote. The already-accepted
       // call can settle once; it cannot admit another task while an edit is pending.
-      if (jobs.has(goal.id) && (patch.text !== undefined || patch.providerId !== undefined || patch.budget !== undefined ||
-          patch.maxWorkers !== undefined || patch.conversationsPerWorker !== undefined || patch.agentsPerWorker !== undefined || patch.privateH100 !== undefined || Number(patch.budgetUsd) < goal.budgetUsd)) {
+      if (jobs.has(goal.id) && (patch.model !== undefined || patch.reasoningEffort !== undefined || patch.text !== undefined || patch.providerId !== undefined || patch.budget !== undefined ||
+          patch.maxWorkers !== undefined || patch.conversationsPerWorker !== undefined || patch.agentsPerWorker !== undefined || patch.privateH100 !== undefined || patch.unlimited !== undefined || patch.memoryMb !== undefined || patch.memoryOverride !== undefined || Number(patch.budgetUsd) < budgetCeiling(goal))) {
         const current = jobs.get(goal.id);
         await this.controlGoal(goal.id, 'pause');
         await current.promise;
       }
-      const currencyBudget = patch.budget !== undefined || patch.budgetUsd !== undefined
+      const currencyBudget = patch.unlimited === true ? unlimitedBudget() : patch.budget !== undefined || patch.budgetUsd !== undefined
         ? await allowances.resolve(patch.budget, patch.budgetUsd) : goal.budget;
-      const budget = currencyBudget?.allowanceUsd ?? goal.budgetUsd;
-      if (goal.pendingUsd > 0 && budget < goal.spentUsd + goal.pendingUsd) throw new Error('This allowance is already committed while billing is pending. Pause the goal; its held allowance is preserved.');
+      if (goal.deletedAt) throw new Error('This swarm has been deleted.');
+      const nextUnlimited = patch.unlimited ?? (patch.budget !== undefined || patch.budgetUsd !== undefined ? false : goal.unlimited);
+      const budget = nextUnlimited ? null : currencyBudget?.allowanceUsd ?? goal.budgetUsd;
+      if (!nextUnlimited && goal.pendingUsd > 0 && budget < goal.spentUsd + goal.pendingUsd) throw new Error('This allowance is already committed while billing is pending. Pause the goal; its held allowance is preserved.');
       if (patch.providerId !== undefined && !state.providers.some(p => p.id === patch.providerId)) throw new Error('Choose an available provider.');
       // Stop the old intent before accepting an edited intent or reduced allowance.
       if (jobs.has(goal.id) && (patch.text !== undefined || patch.providerId !== undefined || budget < goal.budgetUsd || patch.maxWorkers !== undefined || patch.agentsPerWorker !== undefined)) {
@@ -468,24 +656,42 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
         await current.promise;
       }
       if (patch.text !== undefined) goal.text = patch.text.trim();
-      if (patch.providerId !== undefined) goal.providerId = patch.providerId;
-      if (patch.privateH100 !== undefined) {
+      Object.assign(goal, inference);
+      if (patch.providerId !== undefined) { goal.providerId = patch.providerId; goal.privateH100 = false; }
+      if (patch.privateH100 !== undefined && patch.providerId === undefined) {
         goal.privateH100 = patch.privateH100;
         goal.providerId = patch.privateH100 ? 'private-h100' : (state.preferredProviderId !== 'private-h100' ? state.preferredProviderId : null) || null;
       }
       if (currencyBudget) goal.budget = currencyBudget;
       goal.maxWorkers = nextWorkers; goal.conversationsPerWorker = nextConversations; goal.agentsPerWorker = nextConversations - 1;
+      goal.unlimited = Boolean(nextUnlimited); goal.memoryOverride = patch.memoryOverride ?? goal.memoryOverride ?? false;
+      goal.memoryMb = goal.memoryOverride ? patch.memoryMb ?? goal.memoryMb ?? 4096 : nextConversations <= 2 ? 1024 : nextConversations <= 5 ? 2048 : 4096;
       goal.budgetUsd = budget; goal.updatedAt = now(); publish(); return copy(goal);
+    },
+    async deleteGoal(goalId) {
+      const goal = find(goalId);
+      if (goal.deletedAt) return copy(goal);
+      if (goal.recoveryHold) throw new Error('This run needs reconciliation before it can be deleted.');
+      // Stop awaits the original job, including owned cleanup and its last receipt.
+      await this.controlGoal(goalId, 'stop');
+      if (goal.recoveryHold || goal.billingPending || goal.pendingUsd > 0
+        || goal.privateCompute && !['verified', 'not-needed'].includes(goal.privateCompute.cleanupStatus)) {
+        throw new Error('Cleanup or billing needs reconciliation before this swarm can be deleted.');
+      }
+      // Removal from the card view must never erase receipts or conversation.
+      goal.deletedAt = now(); goal.updatedAt = goal.deletedAt;
+      publish(); return copy(goal);
     },
     async controlGoal(goalId, action) {
       const goal = find(goalId);
+      if (goal.deletedAt) throw new Error('This swarm has been deleted.');
       if (!['pause', 'resume', 'stop'].includes(action)) throw new Error('Choose pause, resume, or stop.');
       const job = jobs.get(goal.id);
       if (action === 'resume') {
         if (state.swarm.admissionPaused) throw new Error('The team is paused. Resume the team before this goal.');
         if (goal.recoveryHold) throw new Error('This interrupted run needs reconciliation. Its original records are preserved.');
         if (!['paused', 'queued'].includes(goal.status)) throw new Error('Only a paused or waiting goal can resume.');
-        if (goal.spentUsd >= goal.budgetUsd) throw new Error('Increase the budget before resuming.');
+        if (goal.spentUsd >= budgetCeiling(goal)) throw new Error('Increase the budget before resuming.');
         goal.status = 'queued'; publish(); start(goal);
       } else {
         if (goal.recoveryHold) throw new Error('This run has an uncertain outcome. Its recovery hold cannot be cleared by a stop button.');
@@ -508,7 +714,7 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
         if (state.goals.some(g => g.recoveryHold)) throw new Error('An interrupted run needs reconciliation before the team can resume.');
         state.swarm.admissionPaused = false; publish();
         for (const goal of state.goals) {
-          if (goal.status === 'paused' && goal.spentUsd < goal.budgetUsd) goal.status = 'queued';
+          if (goal.status === 'paused' && goal.spentUsd < budgetCeiling(goal)) goal.status = 'queued';
           if (goal.status === 'queued') start(goal);
         }
       } else {
@@ -525,6 +731,7 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
       for (const [goalId, job] of jobs) { find(goalId).status = 'pausing'; job.controller.abort(); }
       await Promise.all([...jobs.values()].map(j => j.promise));
       await coordinator.close?.(); await manager.close?.(); persist();
+      await productSource?.close();
       try { if (JSON.parse(readFileSync(lockPath, 'utf8')).owner === owner) unlinkSync(lockPath); } catch {}
       events.removeAllListeners();
     },

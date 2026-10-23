@@ -1,18 +1,21 @@
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { homedir } from 'node:os';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
-import { Controller } from '@flujo-app/swarm-teams/fleet/controller.mjs';
-import { flyProvisioner } from '@flujo-app/swarm-teams/fleet/provisioners.mjs';
-import { FlujoClient } from '@flujo-app/swarm-teams/lib/flujo-client.mjs';
-import { installTemplate } from '@flujo-app/swarm-teams/install.mjs';
-import { BOOT_FLOW } from '@flujo-app/swarm-teams/template/flows.mjs';
-import { teamProfile, specialistStaffingBrief } from './team-profile.mjs';
-import { cloudSdkEntry, importCloudSdk } from './cloud-sdk.mjs';
+import { Controller } from '../../upstream/swarm-teams/fleet/controller.mjs';
+import { flyProvisioner } from '../../upstream/swarm-teams/fleet/provisioners.mjs';
+import { FlujoClient } from '../../upstream/swarm-teams/lib/flujo-client.mjs';
+import { installTemplate } from '../../upstream/swarm-teams/install.mjs';
+import { BOOT_FLOW } from '../../upstream/swarm-teams/template/flows.mjs';
 import { collectFlyArtifacts } from '../artifacts/fly.mjs';
 import { createOwnedRelay, relayFailureCleanupConfirmed } from './relay.mjs';
 import { assertNetworkVacant, assertPlannedNetworkMembers, readFlyOrgApps,
   verifyFreshAppPlan } from './fly-network.mjs';
+import { planSwarm } from '../budget.mjs';
+import { productImageResolver } from '../product-runtime.mjs';
+import { teamProfile, specialistStaffingBrief } from './team-profile.mjs';
+import { cloudSdkEntry, importCloudSdk } from './cloud-sdk.mjs';
 
 const legacyProfilePath = () => path.join(process.env.SWARM_TEAMS_HOME || path.join(homedir(), '.swarm-teams'), 'config.json');
 const profilePath = () => process.env.SEAGULLED_FLEET_PROFILE || legacyProfilePath();
@@ -83,7 +86,7 @@ export function bindVerifiedFlyOrganization(config, account) {
   if (!validFlyAccount(account)) throw new Error(flyUnavailable);
   return { ...config, provisioner: { ...config.provisioner, org: account.orgSlug } };
 }
-const productSourceUnavailable = 'A product-owned FLUJO source and compatible installed cloud SDK are required for isolated Workers.';
+const productSourceUnavailable = 'A packaged, product-owned FLUJO source and cloud SDK are not ready for isolated Workers.';
 const inside = (root, candidate) => {
   const relative = path.relative(root, candidate);
   return Boolean(relative && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
@@ -152,12 +155,13 @@ export function goalCapacity(goal = {}) {
     throw new RangeError('workerTopologyVersion must be 1, 2 or 3.');
   }
   const strict = goal.workerTopologyVersion === 3;
-  const maxWorkers = boundedCount(goal.maxWorkers, strict ? 10 : 5, strict ? 10 : 6, 'maxWorkers');
+  const maxWorkers = boundedCount(goal.maxWorkers, 10, strict ? 10 : 100, 'maxWorkers');
+  if (goal.memoryMb !== undefined && ![1024, 2048, 4096].includes(goal.memoryMb)) throw new RangeError('Memory must be 1, 2, or 4 GB.');
   // Earlier saved goals allowed ten child agents (eleven total conversations).
   // Preserve that exact legacy capacity only when its derived child count agrees.
   const legacyEleven = !strict && goal.conversationsPerWorker === 11 && goal.agentsPerWorker === 10;
   const selected = goal.conversationsPerWorker === undefined ? undefined
-    : legacyEleven ? 11 : boundedCount(goal.conversationsPerWorker, 5, 10, 'conversationsPerWorker');
+    : legacyEleven ? 11 : boundedCount(goal.conversationsPerWorker, 10, 10, 'conversationsPerWorker');
   const legacy = goal.agentsPerWorker;
   if (legacy !== undefined && (!Number.isInteger(legacy) || legacy < 0 || legacy > (strict ? 9 : 10))) {
     throw new RangeError(`agentsPerWorker must be an integer from 0 to ${strict ? 9 : 10}.`);
@@ -165,17 +169,18 @@ export function goalCapacity(goal = {}) {
   if (selected !== undefined && legacy !== undefined && legacy !== selected - 1) {
     throw new RangeError('conversationsPerWorker and agentsPerWorker disagree.');
   }
-  const conversationsPerWorker = selected ?? (legacy === undefined ? strict ? 10 : 5 : legacy + 1);
+  const conversationsPerWorker = selected ?? (legacy === undefined ? 10 : legacy + 1);
   return { maxWorkers, conversationsPerWorker, agentsPerWorker: conversationsPerWorker - 1 };
 }
 export function fleetTopology(goal, { workerCap, relay = false } = {}) {
-  const strict = goal?.workerTopologyVersion === 3;
-  if (!Number.isInteger(workerCap) || workerCap < 1 || workerCap > (strict ? 10 : 6)) throw new RangeError(`Worker count must be 1 to ${strict ? 10 : 6}.`);
-  if (strict) return { initialWorkers: workerCap, limits: { maxWorkers: workerCap,
-    maxDepth: relay ? 2 : 1, maxChildren: relay ? Math.max(1, workerCap - 1) : 1, maxActiveRuns: 1 } };
+  if (goal?.workerTopologyVersion === 3) {
+    if (!Number.isInteger(workerCap) || workerCap < 1 || workerCap > 10) throw new RangeError('Worker count must be 1 to 10.');
+    return {initialWorkers:workerCap,limits:{maxWorkers:workerCap,maxDepth:relay?2:1,maxChildren:relay?Math.max(1,workerCap-1):1,maxActiveRuns:1}};
+  }
+  if (!Number.isInteger(workerCap) || workerCap < 1 || workerCap > 100) throw new RangeError('Worker count must be 1 to 100.');
   const version = goal?.workerTopologyVersion === 2 ? 2 : 1;
   const initialWorkers = version === 2 ? workerCap : 1;
-  const maxWorkers = version === 2 ? Math.min(12, workerCap * 2) : workerCap;
+  const maxWorkers = version === 2 ? Math.min(200, workerCap * 2) : workerCap;
   return { initialWorkers, limits: { maxWorkers,
     maxDepth: relay ? version === 2 ? 3 : 2 : 1,
     maxChildren: relay ? Math.max(1, workerCap - 1) : 1, maxActiveRuns: 2 } };
@@ -185,7 +190,7 @@ const legacyWorkerCap = (config) => Number.isInteger(config?.maxWorkers)
 export function fleetExecutionLimits({ goal, config, diagnostic = false, native = false } = {}) {
   const capacity = goalCapacity(goal);
   return {
-    workerCap: native ? 1 : diagnostic && goal?.maxWorkers === undefined
+    workerCap: native && diagnostic ? 1 : diagnostic && goal?.maxWorkers === undefined
       ? legacyWorkerCap(config) : capacity.maxWorkers,
     teamLimits: { agentTurns: 6, leadTurns: 12, concurrency: capacity.agentsPerWorker },
   };
@@ -196,24 +201,19 @@ const STAFF_BRANCHES = Object.freeze([
   { name: 'independent-verification', angle: 'Independently verify the proposed result and artifacts.' },
   { name: 'adversarial-review', angle: 'Challenge the conclusion with counterexamples and unresolved risks.' },
   { name: 'handoff-synthesis', angle: 'Reconcile the evidence and prepare a bounded handoff.' },
-  { name: 'requirements-check', angle: 'Check every user requirement and identify missing acceptance criteria.' },
-  { name: 'integration-check', angle: 'Exercise component boundaries and validate the combined result.' },
-  { name: 'regression-check', angle: 'Check existing behavior and failure paths for regressions.' },
-  { name: 'delivery-check', angle: 'Check deliverable integrity, instructions and reproducibility.' },
 ]);
 
 /** Admit real controller Worker runs, with one coordinating parent and bounded descendants. */
 export function staffOwnedTeam(controller, root, { task, workerCap, localChildTarget = 4,
   onReserved = () => undefined, onStaffed = () => undefined } = {}) {
-  if (!Number.isInteger(workerCap) || workerCap < 1 || workerCap > 10) throw new RangeError('Worker count must be 1 to 10.');
+  if (!Number.isInteger(workerCap) || workerCap < 1 || workerCap > 100) throw new RangeError('Worker count must be 1 to 100.');
   if (!Number.isInteger(localChildTarget) || localChildTarget < 0 || localChildTarget > 10) {
     throw new RangeError('Local child conversation count must be 0 to 10.');
   }
   const localStaffing = localChildTarget
     ? `At the start of this run, call the installed start_subflow_ tool exactly ${localChildTarget} times with distinct concrete tasks. ` +
       'Record the returned child conversation IDs; then steer and wait for those same children. ' +
-      'Do not start replacement local subflows or report a capacity gate as actual staffing. '
-      + specialistStaffingBrief(localChildTarget)
+      'Do not start replacement local subflows or report a capacity gate as actual staffing. ' + specialistStaffingBrief(localChildTarget)
     : 'This Worker has only its lead conversation; do not start a local subflow. ';
   const leadTask = `${task}\n\n` +
     `You coordinate ${workerCap} owned Worker Machine${workerCap === 1 ? '' : 's'}, including yourself. ` +
@@ -225,7 +225,10 @@ export function staffOwnedTeam(controller, root, { task, workerCap, localChildTa
   onReserved(lead);
   const leadWorker = controller.registry.worker(lead.workerId);
   const prepared = [{ actor: root, worker: leadWorker, task: leadTask }];
-  for (const branch of STAFF_BRANCHES.slice(0, workerCap - 1)) {
+  for (const branch of Array.from({ length: workerCap - 1 }, (_, index) => {
+    const angle = STAFF_BRANCHES[index % STAFF_BRANCHES.length];
+    return { name: `${angle.name}-${index + 1}`, angle: `${angle.angle} Own partition ${index + 1} of ${workerCap - 1}; coordinate concrete non-overlapping work with the team lead.` };
+  })) {
     const childTask = `${task}\n\n` +
       `YOUR DISTINCT ANGLE: ${branch.angle} ${localStaffing}` +
       'post findings with evidence to the shared board, and report actual conversation IDs and remaining uncertainty. ' +
@@ -244,7 +247,7 @@ export function staffOwnedTeam(controller, root, { task, workerCap, localChildTa
   }
   return { lead: runs[0], runs };
 }
-export function verifiedLocalConversations(read, parentConversationId, target, { requireCompleted = false } = {}) {
+export function verifiedLocalConversations(read, parentConversationId, target, {requireCompleted=false}={}) {
   const page = read?.body;
   if (read?.status !== 200 || !Array.isArray(page?.items) || !Number.isInteger(page.total)
     || page.hasMore !== false || page.total !== page.items.length) {
@@ -264,29 +267,23 @@ export function verifiedLocalConversations(read, parentConversationId, target, {
         id: item.id, parentConversationId: item.parentConversationId, status: safeFailureField(item.status) ?? 'unknown',
       })) });
   }
-  if (requireCompleted && descendants.some(item => item.status !== 'completed')) {
-    throw unknown('A local agent has not completed successfully; agreement from its team lead cannot verify it.');
-  }
+  if (requireCompleted && descendants.some(item=>item.status!=='completed')) throw unknown('A local agent has not completed successfully; agreement from its team lead cannot verify it.');
   return descendants.map(({ id, status }) => ({ id, status: safeFailureField(status) ?? 'unknown' }));
 }
-
-/** Count original identities, not capacity or a lead's claim about staffing. */
+/** Count retained original identities rather than a lead's staffing claim. */
 export function verifiedTeamStaffing(entries, workerCount, childCount) {
-  if (!Array.isArray(entries) || entries.length !== workerCount) throw unknown('The original Worker staffing receipt is incomplete.');
-  const workers = new Set(), conversations = new Set();
-  for (const entry of entries) {
-    if (typeof entry.workerId !== 'string' || workers.has(entry.workerId)
-      || typeof entry.leadConversationId !== 'string' || !entry.leadConversationId
-      || !Array.isArray(entry.children) || entry.children.length !== childCount) throw unknown('The original Worker staffing receipt is invalid.');
+  if(!Array.isArray(entries)||entries.length!==workerCount)throw unknown('The original Worker staffing receipt is incomplete.');
+  const workers=new Set(),conversations=new Set();
+  for(const entry of entries){
+    if(typeof entry.workerId!=='string'||workers.has(entry.workerId)||typeof entry.leadConversationId!=='string'||!entry.leadConversationId||!Array.isArray(entry.children)||entry.children.length!==childCount)throw unknown('The original Worker staffing receipt is invalid.');
     workers.add(entry.workerId);
-    for (const id of [entry.leadConversationId, ...entry.children.map(child => child.id)]) {
-      if (typeof id !== 'string' || !id || conversations.has(id)) throw unknown('A staffing receipt repeats a conversation identity.');
+    for(const id of [entry.leadConversationId,...entry.children.map(child=>child.id)]){
+      if(typeof id!=='string'||!id||conversations.has(id))throw unknown('A staffing receipt repeats a conversation identity.');
       conversations.add(id);
     }
-    if (entry.children.some(child => child.status !== 'completed')) throw unknown('A staffing receipt contains an unfinished local agent.');
+    if(entry.children.some(child=>child.status!=='completed'))throw unknown('A staffing receipt contains an unfinished local agent.');
   }
-  return { workerCount: workers.size, localConversationCount: workerCount * childCount,
-    conversationCountVerified: conversations.size, childCompletionVerified: true };
+  return {workerCount:workers.size,localConversationCount:workerCount*childCount,conversationCountVerified:conversations.size,childCompletionVerified:true};
 }
 const sourceFingerprint = (origin) => createHash('sha256').update(new URL(origin).origin.toLowerCase()).digest('hex').slice(0, 24);
 const holdPath = (dataDir, origin) => path.join(dataDir, 'fleet', `source-admission-${sourceFingerprint(origin)}.json`);
@@ -404,6 +401,9 @@ const PRODUCT_BINDINGS = Object.freeze({
   anthropic: { provider: 'anthropic', adapter: 'anthropic', baseUrl: 'https://api.anthropic.com' },
 });
 const exactProductBinding = (providerId, model, route) => {
+  if (providerId === 'codex') return nativeCodex(model)
+    && typeof model.reasoningEffort === 'string'
+    && route?.authTransfer === 'encrypted-workspace-snapshot';
   if (providerId === 'private-h100') {
     try {
       const url = new URL(model?.baseUrl);
@@ -434,7 +434,7 @@ async function inspectFleet({ dataDir, providerId, fleetRoute, goalId, diagnosti
   }
   if (!diagnostic && (!exactProductBinding(providerId, fleetRoute.model, fleetRoute)
     || typeof fleetRoute.model.name !== 'string' || !fleetRoute.model.name
-    || typeof fleetRoute.model.apiKey !== 'string' || !fleetRoute.model.apiKey)) {
+    || typeof fleetRoute.model.apiKey !== 'string' || !fleetRoute.model.apiKey && !nativeCodex(fleetRoute.model))) {
     return { available: false, detail: 'The selected provider has no usable Fly model binding.' };
   }
   if (!diagnostic && (modelHold(dataDir, fleetRoute.model) || knownQuotaHold(dataDir, fleetRoute.model))) {
@@ -488,11 +488,8 @@ async function inspectFleet({ dataDir, providerId, fleetRoute, goalId, diagnosti
     return { available: false, detail: 'The local FLUJO source is unavailable.' };
   }
   if (nativeCodex(config.model)) {
-    if (!diagnostic && fleetRoute.verification !== 'qualified') {
-      return { available: false, detail: 'The selected keyless Codex route is not qualified for Fly. Local provider work remains available.' };
-    }
     return { available: true, provider: 'codex-subscription-candidate',
-      detail: 'A keyless Codex model is configured. The isolated boot flow must confirm this login before any Fly worker is created; cloud execution is not yet qualified.',
+      detail: 'Codex login transfer is authorized. FLUJO encrypts it into each isolated Worker snapshot; inference executes on Fly and is verified from original Worker receipts.',
       ...(!diagnostic ? { providerId } : {}), config };
   }
   const original = await modelProbe(config.model, { signal, deadlineAt });
@@ -536,10 +533,14 @@ export async function fleetDiagnosticStatus({ dataDir } = {}) {
 export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetRoute,
   diagnostic = false, reservationId, reserveCloud, flyAccount, sourceBinding,
   assertFlyAccountCurrent,
-  onStatus = () => undefined, onCompany = () => undefined }) {
+  onStatus = () => undefined, onCompany = () => undefined, onWorker = () => undefined }) {
   if (!goal || typeof goal.id !== 'string' || !/^[\w-]{1,100}$/.test(goal.id)) throw new Error('A safe goal id is required for isolated fleet work.');
   goalCapacity(goal);
-  const fleetDeadlineAt = Date.now() + 30 * 60_000;
+  // Company monitoring owns the requested execution cutoff. These outer
+  // transport bounds leave time for provisioning and a 50-minute cloud run.
+  // Diagnostic probes retain their shorter limits.
+  const runTimeoutMs = (diagnostic ? 20 : 60) * 60_000;
+  const fleetDeadlineAt = Date.now() + (diagnostic ? 30 : 90) * 60_000;
   assertAdmission(signal, fleetDeadlineAt);
   if (!diagnostic && !validFlyAccount(flyAccount)) return { available: false, detail: flyUnavailable };
   const discovered = await inspectFleet({ dataDir, providerId: goal.providerId, fleetRoute, goalId: goal.id,
@@ -614,6 +615,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
   let bootCleanupConfirmed = false;
   let remoteAccepted = false;
   let cloudReserved = false;
+  let reservedUsd = Number.isFinite(maxUsd) ? maxUsd : undefined;
   let cleanupConfirmed = false;
   let relayCleanupConfirmed = true;
   let result;
@@ -629,7 +631,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     await installTemplate(boot, { model: config.model, bootOnly: true, browser: false });
     record({ state: 'boot-ready' });
     assertAdmission(signal, fleetDeadlineAt);
-    if (nativeCodex(config.model)) {
+    if (diagnostic && nativeCodex(config.model)) {
       onStatus('Checking the keyless Codex model in the isolated local boot flow.');
       const admission = await boot.runFlow({ flowName: 'swarm_boot', prompt: 'Reply with the single word READY.', timeoutMs: 90_000 });
       record({ state: admission.status === 'completed' && admission.output.trim() === 'READY' ? 'model-ready' : 'model-refused',
@@ -649,7 +651,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     const flyEnv = isolatedFlyEnvironment(flyAccount, process.env,
       diagnostic ? undefined : config.sourceInstanceDir);
     mkdirSync(cloudDirectory, { recursive: true, mode: 0o700 });
-    const { ManagedCloud } = await importCloudSdk('.', config.provisioner.flujoCloudPath);
+    const { ManagedCloud } = await import(pathToFileURL(path.join(config.provisioner.flujoCloudPath, 'lib', 'managed.mjs')).href);
     if (ManagedCloud.privateNetworkContractVersion !== 1
       || typeof ManagedCloud.prototype.openOwnedProxy !== 'function'
       || typeof ManagedCloud.prototype.credential !== 'function'
@@ -658,7 +660,8 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
         { outcome: 'not_applied' });
     }
     await assertAccountCurrent();
-    cloudManaged = new ManagedCloud({ env: flyEnv, directory: cloudDirectory });
+    cloudManaged = new ManagedCloud({ env: flyEnv, directory: cloudDirectory,
+      ...(!diagnostic ? {resolveImage:productImageResolver(config.provisioner.flujoCloudPath)} : {}) });
     const workerSource = config.provisioner.source ?? config.supervisor.origin;
     const workerOrg = intent.org;
     const workerRegion = config.provisioner.region ?? 'iad';
@@ -679,7 +682,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
         { outcome: 'not_applied' });
     }
     assertAdmission(signal, fleetDeadlineAt);
-    const { createFlyRunner } = await importCloudSdk('./process', config.provisioner.flujoCloudPath);
+    const { createFlyRunner } = await import(pathToFileURL(path.join(config.provisioner.flujoCloudPath, 'lib', 'process.mjs')).href);
     const selectedFly = createFlyRunner({ env: flyEnv, binary: flyAccount.flyctlPath });
     const flyToken = (await selectedFly.run(['auth', 'token'])).trim();
     const org = await cloudManaged.organization(diagnostic ? config.provisioner.org : flyAccount.orgSlug);
@@ -706,16 +709,19 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
           ? 'NETWORK_PENDING' : 'NETWORK_MEMBERSHIP' });
       }
     };
-    const multiWorker = !nativeCodex(config.model);
+    const multiWorker = !diagnostic || !nativeCodex(config.model);
     const { workerCap, teamLimits } = fleetExecutionLimits({ goal, config, diagnostic, native: !multiWorker });
     if (!diagnostic && goal.providerId === 'private-h100') {
       if (typeof reservationId !== 'string' || !/^[\w-]{1,100}$/.test(reservationId)
-        || typeof reserveCloud !== 'function' || !Number.isFinite(maxUsd) || maxUsd <= 0) {
+        || typeof reserveCloud !== 'function' || !(maxUsd === Infinity && goal.unlimited === true || Number.isFinite(maxUsd)) || maxUsd <= 0) {
         throw Object.assign(new Error('Private Fly work needs a durable allowance reservation.'), { outcome: 'not_applied' });
       }
-      reserveCloud({ id: reservationId, amountUsd: maxUsd });
+      const cloudAllowance = Number.isFinite(maxUsd) ? maxUsd : Math.ceil((planSwarm({ unlimited: true, workers: workerCap,
+        agents: goal.conversationsPerWorker ?? 10, memoryMb: goal.memoryMb ?? 4096, hours: .5 }).estimate.computeUsd + .01) * 100) / 100;
+      reservedUsd = cloudAllowance;
+      reserveCloud({ id: reservationId, amountUsd: cloudAllowance });
       cloudReserved = true;
-      record({ state: 'budget-reserved', reservationId, reservedUsd: maxUsd });
+      record({ state: 'budget-reserved', reservationId, reservedUsd: cloudAllowance });
     }
     if (multiWorker) {
       assertAdmission(signal, fleetDeadlineAt);
@@ -756,10 +762,12 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     assertAdmission(signal, fleetDeadlineAt);
     const topology = fleetTopology(goal, { workerCap, relay: Boolean(relay) });
     const provisioner = await flyProvisioner({ ...config.provisioner, templateWorkspace: bootWorkspace,
+      ...(!diagnostic ? {resolveImage:productImageResolver(config.provisioner.flujoCloudPath)} : {}),
+      memoryMb: goal.memoryMb ?? 4096,
       source: workerSource,
-      fleetReachable: Boolean(relay), concurrency: workerCap,
+      fleetReachable: Boolean(relay), concurrency: 1,
       initialWorkers: topology.initialWorkers,
-      teamLimits, specialists: teamProfile(goal), flyEnv, cloudDirectory, network: intent.network,
+      teamLimits, specialists:teamProfile(goal), flyEnv, cloudDirectory, network: intent.network,
       accountRef: intent.accountRef,
       verifyFreshApp, onPlannedApp: planApp, onConfirmedApp: confirmApp, onRetiredApp: retireApp,
       verifyNetwork });
@@ -786,7 +794,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     };
     controller = new Controller({ registryPath, operatorToken: randomBytes(32).toString('base64url'),
       publicUrl: 'http://127.0.0.1:1', remoteUrl: relay?.remoteUrl,
-      provisioner, log: () => undefined, runTimeoutMs: 20 * 60_000, deadlineAt: fleetDeadlineAt,
+      provisioner, onActivity: onWorker, log: () => undefined, runTimeoutMs, deadlineAt: fleetDeadlineAt,
       maxRunsPerWorker: [2, 3].includes(goal.workerTopologyVersion) ? 1 : undefined,
       specialists: teamProfile(goal),
       beforeRetire: async ({ worker, target }) => {
@@ -843,7 +851,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     for (const staffedRun of staffed) {
       while (true) {
         if (signal?.aborted) throw unknown('Fly work was interrupted. The original runs and Workers need reconciliation.');
-        if (Date.now() >= fleetDeadlineAt) throw unknown('The Fly fleet reached its 30-minute deadline. Preserve its original runs for reconciliation.');
+        if (Date.now() >= fleetDeadlineAt) throw unknown('The Fly fleet reached its transport deadline. Preserve its original runs for reconciliation.');
         const current = await controller.waitRun('operator', { runId: staffedRun.runId, timeoutMs: 10_000 });
         if (current.state !== 'running') { settled.push(current); break; }
         await sleep(0);
@@ -874,7 +882,8 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     for (const staffedRun of staffed) {
       await observeWorkerConversations(controller.registry.worker(staffedRun.workerId));
     }
-    if (goal.workerTopologyVersion === 3) verifiedTeamStaffing(localConversations, workerCap, teamLimits.concurrency);
+    const staffingProof = goal.workerTopologyVersion === 3
+      ? verifiedTeamStaffing(localConversations, workerCap, teamLimits.concurrency) : null;
     record({ state: 'run-completed' });
     const artifactDir = path.join(dataDir, 'artifacts', goal.id);
     const resultPath = path.join(artifactDir, 'fly-result.txt');
@@ -891,17 +900,17 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     if ([2, 3].includes(goal.workerTopologyVersion) && (localConversationErrors.length || Object.values(controller.registry.state.workers)
       .filter((worker) => worker.depth > 0).some((worker) =>
         !localConversations.some((entry) => entry.workerId === worker.id)))) {
-      throw unknown('A spawned Worker lacks its requested conversation receipt. Preserve the private tree for reconciliation.');
+      throw unknown('A spawned Worker lacks its verified conversation receipt. Preserve the private tree for reconciliation.');
     }
     if (artifactErrors.length) throw Object.assign(new Error('Owned Fly output capture was incomplete. The worker tree was retired; inspect the private capture receipts.'),
       { outcome: 'failed' });
     controller.registry.finishGoal(goal.id, result.result);
     record({ state: 'fly-retired', flyCleanupConfirmed: true });
     delivered = { available: true, text: result.result, artifacts, usage: { inputTokens: 0, outputTokens: 0, costUsd: null, costKind: 'unknown',
-      reservedUsd: maxUsd, billingPending: true, ...(cloudReserved ? { reservationId } : {}) },
+      reservedUsd, billingPending: true, ...(cloudReserved ? { reservationId } : {}) },
       sandbox: { kind: 'fly', workerId: child.workerId, runId: child.runId, retired: true, cleanupConfirmed: true,
-        verification: goal.workerTopologyVersion === 3 ? 'original-worker-hierarchy-v2' : 'original-worker-hierarchy-v1', relayUsed: Boolean(relay),
-        ...(goal.workerTopologyVersion === 3 ? verifiedTeamStaffing(localConversations, workerCap, teamLimits.concurrency) : {}),
+        verification: staffingProof ? 'original-worker-hierarchy-v2' : 'original-worker-hierarchy-v1', relayUsed: Boolean(relay),
+        ...(staffingProof ?? {}),
         workerCount: localConversations.length, initialWorkerCount: staffed.length,
         teamLeadRuns: staffed.map((item) => item.runId),
         localConversationCount: localConversations.reduce((sum, item) => sum + item.children.length, 0),
@@ -917,7 +926,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
       error.message = error.message.replaceAll(config.model.apiKey, '[redacted]');
     }
     const usage = remoteAccepted || !relayCleanupConfirmed || cloudReserved ? { inputTokens: 0, outputTokens: 0, costUsd: null, costKind: 'unknown',
-      reservedUsd: maxUsd, billingPending: true, ...(cloudReserved ? { reservationId } : {}) } : undefined;
+      reservedUsd, billingPending: true, ...(cloudReserved ? { reservationId } : {}) } : undefined;
     if (remoteAccepted && child && controller && !cleanupConfirmed) {
       try {
         const retirement = await controller.retire('operator', { workerId: child.workerId });
@@ -977,7 +986,7 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     if (!relayCleanupConfirmed && !remoteAccepted) {
       throw Object.assign(unknown('Owned relay cleanup is unconfirmed; inspect its exact private intent before another cloud attempt.'),
         { outcome: 'unknown', usage: { inputTokens: 0, outputTokens: 0, costUsd: null, costKind: 'unknown',
-          reservedUsd: maxUsd, billingPending: true } });
+          reservedUsd, billingPending: true } });
     }
     if (delivered) {
       delivered.sandbox.bootCleanupConfirmed = bootCleanupConfirmed;

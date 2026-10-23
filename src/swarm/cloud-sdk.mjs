@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export function installedCloudSdkRoot() {
-  return path.dirname(fileURLToPath(import.meta.resolve('flujo-cloud/package.json')));
+  return path.dirname(path.dirname(fileURLToPath(import.meta.resolve('flujo-cloud'))));
 }
 
 /** Resolve the selected SDK's public exports without importing its internal files. */
