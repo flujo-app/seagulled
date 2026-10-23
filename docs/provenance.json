@@ -66,7 +66,8 @@
     "before-retirement output capture and recovery holds",
     "Codex model installation without unsupported creativity",
     "optional specialist briefs through existing shared subflow gates",
-    "controller forwarding of caller-supplied goal identities"
+    "controller forwarding of caller-supplied goal identities",
+    "persisted optional lifetime Worker cap and exact completed staffing proof"
   ],
   "factoryExtraction": {
     "sourceCommit": "510b733f8af0305bb2969592fe25cc73549306a4",
@@ -140,5 +141,24 @@
     "synthetic": true,
     "audio": false,
     "voiceClone": false
+  },
+  "productDependencies": {
+    "flujo": {
+      "name": "flujo-ai",
+      "version": "3.48.0",
+      "distribution": "npm"
+    },
+    "factory": {
+      "name": "flujo-factory",
+      "version": "0.3.0",
+      "distribution": "public GitHub release",
+      "sha256": "cdfba72aeb582eccbb0a3da7dd544a503ab1bec34479b6e1ca90af6ddc4b2abe"
+    },
+    "cloud": {
+      "name": "flujo-cloud",
+      "version": "0.2.0",
+      "distribution": "public GitHub release",
+      "sha256": "ec73db402226b5384aba2fe135fa36d4110a24692b5f3c1bc5227290d94f6439"
+    }
   }
 }

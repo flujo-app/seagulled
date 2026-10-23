@@ -56,3 +56,11 @@ test('CLI returns a waiting exit code for a blocked company without claiming exe
   assert.match(result.stdout, /"status": "queued"/);
   assert.doesNotMatch(result.stdout, /team has started|company has started/i);
 });
+
+test('CLI forwards the exact 10x10 request to the desktop without treating readiness as execution', async t => {
+  const fixture = await session(t, 'blocked');
+  const result = await run(['goal', 'Ten teams please', '--home', fixture.dataDir, '--workers', '10', '--conversations', '10', '--json']);
+  assert.equal(result.code, 2, result.stderr);
+  assert.deepEqual(fixture.submitted(), { text: 'Ten teams please', maxWorkers: 10, conversationsPerWorker: 10 });
+  assert.doesNotMatch(result.stdout, /100.*verified|company has started/i);
+});

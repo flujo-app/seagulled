@@ -70,9 +70,9 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
   } catch (e) { unlinkSync(lockPath); throw new Error(`Saved conversation needs recovery: ${e.message}. Your original file is preserved.`); }
   for (const goal of state.goals) {
     if (goal.workerActivity) goal.workerActivity.current = false;
-    // Unfinished topology-v2 goals from earlier builds must pass company
+    // Unfinished fleet goals from earlier builds must pass company
     // admission; terminal historical results retain their original provenance.
-    if (goal.executionMode === undefined && goal.workerTopologyVersion === 2
+    if (goal.executionMode === undefined && [2, 3].includes(goal.workerTopologyVersion)
       && ['queued', 'paused', 'running', 'pausing', 'stopping', 'interrupted'].includes(goal.status)) {
       goal.executionMode = 'company';
     }

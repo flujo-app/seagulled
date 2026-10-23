@@ -49,17 +49,22 @@ export class Registry {
     renameSync(temporary, this.path);
   }
 
-  createGoal({ id = `g-${randomUUID().slice(0, 8)}`, text, limits = {} }) {
+  createGoal({ id = `g-${randomUUID().slice(0, 8)}`, text, limits = {}, maxTotalWorkers }) {
     if (typeof text !== 'string' || !text.trim()) fail('INVALID', 'A goal needs text.');
     if (typeof id !== 'string' || !/^[\w-]{1,100}$/.test(id)) fail('INVALID', 'Goal id must be a short identifier.');
     if (this.state.goals[id]) fail('CONFLICT', 'Goal id already exists.', 409);
+    if (maxTotalWorkers !== undefined && (!Number.isInteger(maxTotalWorkers) || maxTotalWorkers < 1 || maxTotalWorkers > 1000)) {
+      fail('INVALID', 'The lifetime Worker limit must be an integer from 1 to 1000.');
+    }
     const merged = { ...DEFAULT_LIMITS };
     for (const [key, value] of Object.entries(limits)) {
       if (!(key in DEFAULT_LIMITS)) fail('INVALID', `Unknown limit ${key}.`);
       if (!Number.isInteger(value) || value < 1 || value > 1000) fail('INVALID', `Limit ${key} must be an integer from 1 to 1000.`);
       merged[key] = value;
     }
-    this.state.goals[id] = { id, text: text.trim(), limits: merged, state: 'active', createdAt: this.clock(), result: null };
+    this.state.goals[id] = { id, text: text.trim(), limits: merged,
+      ...(maxTotalWorkers === undefined ? {} : { maxTotalWorkers }),
+      state: 'active', createdAt: this.clock(), result: null };
     this.save();
     return this.state.goals[id];
   }
@@ -97,6 +102,12 @@ export class Registry {
     if (parentId) {
       const parent = this.worker(parentId);
       if (parent.goalId !== goalId || !ACTIVE.includes(parent.state)) fail('PARENT', 'Parent is not an active node of this goal.', 409);
+      const lifetimeWorkers = Object.values(this.state.workers).filter((worker) => worker.goalId === goalId && worker.depth > 0);
+      if (goal.maxTotalWorkers !== undefined && lifetimeWorkers.length >= goal.maxTotalWorkers) {
+        fail('CAPACITY', lifetimeWorkers.some((worker) => !ACTIVE.includes(worker.state))
+          ? `The goal's ${goal.maxTotalWorkers} lifetime Worker slots are used; retired slots cannot be replaced.`
+          : `The goal already uses all ${goal.maxTotalWorkers} lifetime Workers.`, 409);
+      }
       depth = parent.depth + 1;
       if (depth > goal.limits.maxDepth) fail('CAPACITY', `Tree depth ${goal.limits.maxDepth} reached; do the work in this Worker instead.`, 409);
       if (workers.filter((worker) => worker.parentId === parentId).length >= goal.limits.maxChildren) {

@@ -41,6 +41,7 @@
     "test": "node --test tests/*.test.mjs upstream/swarm-teams/test/fleet.test.mjs upstream/swarm-teams/test/recovery.test.mjs upstream/swarm-teams/test/diagnostics-guard.test.mjs upstream/swarm-teams/test/specialists.test.mjs upstream/swarm-teams/test/flujo-client-cancellation.test.mjs upstream/swarm-teams/test/fly-network.test.mjs",
     "package": "electron-builder --dir",
     "dist": "electron-builder --win portable --publish never",
+    "package:cli": "node scripts/package-cli.mjs",
     "check": "node scripts/check-release.mjs",
     "prepackage": "node scripts/prepare-helpers.mjs && node scripts/prepare-journey-media.mjs && node scripts/prepare-product-node.mjs",
     "predist": "node scripts/prepare-helpers.mjs && node scripts/prepare-journey-media.mjs && node scripts/prepare-product-node.mjs"
