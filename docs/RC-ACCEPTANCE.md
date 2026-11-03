@@ -1,5 +1,7 @@
 # RC acceptance
 
+The current 2026-10-07 startup journey is recorded in [JOURNEY-ACCEPTANCE.md](JOURNEY-ACCEPTANCE.md), with account/provider behavior in [AUTH.md](AUTH.md). Those records supersede older UI/default-count descriptions below. The dependency-complete isolated checkout passes 345 tests and 14 focused UI/media checks. Actual packaged checks qualify auth-first activation controls, Modal deselection using an existing account session, dialogue inside the modal, the top-right app X, six decoded video/audio cues, the exact silent Starfield loading clip with 180 ms crossfades, bundled helpers and save/pause/resume/edit/delete controls. The revised seven-second Fly completion cue plays through its natural end. Historical Worker hierarchy rendering clears active animation after restart. Live deployment and remote subscription routes remain unqualified. Earlier artifact hashes below identify historical candidates only.
+
 ## Final desktop publication
 
 The selected visual is one approved 12-second forward/reverse movie, used as the endless fullscreen background. Listening, speech, goals and Advanced keep the same movie running. This replaces the earlier separate-scene film requirement; the source and package checks below are historical checkpoints. The current publication adds this loop and its attribution to the existing desktop, with no further feature work.

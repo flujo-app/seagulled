@@ -1,75 +1,96 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createServer} from 'node:http';
-import {readFile} from 'node:fs/promises';
-import {dirname,join} from 'node:path';
-import {fileURLToPath} from 'node:url';
-import {chromium} from '@playwright/test';
-
-const ui=join(dirname(fileURLToPath(import.meta.url)),'..','ui');
-const token='setup-fixture';
-async function body(request){let raw='';for await(const chunk of request)raw+=chunk;return JSON.parse(raw||'{}');}
-
-test('verified Fly and Modal sign-ins advance once; a closed setup ignores a late sign-in',async t=>{
-  const auth={fly:{id:'fly',connected:false,loginAvailable:true},modal:{id:'modal',connected:false,loginAvailable:true}};
-  const calls=[];let heldModal,resolveModalRequested,cancels=0,goalPosts=0;
-  const modalRequest=new Promise(resolve=>{resolveModalRequested=resolve;});
-  const streams=new Set();
-  const server=createServer(async(request,response)=>{
-    const route=new URL(request.url,'http://localhost').pathname;
-    const send=(code,value)=>response.writeHead(code,{'Content-Type':'application/json'}).end(JSON.stringify(value));
-    if(route==='/favicon.ico'){response.writeHead(204).end();return;}
-    if(route.startsWith('/api/')&&request.headers.authorization!==`Bearer ${token}`){send(401,{error:'Unauthorized'});return;}
-    if(route==='/api/events'){response.writeHead(200,{'Content-Type':'text/event-stream'});streams.add(response);request.on('close',()=>streams.delete(response));return;}
-    if(route==='/api/state'){send(200,{version:1,conversation:[],goals:[],providers:[],spend:{},swarm:{status:'idle'}});return;}
-    if(route==='/api/budget/default'){send(200,{amount:50,currency:'USD',allowanceUsd:50,usdPerUnit:1});return;}
-    if(route==='/api/voice/capabilities'){send(200,{transcribe:false,speak:false,ready:false,reason:'Voice is unavailable.'});return;}
-    if(route==='/api/providers/discover'){send(200,[]);return;}
-    if(route==='/api/auth/state'){send(200,auth);return;}
-    if(route==='/api/auth/cancel'){cancels++;send(200,{cancelled:true});return;}
-    if(route==='/api/auth/connect'){
-      const {id}=await body(request);calls.push(id);
-      if(id==='modal'&&heldModal===true){heldModal=response;resolveModalRequested();return;}
-      auth[id].connected=true;send(200,auth[id]);return;
-    }
-    if(route==='/api/chat'){goalPosts++;send(202,{id:'unexpected'});return;}
-    const file={'/':'index.html','/index.html':'index.html','/app.js':'app.js','/styles.css':'styles.css','/stage.mjs':'stage.mjs','/movie-player.mjs':'movie-player.mjs','/movie-manifest.json':'movie-manifest.json','/goal-input.mjs':'goal-input.mjs','/voice-capture.mjs':'voice-capture.mjs'}[route];
-    if(file){response.writeHead(200,{'Content-Type':file.endsWith('.css')?'text/css':file.endsWith('.html')?'text/html':file.endsWith('.json')?'application/json':'text/javascript'}).end(await readFile(join(ui,file)));return;}
-    response.writeHead(404).end();
-  });
-  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
-  t.after(()=>{for(const stream of streams)stream.end();server.close();});
-  const browser=await chromium.launch({channel:'chrome',headless:true});t.after(()=>browser.close());
-  const url=`http://127.0.0.1:${server.address().port}/#token=${token}`;
-  const page=await browser.newPage();
-  await page.goto(url);
-  await page.getByRole('button',{name:'Start'}).click();
-  await page.getByRole('heading',{name:'Get the team ready'}).waitFor();
-  await page.locator('#fly-connect').click();
-  assert.equal(await page.locator('#setup-dialog').isVisible(),true);
-  await page.locator('#modal-connect').click();
-  await page.getByRole('dialog',{name:'Advanced'}).waitFor();
+import {launchJourney} from './fixtures/journey-fixture.mjs';
+test('first launch presents one two-step wizard and persists verified selected accounts',async t=>{
+  const f=await launchJourney(t);const {page}=f;
+  assert.equal(await page.locator('#new-swarm').isVisible(),false);
+  await page.getByRole('dialog',{name:'Account setup'}).waitFor();
+  assert.equal(await page.locator('#provider-step .logo').count(),3);
+  assert.equal(await page.locator('#setup-confirm').isDisabled(),true);
+  assert.equal(await page.getByRole('button',{name:'Codex',exact:true}).isDisabled(),true);
+  await page.getByRole('button',{name:'Sign in Codex',exact:true}).click();
+  await page.waitForFunction(()=>!document.querySelector('[data-provider="codex"]').disabled);
+  await page.getByRole('button',{name:'Codex',exact:true}).click();
+  await page.waitForFunction(()=>!document.getElementById('setup-confirm').disabled);
+  assert.deepEqual(f.calls,[{kind:'provider',id:'codex'}]);
+  await page.getByRole('button',{name:'Confirm accounts'}).click();
+  await page.waitForFunction(()=>document.getElementById('cue-video').currentSrc.endsWith('/confirmed.mp4'));
+  assert.match(await page.locator('#cue-video').evaluate(video=>video.currentSrc),/\/confirmed\.mp4$/);
+  await page.locator('#fly-step').waitFor();
+  await page.getByRole('button',{name:'Connect Fly'}).click();
+  await page.waitForFunction(()=>!document.getElementById('setup-dialog').open);
+  assert.ok(f.runtime.snapshot().setup.completedAt);
+  assert.deepEqual(f.runtime.snapshot().setup.providers,['codex']);
+  assert.equal(await page.locator('#new-swarm').isVisible(),true);
+  assert.equal(f.runtime.snapshot().goals.length,0);
+  await page.reload();await page.locator('#new-swarm').waitFor();
   assert.equal(await page.locator('#setup-dialog').isVisible(),false);
-  assert.equal(await page.locator('#setup-continue').count(),0);
-  assert.deepEqual(calls,['fly','modal']);
-  assert.equal(goalPosts,0);
+  assert.deepEqual(f.errors,[]);
+});
 
-  auth.fly.connected=false;auth.modal.connected=false;heldModal=true;
-  const late=await browser.newPage();
-  await late.goto(url);
-  await late.getByRole('button',{name:'Start'}).click();
-  await late.getByRole('heading',{name:'Get the team ready'}).waitFor();
-  await late.locator('#fly-connect').click();
-  await late.locator('#modal-connect').click();
-  await modalRequest;
-  await late.getByRole('button',{name:'Close setup'}).click();
-  auth.modal.connected=true;sendHeld();
-  await late.waitForFunction(()=>!document.getElementById('setup-dialog').open);
-  await late.waitForTimeout(100);
-  assert.equal(await late.locator('#advanced-dialog').isVisible(),false);
-  assert.equal(cancels,1);
-  assert.deepEqual(calls,['fly','modal','fly','modal']);
-  assert.equal(goalPosts,0);
+test('Modal sign-in is separate from activation and uses the second supplied confirmation clip',async t=>{
+  const f=await launchJourney(t),{page}=f;await page.locator('#setup-dialog').waitFor();
+  await page.getByRole('button',{name:'Sign in Modal',exact:true}).click();await page.waitForFunction(()=>!document.querySelector('[data-provider="modal"]').disabled);
+  assert.equal(await page.getByRole('button',{name:'Modal',exact:true}).getAttribute('aria-pressed'),'false');
+  await page.getByRole('button',{name:'Modal',exact:true}).click();await page.waitForFunction(()=>!document.getElementById('setup-confirm').disabled);
+  assert.deepEqual(f.calls,[{kind:'account',id:'modal'}]);await page.getByRole('button',{name:'Confirm accounts'}).click();
+  await page.waitForFunction(()=>document.getElementById('cue-video').currentSrc.endsWith('/confirmed-alternate.mp4'));
+  assert.match(await page.locator('#cue-video').evaluate(video=>video.currentSrc),/\/confirmed-alternate\.mp4$/);
+  await page.locator('#fly-step').waitFor();await page.getByRole('button',{name:'Close setup'}).click();assert.deepEqual(f.errors,[]);
+});
+test('closing setup cancels native sign-in and fences its late completion',async t=>{
+  const f=await launchJourney(t,{holdLogin:true});await f.page.locator('#setup-dialog').waitFor();
+  await f.page.getByRole('button',{name:'Sign in Codex',exact:true}).click();
+  await f.page.getByRole('button',{name:'Close setup'}).click();f.releaseLogin();
+  await f.page.waitForFunction(()=>!document.getElementById('setup-dialog').open);
+  assert.equal(f.runtime.snapshot().setup,undefined);assert.equal(f.runtime.snapshot().goals.length,0);
+  assert.equal(await f.page.locator('#project-dialog').isVisible(),false);
+});
 
-  function sendHeld(){const response=heldModal;heldModal=undefined;response.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify(auth.modal));}
+test('all initial auth checks finish before activation buttons appear',async t=>{
+  const f=await launchJourney(t,{accountReady:true,holdChecks:true}),{page}=f;
+  await page.waitForFunction(()=>document.getElementById('movie-video').readyState>=2);
+  assert.equal(await page.locator('#setup-dialog').isVisible(),false);
+  await page.waitForFunction(()=>document.getElementById('loading-video').currentTime>.1);
+  const loading=await page.evaluate(()=>({active:document.getElementById('movie').dataset.loading,opacity:getComputedStyle(document.getElementById('loading-video')).opacity,toddOpacity:getComputedStyle(document.getElementById('movie-video')).opacity,muted:document.getElementById('loading-video').muted,loop:document.getElementById('loading-video').loop}));
+  assert.deepEqual(loading,{active:'true',opacity:'1',toddOpacity:'0',muted:true,loop:true});
+  assert.deepEqual(f.checks.sort(),['accounts','providers']);assert.deepEqual(f.calls,[]);
+  f.releaseChecks();await page.locator('#provider-step').waitFor();
+  assert.equal(await page.getByRole('button',{name:'Modal',exact:true}).isEnabled(),true);
+  assert.equal(await page.getByRole('button',{name:'Codex',exact:true}).isEnabled(),true);assert.deepEqual(f.calls,[]);
+  await page.waitForFunction(()=>document.getElementById('movie').dataset.loading==='false'&&document.getElementById('loading-video').paused&&getComputedStyle(document.getElementById('movie-video')).opacity==='1');
+  assert.equal(await page.locator('#movie-video').evaluate(v=>getComputedStyle(v).opacity),'1');
+});
+
+test('activation toggles are instant and Modal stays off through state updates and wizard completion',async t=>{
+  const f=await launchJourney(t,{accountReady:true}),{page}=f;await page.locator('#provider-step').waitFor();
+  const modal=page.getByRole('button',{name:'Modal',exact:true});assert.equal(await modal.getAttribute('aria-pressed'),'true');
+  const checksBefore=f.checks.length;await modal.click();assert.equal(await modal.getAttribute('aria-pressed'),'false');assert.equal(await modal.isEnabled(),true);
+  await f.runtime.discover();await page.waitForTimeout(100);assert.equal(await modal.getAttribute('aria-pressed'),'false');
+  await modal.click();await modal.click();assert.equal(await modal.getAttribute('aria-pressed'),'false');assert.deepEqual(f.calls,[]);
+  assert.equal(f.checks.length,checksBefore+1);
+  const indicator=await modal.locator('i').evaluate(el=>getComputedStyle(el).backgroundColor);assert.equal(indicator,'rgb(137, 144, 150)');
+  await page.getByRole('button',{name:'Confirm accounts'}).click();await page.locator('#fly-step').waitFor();await page.getByRole('button',{name:'Connect Fly'}).click();
+  await page.waitForFunction(()=>!document.getElementById('setup-dialog').open);assert.deepEqual(f.runtime.snapshot().setup.providers,['codex']);
+  await page.getByRole('button',{name:'New swarm'}).click();assert.equal(await page.locator('#goal-provider').inputValue(),'codex');
+  assert.equal(await page.locator('#goal-provider option[value="modal"]').evaluate(el=>el.disabled),true);
+  await page.getByRole('button',{name:'Connect accounts'}).click();await page.locator('#provider-step').waitFor();assert.equal(await modal.getAttribute('aria-pressed'),'false');assert.deepEqual(f.errors,[]);
+});
+
+test('dialogue video stays inside the modal and returns to the uninterrupted background loop',async t=>{
+  const f=await launchJourney(t,{accountReady:true}),{page}=f;await page.locator('#provider-step').waitFor();
+  await page.getByRole('button',{name:'Modal',exact:true}).click();
+  assert.equal(await page.locator('#setup-dialog video').count(),1);
+  assert.equal(await page.locator('#frame > #cue-video').count(),0);
+  const bounds=await page.locator('#cue-video').boundingBox(),dialogBounds=await page.locator('#setup-dialog').boundingBox();assert.ok(bounds.x>dialogBounds.x&&bounds.y>dialogBounds.y&&bounds.width<dialogBounds.width);assert.ok(bounds.height<=240);
+  await page.locator('#cue-video').evaluate(video=>video.dispatchEvent(new Event('ended')));
+  assert.equal(await page.locator('#cue-video').isVisible(),true);
+  assert.equal(await page.locator('#movie-video').evaluate(video=>video.paused),false);assert.deepEqual(f.errors,[]);
+});
+
+test('the app close X stays at the window corner and is clickable on home and above either dialog',async t=>{
+  const f=await launchJourney(t,{configured:true}),{page}=f;await page.locator('#new-swarm').waitFor();
+  const check=async()=>{assert.deepEqual(await page.locator('#app-close').boundingBox(),{x:1216,y:16,width:48,height:48});assert.equal(await page.locator('#app-close').evaluate(button=>{const r=button.getBoundingClientRect();return document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)===button;}),true);};
+  await check();await page.getByRole('button',{name:'New swarm'}).click();await page.locator('#project-dialog').waitFor();await check();
+  await page.getByRole('button',{name:'Close swarm settings'}).click();await page.getByRole('button',{name:'New swarm'}).click();await page.getByRole('button',{name:'Connect accounts'}).click();await page.locator('#provider-step').waitFor();await check();assert.deepEqual(f.errors,[]);
 });

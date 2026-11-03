@@ -1,0 +1,8 @@
+{
+  "version": "24.22.1",
+  "platform": "win32-x64",
+  "files": [
+    {"name":"node.exe","url":"https://nodejs.org/dist/v24.22.1/win-x64/node.exe","sha256":"d702daa815eabbff763c7d3808e235cf031cf2ca70211b56847bc72f51e240e5"},
+    {"name":"LICENSE","url":"https://raw.githubusercontent.com/nodejs/node/v24.22.1/LICENSE","sha256":"5888dbb9a1d2b18f2c3e6c5f6af1b39de658372b402a0577b002777f14c62ace"}
+  ]
+}

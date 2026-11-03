@@ -5,6 +5,41 @@ import { randomUUID } from 'node:crypto';
 const SOURCE = 'https://open.er-api.com/v6/latest/USD';
 const MAX_AGE = 48 * 60 * 60 * 1000;
 export const DEFAULT_BUDGET_USD = 50;
+// Published PAYG compute rates, checked 2026-10-07. This is a planning
+// snapshot for iad/ewr, never a billing receipt or an admission capability.
+export const SWARM_COMPUTE_PRICING = Object.freeze({
+  source: 'https://docs.fly.io/about/pricing', checkedAt: '2026-10-07',
+  regions: Object.freeze(['iad', 'ewr']), cpuKind: 'shared', cpus: 1,
+  baseMemoryMb: 1024, baseMonthlyUsd: 6.70, extraGbMonthlyUsd: 6,
+  monthHours: 720,
+});
+
+export const budgetCeiling = goal => goal.unlimited === true && goal.budgetUsd === null ? Infinity : goal.budgetUsd;
+export const unlimitedBudget = () => ({ amount: null, currency: 'USD', allowanceUsd: null, unlimited: true, usdPerUnit: 1, quoteAsOf: null, quoteSource: null });
+export function planSwarm({ budgetUsd = DEFAULT_BUDGET_USD, unlimited = false,
+  workers, agents = 10, memoryMb: selectedMemory, hours = 24, region = 'iad' } = {}) {
+  if (typeof unlimited !== 'boolean') throw new Error('Unlimited must be on or off.');
+  const allowance = unlimited ? null : usdAmount(budgetUsd);
+  const agentCount = capacity(agents, 10, 10);
+  if (typeof hours !== 'number' || !Number.isFinite(hours) || hours <= 0 || hours > 720) throw new Error('Choose a planning duration above zero and at most 720 hours.');
+  if (!SWARM_COMPUTE_PRICING.regions.includes(region)) throw new Error('Compute prices are only verified for iad and ewr.');
+  if (selectedMemory !== undefined && ![1024, 2048, 4096].includes(selectedMemory)) throw new Error('Choose 1, 2, or 4 GB of memory.');
+  const memoryMb = selectedMemory ?? (agentCount <= 2 ? 1024 : agentCount <= 5 ? 2048 : 4096);
+  const monthlyUsd = SWARM_COMPUTE_PRICING.baseMonthlyUsd
+    + (memoryMb / 1024 - 1) * SWARM_COMPUTE_PRICING.extraGbMonthlyUsd;
+  const workerHourlyUsd = monthlyUsd / SWARM_COMPUTE_PRICING.monthHours;
+  const affordableWorkers = unlimited ? 100 : Math.min(100, Math.floor(allowance / (workerHourlyUsd * hours)));
+  const requestedWorkers = workers === undefined ? Math.min(10, Math.max(1, affordableWorkers)) : capacity(workers, 10, 100);
+  const computeUsd = requestedWorkers * workerHourlyUsd * hours;
+  return { workers: requestedWorkers, agents: agentCount, memoryMb, region,
+    budgetUsd: allowance, unlimited, hours, affordableWorkers,
+    withinComputeAllowance: unlimited || computeUsd <= allowance,
+    estimate: { costKind: 'estimated', workerHourlyUsd, hourlyUsd: requestedWorkers * workerHourlyUsd,
+      computeUsd, inferenceUsd: null, totalUsd: null,
+      excludes: ['inference', 'storage', 'egress', 'stopped-rootfs', 'taxes', 'account-adjustments'] },
+    pricing: { ...SWARM_COMPUTE_PRICING, regions: [...SWARM_COMPUTE_PRICING.regions] },
+    executionVerified: false };
+}
 export function capacity(value, fallback, maximum) {
   const number = value === undefined ? fallback : value;
   if (!Number.isInteger(number) || number < 1 || number > maximum) throw new Error(`Choose a whole number from 1 to ${maximum}.`);

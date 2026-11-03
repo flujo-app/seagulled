@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const mockCommands = async (_command, args) => {
-  if (args.join(' ') === 'auth status') return { code: 0, stdout: JSON.stringify({ loggedIn: true, email: 'private@example.com' }), stderr: '' };
+  if (args.join(' ') === 'auth status') return { code: 0, stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', email: 'private@example.com' }), stderr: '' };
   if (args.join(' ') === 'login status') return { code: 0, stdout: 'Logged in using ChatGPT', stderr: '' };
   if (args.includes('--version')) return { code: 0, stdout: 'version', stderr: '' };
   if (args[0] === 'exec') return { code: 0, stdout: [
@@ -132,7 +132,7 @@ test('fleet routes require explicit worker consent and expose only public eligib
   for (const id of ['codex', 'claude', 'antigravity', 'modal', 'openai', 'anthropic', 'private-h100']) {
     assert.equal(manager.fleetRoute(id).available, false, id);
   }
-  for (const state of manager.publicState()) assert.equal(state.fleetSupported, ['openai', 'anthropic', 'private-h100'].includes(state.id), state.id);
+  for (const state of manager.publicState()) assert.equal(state.fleetSupported, ['codex', 'openai', 'anthropic', 'private-h100'].includes(state.id), state.id);
   assert.equal(manager.publicState().find((item) => item.id === 'openai').fleetEligible, false);
   await manager.connect({ id: 'openai', method: 'key', fleetAllowed: true });
   assert.deepEqual(manager.fleetRoute('openai'), {
@@ -148,7 +148,14 @@ test('fleet routes require explicit worker consent and expose only public eligib
   assert.deepEqual(manager.fleetRoute('anthropic').model, {
     name: 'claude-sonnet-5-5', baseUrl: 'https://api.anthropic.com', provider: 'anthropic', adapter: 'anthropic', apiKey: 'anthropic-secret',
   });
-  await assert.rejects(manager.connect({ id: 'codex', method: 'subscription', fleetAllowed: true }), /not qualified/);
+  await manager.connect({ id: 'codex', method: 'subscription', fleetAllowed: true });
+  assert.deepEqual(manager.fleetRoute('codex', 'goal', { model: 'gpt-6-luna', reasoningEffort: 'medium' }), {
+    available: true, providerId: 'codex', model: { name: 'gpt-6-luna', reasoningEffort: 'medium',
+      provider: 'codex', adapter: 'codex-cli', apiKey: '', baseUrl: '' },
+    verification: 'unverified', costPolicy: 'subscription-and-pending-cloud', authTransfer: 'encrypted-workspace-snapshot',
+  });
+  await manager.connect({ id: 'codex', method: 'subscription', fleetAllowed: false });
+  assert.equal(manager.fleetRoute('codex').available, false);
   await assert.rejects(manager.connect({ id: 'modal', method: 'key', fleetAllowed: true }), /not qualified/);
   await assert.rejects(manager.connect({ id: 'openai', method: 'key', fleetAllowed: 'true' }), /must be a boolean/);
 });

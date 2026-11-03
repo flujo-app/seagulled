@@ -2,7 +2,7 @@ import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { importCloudSdk } from '../swarm/cloud-sdk.mjs';
-import { safeReceipt } from '@flujo-app/factory-receipts';
+import { safeReceipt } from '../../upstream/factory/receipts.mjs';
 
 const ID = /^[A-Za-z0-9_-]{1,100}$/;
 const APP = /^[a-z][a-z0-9-]{2,62}$/;

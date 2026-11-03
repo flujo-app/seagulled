@@ -66,15 +66,15 @@
     "before-retirement output capture and recovery holds",
     "Codex model installation without unsupported creativity",
     "optional specialist briefs through existing shared subflow gates",
-    "controller forwarding of caller-supplied goal identities"
+    "controller forwarding of caller-supplied goal identities",
+    "persisted optional lifetime Worker cap and exact completed staffing proof"
   ],
   "factoryExtraction": {
     "sourceCommit": "510b733f8af0305bb2969592fe25cc73549306a4",
     "originalPath": "src/receipts.mjs",
     "path": "upstream/factory/receipts.mjs",
     "sha256": "d1e4ff13538cc2ebbd1f0b11759887ec606253e7310fc2da83406d9d4c4f687c",
-    "scope": "pure operational receipt allowlist projection; caller verifies bytes and hashes; no runtime state",
-    "historicalExtraction": true
+    "scope": "pure operational receipt allowlist projection; caller verifies bytes and hashes; no runtime state"
   },
   "specialistSuccessor": {
     "privateEngineCommit": "78fd985fdf52140a7e8857a172d3f111fd350b83",
@@ -142,39 +142,25 @@
     "audio": false,
     "voiceClone": false
   },
-  "installedDependencies": [
-    {
-      "name": "@flujo-app/swarm-teams",
-      "version": "0.1.0",
-      "registry": "https://npm.pkg.github.com",
-      "license": "UNLICENSED",
-      "distribution": "private",
-      "archiveSha256": "2b69305c3026d975d7764a70f2b2aeba1598c2236a0e7c10d63cdfaf13a437a3",
-      "producerRevision": "efc641095d74d535a42aee31c50069a2ba2fff16",
-      "sourceBaseline": "32619ea232ba305ed8f6968cf9943d621adc4477",
-      "acceptedConsumerRevision": "71ac5a3da329625b30b3597f0d127686ed3935a9"
+  "productDependencies": {
+    "flujo": {
+      "name": "flujo-ai",
+      "version": "3.48.1",
+      "distribution": "npm",
+      "sourceRevision": "7a48a7bb3903feda12232d5634337b408707ea7c",
+      "workerImage": "ghcr.io/mario-andreschak/flujo@sha256:d736dc60c548e5a924c4f50ee5763fb4d602971ac0147ed09cf8f13e677c7acf"
     },
-    {
-      "name": "@flujo-app/factory-receipts",
-      "version": "0.1.0",
-      "registry": "https://npm.pkg.github.com",
-      "license": "UNLICENSED",
-      "distribution": "private",
-      "archiveSha256": "4e887b17e655e4219314d0211ac49d337d5a9e5774224008312ceb7487aac039",
-      "producerRevision": "36a9c7f5cfb4f952acfb613a817caed79737e8c6",
-      "sourceRevision": "510b733f8af0305bb2969592fe25cc73549306a4"
+    "factory": {
+      "name": "flujo-factory",
+      "version": "0.3.0",
+      "distribution": "public GitHub release",
+      "sha256": "cdfba72aeb582eccbb0a3da7dd544a503ab1bec34479b6e1ca90af6ddc4b2abe"
     },
-    {
-      "name": "@flujo-app/flujo-cloud",
-      "importAlias": "flujo-cloud",
-      "version": "0.1.1",
-      "registry": "https://npm.pkg.github.com",
-      "license": "UNLICENSED",
-      "distribution": "private",
-      "archiveSha256": "3c37db376d8b23e58efbf3e70c67c440cf5b2115aeebd3d9220fcc3cf08b932a",
-      "producerRevision": "acc75352a404e83bc210c8713f8871718c89acf6",
-      "sourceRevision": "a5e5095f1eac5792dde83ec7979b5410d9ae956c"
+    "cloud": {
+      "name": "flujo-cloud",
+      "version": "0.2.0",
+      "distribution": "public GitHub release",
+      "sha256": "ec73db402226b5384aba2fe135fa36d4110a24692b5f3c1bc5227290d94f6439"
     }
-  ],
-  "historicalExtraction": true
+  }
 }

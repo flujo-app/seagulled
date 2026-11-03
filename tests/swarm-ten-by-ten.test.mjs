@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { Controller } from '@flujo-app/swarm-teams/fleet/controller.mjs';
-import { buildSpecs } from '@flujo-app/swarm-teams/template/flows.mjs';
+import { Controller } from '../upstream/swarm-teams/fleet/controller.mjs';
+import { buildSpecs } from '../upstream/swarm-teams/template/flows.mjs';
 import { goalCapacity, fleetTopology, fleetExecutionLimits, staffOwnedTeam,
   verifiedLocalConversations, verifiedTeamStaffing } from '../src/swarm/fleet.mjs';
 import { teamProfile } from '../src/swarm/team-profile.mjs';
@@ -21,7 +21,7 @@ test('10x10 uses one nine-child gate and an exact ten-Worker tree; saved topolog
   assert.throws(() => goalCapacity({ ...goal, maxWorkers: 11 }), /1 to 10/);
   assert.throws(() => goalCapacity({ ...goal, agentsPerWorker: 10 }), /0 to 9/);
   assert.throws(() => goalCapacity({ ...goal, conversationsPerWorker: 11, agentsPerWorker: 10 }));
-  assert.throws(() => goalCapacity({ ...goal, workerTopologyVersion: 2 }), /1 to 6/);
+  assert.equal(goalCapacity({ ...goal, workerTopologyVersion: 2 }).maxWorkers, 10);
   const limits = fleetExecutionLimits({ goal }).teamLimits;
   const specs = buildSpecs({ model: 'fixture-model', availableServers: ['filesystem', 'bash', 'fleet'], limits, specialists: teamProfile(goal) });
   const team = specs.find(spec => spec.name === 'swarm_team');
