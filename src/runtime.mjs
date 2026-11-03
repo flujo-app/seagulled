@@ -7,10 +7,13 @@ import { ProviderManager } from './providers/index.mjs';
 import { productHelperRoot, productProviderCommands } from './product-helpers.mjs';
 import { createProductSource } from './product-source.mjs';
 import { validateInferenceOptions } from './inference-options.mjs';
+import { DEFAULT_PRIVATE_MODEL, PRIVATE_MODELS } from './providers/private-h100.mjs';
 import { SwarmCoordinator } from './swarm/index.mjs';
 import { runFactoryFleet } from './swarm/factory.mjs';
 import { createVoice } from './voice/index.mjs';
 import { createBudgets, capacity, usdAmount, DEFAULT_BUDGET_USD, planSwarm, budgetCeiling, unlimitedBudget } from './budget.mjs';
+
+const PRIVATE_MODEL_IDS = Object.keys(PRIVATE_MODELS);
 
 export const defaultDataDir = () => process.env.SEAGULLED_HOME || path.join(homedir(), '.seagulled');
 const now = () => new Date().toISOString();
@@ -107,6 +110,7 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
     if (options.unlimited === true && (options.budget !== undefined || options.budgetUsd !== undefined && options.budgetUsd !== null)) throw new Error('Choose unlimited or a finite budget.');
     if (options.memoryMb !== undefined && ![1024, 2048, 4096].includes(options.memoryMb)) throw new Error('Choose 1, 2, or 4 GB of memory.');
     if (options.memoryOverride !== undefined && typeof options.memoryOverride !== 'boolean') throw new Error('Memory scaling choice is invalid.');
+    if (options.privateModel !== undefined && !PRIVATE_MODEL_IDS.includes(options.privateModel)) throw new Error('Choose Qwen on H100 or Nemotron on B300 for private inference.');
   };
   const persist = () => {
     state.swarm = { admissionPaused: Boolean(state.swarm?.admissionPaused), status: jobs.size
@@ -279,7 +283,7 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
   }
   async function preparePrivate(goal, job) {
     if (!goal.privateH100 || !privateLifecycle()) return;
-    const status = await manager.privateComputeState();
+    const status = await manager.privateComputeState({ model: goal.privateModel });
     if (job.controller.signal.aborted) throw Object.assign(new Error('Private startup was cancelled before admission.'), { name: 'AbortError' });
     if (!status.provisionable) throw Object.assign(new Error(status.detail || 'Private H100 is unavailable.'), { outcome: 'not_applied' });
     const reserve = status.admission?.enableUsd;
@@ -293,7 +297,7 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
     publish();
     try {
       const result = await manager.privateComputeEnable({ budgetUsd: goal.unlimited ? reserve : goal.budgetUsd - goal.spentUsd,
-        signal: job.controller.signal, workerAllowed: true, admissionId: goal.privateCompute.admissionId });
+        signal: job.controller.signal, workerAllowed: true, admissionId: goal.privateCompute.admissionId, model: goal.privateModel });
       job.privateOwned = true;
       const cost = result?.usage?.costUsd;
       if (result?.reservation?.id !== goal.privateCompute.admissionId || result.reservation.amountUsd !== reserve || result.ready !== true
@@ -596,6 +600,7 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
       if (options.budget !== undefined && options.budgetUsd !== undefined) throw new Error('Choose one budget currency.');
       if (options.privateH100 !== undefined && typeof options.privateH100 !== 'boolean') throw new Error('Private inference must be on or off.');
       if (options.providerId === 'private-h100' && options.privateH100 !== true) throw new Error('Enable private inference to use H100.');
+      if (options.privateModel !== undefined && options.privateH100 !== true) throw new Error('Choose the private route before its model.');
       validateJourneyOptions(options);
       const requestedMode = mode(options.executionMode ?? executionMode);
       const maxWorkers = capacity(options.maxWorkers, 10, 100), conversationsPerWorker = conversations(options);
@@ -605,7 +610,8 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
       const goal = { id: id('goal'), text: text.trim(), status: 'queued', budgetUsd: budget.allowanceUsd, budget, spentUsd: 0,
         ...validateInferenceOptions(options),
         providerId: options.privateH100 === true ? 'private-h100' : options.providerId || (state.preferredProviderId !== 'private-h100' ? state.preferredProviderId : null) || null,
-        privateH100: options.privateH100 === true, executionMode: requestedMode, unlimited: options.unlimited === true,
+        privateH100: options.privateH100 === true, ...(options.privateH100 === true ? { privateModel: options.privateModel ?? DEFAULT_PRIVATE_MODEL } : {}),
+        executionMode: requestedMode, unlimited: options.unlimited === true,
         memoryOverride: options.memoryOverride === true,
         memoryMb: options.memoryOverride === true ? options.memoryMb ?? 4096 : conversationsPerWorker <= 2 ? 1024 : conversationsPerWorker <= 5 ? 2048 : 4096,
         execution: { requested: requestedMode, readiness: 'blocked', verifiedWorkers: 0, verifiedChildConversations: 0 },
@@ -618,7 +624,7 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
     async updateGoal(goalId, patch) {
       const goal = find(goalId);
       if (goal.deletedAt) throw new Error('This swarm has been deleted.');
-      if (!patch || typeof patch !== 'object' || Array.isArray(patch) || Object.keys(patch).some(k => !['text', 'budget', 'budgetUsd', 'providerId', 'maxWorkers', 'conversationsPerWorker', 'agentsPerWorker', 'privateH100', 'unlimited', 'memoryMb', 'memoryOverride', 'model', 'reasoningEffort'].includes(k))) throw new Error('You can edit the goal, budget, provider, and team limits.');
+      if (!patch || typeof patch !== 'object' || Array.isArray(patch) || Object.keys(patch).some(k => !['text', 'budget', 'budgetUsd', 'providerId', 'maxWorkers', 'conversationsPerWorker', 'agentsPerWorker', 'privateH100', 'privateModel', 'unlimited', 'memoryMb', 'memoryOverride', 'model', 'reasoningEffort'].includes(k))) throw new Error('You can edit the goal, budget, provider, and team limits.');
       validateJourneyOptions(patch);
       const inference = validateInferenceOptions({ model: patch.model ?? goal.model, reasoningEffort: patch.reasoningEffort ?? goal.reasoningEffort });
       if (patch.text !== undefined) {
@@ -628,6 +634,7 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
       if (patch.privateH100 !== undefined && typeof patch.privateH100 !== 'boolean') throw new Error('Private inference must be on or off.');
       if (patch.privateH100 === true && patch.providerId !== undefined) throw new Error('Choose one inference route.');
       if (patch.providerId === 'private-h100') throw new Error('Use the private inference switch to select H100.');
+      if (patch.privateModel !== undefined && !(patch.privateH100 ?? goal.privateH100)) throw new Error('Choose the private route before its model.');
       const nextWorkers = capacity(patch.maxWorkers, goal.maxWorkers ?? 10, 100), nextConversations = conversations(patch, goal);
       if (goal.unlimited && patch.unlimited === false && patch.budget === undefined && patch.budgetUsd === undefined) throw new Error('Choose a finite budget when turning off unlimited.');
       if (patch.budgetUsd !== undefined && patch.unlimited !== true) usdAmount(patch.budgetUsd);
@@ -637,7 +644,7 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
       // Fence admission before waiting on a currency quote. The already-accepted
       // call can settle once; it cannot admit another task while an edit is pending.
       if (jobs.has(goal.id) && (patch.model !== undefined || patch.reasoningEffort !== undefined || patch.text !== undefined || patch.providerId !== undefined || patch.budget !== undefined ||
-          patch.maxWorkers !== undefined || patch.conversationsPerWorker !== undefined || patch.agentsPerWorker !== undefined || patch.privateH100 !== undefined || patch.unlimited !== undefined || patch.memoryMb !== undefined || patch.memoryOverride !== undefined || Number(patch.budgetUsd) < budgetCeiling(goal))) {
+          patch.maxWorkers !== undefined || patch.conversationsPerWorker !== undefined || patch.agentsPerWorker !== undefined || patch.privateH100 !== undefined || patch.privateModel !== undefined && patch.privateModel !== goal.privateModel || patch.unlimited !== undefined || patch.memoryMb !== undefined || patch.memoryOverride !== undefined || Number(patch.budgetUsd) < budgetCeiling(goal))) {
         const current = jobs.get(goal.id);
         await this.controlGoal(goal.id, 'pause');
         await current.promise;
@@ -662,6 +669,8 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
         goal.privateH100 = patch.privateH100;
         goal.providerId = patch.privateH100 ? 'private-h100' : (state.preferredProviderId !== 'private-h100' ? state.preferredProviderId : null) || null;
       }
+      if (goal.privateH100) goal.privateModel = patch.privateModel ?? goal.privateModel ?? DEFAULT_PRIVATE_MODEL;
+      else delete goal.privateModel;
       if (currencyBudget) goal.budget = currencyBudget;
       goal.maxWorkers = nextWorkers; goal.conversationsPerWorker = nextConversations; goal.agentsPerWorker = nextConversations - 1;
       goal.unlimited = Boolean(nextUnlimited); goal.memoryOverride = patch.memoryOverride ?? goal.memoryOverride ?? false;

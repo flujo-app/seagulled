@@ -18,6 +18,9 @@ test('native bridge preserves bounded team and currency settings',()=>{
   assert.deepEqual(validateGoalOptions({maxWorkers:100,unlimited:true,budgetUsd:null,memoryMb:4096}),{maxWorkers:100,conversationsPerWorker:10,unlimited:true,budgetUsd:null,memoryMb:4096});
   assert.throws(()=>validateGoalOptions({budget:{amount:1,currency:'US$'}}),/Budget/);
   assert.throws(()=>validateGoalOptions({privateH100:'true'}),/Private H100/);
+  assert.equal(validateGoalOptions({privateH100:true,privateModel:'nemotron'}).privateModel,'nemotron');
+  assert.throws(()=>validateGoalOptions({privateH100:true,privateModel:'mixtral'}),/Private model/);
+  assert.throws(()=>validateGoalOptions({privateModel:'qwen'}),/private route/);
   assert.throws(()=>validateGoalOptions({executionMode:'local'}),/Company execution mode/);
   assert.throws(()=>validateGoalOptions({providerId:'native-unverified'}),/Goal provider/);
   assert.throws(()=>validateGoalOptions({providerId:'openai',privateH100:true}),/one inference route/);

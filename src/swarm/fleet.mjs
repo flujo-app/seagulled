@@ -394,6 +394,7 @@ async function modelProbe(model, { signal, deadlineAt } = {}) {
   }
 }
 
+const PRIVATE_SERVED_MODELS = Object.freeze({ 'qwen3.8-27b': 'qwen', 'nemotron-3.5-super-vl': 'nemotron' });
 const nativeCodex = (model) => model?.provider === 'codex' && model?.adapter === 'codex-cli'
   && typeof model.name === 'string' && model.name.length > 0 && !model.apiKey;
 const PRODUCT_BINDINGS = Object.freeze({
@@ -407,10 +408,12 @@ const exactProductBinding = (providerId, model, route) => {
   if (providerId === 'private-h100') {
     try {
       const url = new URL(model?.baseUrl);
-      return model.name === 'qwen3.8-27b' && model.provider === 'openai' && model.adapter === 'openai'
+      // Each served model belongs to exactly one owned app family (Qwen on H100, Nemotron on B300).
+      const family = PRIVATE_SERVED_MODELS[model?.name];
+      return Boolean(family) && model.provider === 'openai' && model.adapter === 'openai'
         && url.protocol === 'https:' && !url.username && !url.password && !url.port
         && (url.hostname.endsWith('.modal.run') || url.hostname.endsWith('.modal.direct'))
-        && /(?:^|[.-])seagulled-qwen-[a-f0-9]{12}(?:[.-]|$)/.test(url.hostname)
+        && new RegExp(`(?:^|[.-])seagulled-${family}-[a-f0-9]{12}(?:[.-]|$)`).test(url.hostname)
         && model.baseUrl === `${url.origin}/v1` && !url.search && !url.hash
         && (route?.verification === 'inference-verified'
           && route.costPolicy === 'estimated-gpu-seconds'

@@ -22,7 +22,7 @@ const HELP = `Seagulled — talk to Todd, supervise the team.
   seagulled pause-all|resume-all|stop-all
 
 Options: --budget AMOUNT|unlimited [--currency ISO_CODE], --workers COUNT,
-         --conversations COUNT, --private-h100 | --no-private-h100,
+         --conversations COUNT, --private-h100 | --no-private-h100, --private-model qwen|nemotron,
          --provider ID, --home DIRECTORY, --json, --no-open
          --execution-mode company|local (local is a bounded diagnostic)
 Defaults: 50 USD, ten workers (1–100), ten total conversations per worker (1–10).
@@ -31,7 +31,7 @@ Saved state lives in your private Seagulled folder. Keys stay out of arguments.
 const { positionals, values } = parseArgs({ allowPositionals: true, options: {
   budget: { type: 'string' }, provider: { type: 'string' }, home: { type: 'string' }, json: { type: 'boolean' },
   currency: { type: 'string' }, workers: { type: 'string' }, conversations: { type: 'string' },
-  'private-h100': { type: 'boolean' }, 'no-private-h100': { type: 'boolean' },
+  'private-h100': { type: 'boolean' }, 'no-private-h100': { type: 'boolean' }, 'private-model': { type: 'string' },
   'execution-mode': { type: 'string' },
   text: { type: 'string' }, method: { type: 'string' }, 'key-env': { type: 'string' }, 'no-open': { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
 } });
@@ -115,6 +115,7 @@ try {
       ...(values.workers !== undefined ? { maxWorkers: Number(values.workers) } : {}),
       ...(values.conversations !== undefined ? { conversationsPerWorker: Number(values.conversations) } : {}),
       ...(values['private-h100'] ? { privateH100: true } : values['no-private-h100'] ? { privateH100: false } : {}),
+      ...(values['private-model'] ? { privateModel: values['private-model'] } : {}),
       ...(values.provider ? { providerId: values.provider } : {}),
       ...(values['execution-mode'] ? { executionMode: values['execution-mode'] } : {}),
     };

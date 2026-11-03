@@ -145,7 +145,7 @@
     "@huggingface/transformers": "4.3.0",
     "flujo-ai": "3.48.1",
     "flujo-cloud": "https://github.com/flujo-app/flujo-cloud/releases/download/v0.2.0/flujo-cloud-0.2.0.tgz",
-    "flujo-factory": "https://github.com/flujo-app/FACTORY/releases/download/v0.3.0/flujo-factory-0.3.0.tgz",
+    "flujo-factory": "https://github.com/flujo-app/FACTORY/releases/download/v0.5.0/flujo-factory-0.5.0.tgz",
     "kokoro-js": "1.2.1",
     "node-pty": "1.1.0"
   },

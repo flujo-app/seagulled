@@ -219,3 +219,23 @@ Frozen17128e4 package acceptance (2026-10-05): A clean committed export now supp
 The product consumes FACTORY 0.3.0 through its public FactoryControl/executeEffect exports and the versioned flujo-cloud 0.2.0 SDK. Electron bundles a published FLUJO dependency and official Node runtime; private account state remains in the user data directory. FACTORY owns durable company effect admission, while the recovered swarm engine retains Worker provisioning, scheduling and retirement. An existing dispatch is held for reconciliation, never blindly replayed. Explicit unlimited intent has no hidden finite allowance. Product image resolution retains upstream source/capability checks and verifies the matching immutable release digest.
 
 The owner excludes fresh model/cloud acceptance and spending for this release. Reuse dated live evidence with its original scope; local tests, actual packaged startup/controls and read-only source/image checks do not establish new live execution or billed spending. Final publication must consume the requested FLUJO 3.48.1 release once its package and matching image are available. Runtime/account handles and current handovers stay outside public source.
+
+## Private inference on FACTORY 0.5.0, November 3, 2026
+
+Provider owner, with parent runtime/CLI and desktop form changes. The private route now runs on FACTORY's public self-hosted model serving (`ModalSelfHostedModel`). The copied `src/providers/private_compute` sources are removed.
+
+- **Ownership:** `PrivateH100Manager` keeps the admission reserves, the goal lease, durable request IDs and estimated spend. FACTORY owns the Modal app, secret, volumes, verified model probe and checked retirement in `providers/private-h100/model/`.
+- **Two routes:**
+  - `qwen`: Qwen3.8-27B FP8 on one H100, the default. Startup reserve 6 USD, request reserve 2.50 USD, about 4.84 USD/h while running.
+  - `nemotron`: Nemotron 3.5 Super VL NVFP4 on one B300. Startup reserve 10 USD, request reserve 4.36 USD, about 8.43 USD/h.
+- **Deployment settings:** native 262k context, no thinking by default, a 1-minute idle stop and 30-minute request and startup limits.
+- **Goal contract:** goals carry `privateModel` together with `privateH100:true`. The runtime validates it and passes it to `privateComputeState({model})` and `privateComputeEnable({model})`. Changing it pauses a running goal, like other route changes.
+- **Provider state:** `privateModels` lists both routes with their estimates; `privateModel` and `gpu` describe the active or chosen route. The provider name follows it, for example "Private B300 + Nemotron".
+- **Desktop and CLI:** the New swarm form shows a Private model choice next to the Modal route, with those estimates. The CLI accepts `--private-model qwen|nemotron`.
+- **Swarm:** it binds `nemotron-3.5-super-vl` only to an owned `seagulled-nemotron-<id>` endpoint, and `qwen3.8-27b` only to `seagulled-qwen-<id>`.
+- **Behavior changes:**
+  - the startup probe challenge is FACTORY's (`FACTORY-<8 hex>`);
+  - an attempt recorded by an earlier version is adopted by FACTORY for verified retirement;
+  - a startup whose app was never created now retires with verified cleanup, while the runtime keeps its uncertain spend hold.
+
+Seagulled's company Workers still run on the recovered swarm-teams fleet (FLUJO Workers through flujo-cloud), not on FACTORY lite workers. Moving them onto FACTORY is tracked separately. No paid deployment or provider call was made for this change.

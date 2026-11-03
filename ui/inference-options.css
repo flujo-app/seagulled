@@ -6,3 +6,12 @@
 }
 #model-options label { margin: 0; }
 #model-options select { width: 100%; min-width: 0; }
+#private-options {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: center;
+  gap: 10px 16px;
+}
+#private-options label { margin: 0; }
+#private-options select { width: 100%; min-width: 0; }
+#private-options small { grid-column: 1 / -1; opacity: 0.8; }

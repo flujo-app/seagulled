@@ -6,7 +6,7 @@ import { join, resolve, relative, dirname, delimiter, isAbsolute } from 'node:pa
 import { runProcess } from './process.mjs';
 import { ptyAvailable, runPty } from './pty.mjs';
 import { resolveAccountHelpers } from './helpers.mjs';
-import { PrivateH100Manager } from './private-h100.mjs';
+import { PrivateH100Manager, PRIVATE_MODELS } from './private-h100.mjs';
 import { validateInferenceOptions } from '../inference-options.mjs';
 
 const NAMES = { codex: 'Codex', claude: 'Claude', antigravity: 'Antigravity', openai: 'OpenAI API', anthropic: 'Anthropic API', modal: 'Modal inference', 'private-h100': 'Private H100 + Qwen' };
@@ -248,16 +248,17 @@ export class ProviderManager {
     return { fly, modal };
   }
 
-  async privateComputeState() {
+  /** Private inference state; `model` (qwen or nemotron) selects the route a new attempt would use. */
+  async privateComputeState({ model } = {}) {
     const modal = await this.#accountStatus('modal');
     await this.privateH100.restore();
-    return this.privateH100.safeState({ accountConnected: modal.connected,
+    return this.privateH100.safeState({ accountConnected: modal.connected, model,
       helperUsable: this.authHelpers.modal.usable && modal.installed && this.authHelpers.modal.bundled });
   }
 
-  async privateComputeEnable({ budgetUsd, signal, workerAllowed = false, admissionId } = {}) {
-    const state = await this.privateComputeState();
-    return this.privateH100.enable({ budgetUsd, signal, workerAllowed, admissionId, accountConnected: state.available,
+  async privateComputeEnable({ budgetUsd, signal, workerAllowed = false, admissionId, model } = {}) {
+    const state = await this.privateComputeState({ model });
+    return this.privateH100.enable({ budgetUsd, signal, workerAllowed, admissionId, model, accountConnected: state.available,
       helperUsable: this.authHelpers.modal.bundled && this.authHelpers.modal.usable });
   }
 
@@ -481,9 +482,9 @@ export class ProviderManager {
         const state = this.privateH100.safeState({ accountConnected: this.authScope.has('modal'),
           helperUsable: this.authHelpers.modal.usable && this.authHelpers.modal.bundled });
         const route = this.privateH100.fleetRoute();
-        return { ...state, name, methods: [], fleetSupported: true, fleetEligible: route.available,
+        return { ...state, name: `Private ${state.gpu} + ${PRIVATE_MODELS[state.privateModel]?.family ?? 'model'}`, methods: [], fleetSupported: true, fleetEligible: route.available,
           fleetDetail: route.available ? 'Owned vLLM bearer can be used by isolated workers after disclosure.' : route.detail,
-          ...(state.connected ? { models: ['qwen3.8-27b'] } : {}) };
+          ...(state.connected ? { models: [state.servedModel] } : {}) };
       }
       const detected = this.detected.get(id);
       const connection = this.connected.get(id);
