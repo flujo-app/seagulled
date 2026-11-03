@@ -148,6 +148,21 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
     state.spend.pendingUsd = (state.spend.pendingUsd || 0) + reservation.amountUsd;
     goal.billingPending = true;
   }
+  // What a goal still owes the ledger, whether or not its card is archived.
+  // Holds saved by earlier builds have no action ID and are reported as unattributed.
+  function unsettledBilling(goal) {
+    const reservations = Object.entries(goal.reservations || {}).filter(([, entry]) => entry.status !== 'settled')
+      .map(([reservationId, entry]) => ({ id: reservationId, amountUsd: entry.amountUsd, status: entry.status, at: entry.at }));
+    const admission = goal.privateCompute;
+    if (admission && ['pending', 'unknown'].includes(admission.reservationStatus)) {
+      reservations.push({ id: admission.admissionId, amountUsd: admission.reservedUsd, status: admission.reservationStatus });
+    }
+    const holds = (goal.unkeyedHolds || []).map(hold => ({ ...hold }));
+    const attributed = [...reservations, ...holds].reduce((sum, entry) => sum + entry.amountUsd, 0);
+    return { goalId: goal.id, text: goal.text, status: goal.status, archivedAt: goal.deletedAt ?? null,
+      pendingUsd: goal.pendingUsd || 0, reservations, holds,
+      unattributedUsd: Math.max(0, Math.round(((goal.pendingUsd || 0) - attributed) * 1e9) / 1e9) };
+  }
   function recordUsage(goal, usage = {}) {
     const cost = usage.costUsd;
     const monetary = Number.isFinite(cost) && cost >= 0;
@@ -168,6 +183,9 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
       goal.pendingUsd = (goal.pendingUsd || 0) + usage.reservedUsd;
       state.spend.pendingUsd = (state.spend.pendingUsd || 0) + usage.reservedUsd;
       goal.billingPending = true;
+      // No reservation can ever settle this hold, so keep the action it came from.
+      (goal.unkeyedHolds ||= []).push({ amountUsd: usage.reservedUsd, at: now(),
+        ...(typeof usage.taskId === 'string' ? { taskId: usage.taskId } : {}) });
     }
     if (monetary && ['reported', 'estimated'].includes(kind)) {
       goal.spentUsd = Math.round((goal.spentUsd + cost) * 1e9) / 1e9;
@@ -680,16 +698,20 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
     async deleteGoal(goalId) {
       const goal = find(goalId);
       if (goal.deletedAt) return copy(goal);
-      if (goal.recoveryHold) throw new Error('This run needs reconciliation before it can be deleted.');
+      if (goal.recoveryHold) throw new Error('This run needs reconciliation before it can be deleted. Its outcome or owned resources are unconfirmed, so its card stays visible.');
       // Stop awaits the original job, including owned cleanup and its last receipt.
       await this.controlGoal(goalId, 'stop');
-      if (goal.recoveryHold || goal.billingPending || goal.pendingUsd > 0
-        || goal.privateCompute && !['verified', 'not-needed'].includes(goal.privateCompute.cleanupStatus)) {
-        throw new Error('Cleanup or billing needs reconciliation before this swarm can be deleted.');
+      if (goal.recoveryHold || goal.privateCompute && !['verified', 'not-needed'].includes(goal.privateCompute.cleanupStatus)) {
+        throw new Error('Owned resource cleanup needs reconciliation before this swarm can be deleted. Its card stays visible.');
       }
       // Removal from the card view must never erase receipts or conversation.
+      // Unknown billing stays pending: archiving a card settles nothing.
       goal.deletedAt = now(); goal.updatedAt = goal.deletedAt;
       publish(); return copy(goal);
+    },
+    outstandingBilling() {
+      const entries = state.goals.filter(goal => goal.billingPending || goal.pendingUsd > 0).map(unsettledBilling);
+      return copy({ pendingUsd: state.spend.pendingUsd || 0, entries });
     },
     async controlGoal(goalId, action) {
       const goal = find(goalId);

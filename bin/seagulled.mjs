@@ -19,6 +19,7 @@ const HELP = `Seagulled — talk to Todd, supervise the team.
   seagulled auth modal|fly           Open the account browser sign-in
   seagulled edit GOAL --text "…" --budget 50
   seagulled pause|resume|stop|delete GOAL
+  seagulled billing                  See unsettled billing, including deleted swarms
   seagulled pause-all|resume-all|stop-all
 
 Options: --budget AMOUNT|unlimited [--currency ISO_CODE], --workers COUNT,
@@ -72,7 +73,7 @@ async function request(session, route, method = 'GET', payload) {
 async function client() {
   const session = await priorSession();
   if (session) return {
-    snapshot: () => request(session, '/api/state'), discover: () => request(session, '/api/providers/discover', 'POST'),
+    snapshot: () => request(session, '/api/state'), outstandingBilling: () => request(session, '/api/billing/outstanding'), discover: () => request(session, '/api/providers/discover', 'POST'),
     chat: (text, options) => request(session, '/api/chat', 'POST', { text, ...options }),
     connect: payload => request(session, '/api/providers/connect', 'POST', payload),
     authConnect: payload => request(session, '/api/auth/connect', 'POST', payload),
@@ -97,7 +98,19 @@ function showState(state) {
   if (values.json) return print(state);
   print(`Spend: $${state.spend.usd.toFixed(4)} (reported + estimates); ${state.spend.subscriptionCalls} subscription calls; ${state.spend.unknownCalls} unpriced calls.`);
   for (const g of state.goals.filter(goal => !goal.deletedAt)) print(`${g.id}  ${g.status}  $${g.spentUsd.toFixed(4)} / ${g.unlimited ? 'unlimited' : `$${g.budgetUsd.toFixed(2)}`}\n  ${g.text}${g.error ? `\n  ${g.error}` : ''}`);
+  const archived = state.goals.filter(goal => goal.deletedAt && goal.pendingUsd > 0);
+  if (archived.length) print(`${archived.length} deleted swarm${archived.length === 1 ? ' has' : 's have'} unsettled billing. Run: seagulled billing`);
   if (!state.goals.length) print('Tell Todd what to build.');
+}
+function showBilling(billing) {
+  if (values.json) return print(billing);
+  print(`Unsettled: $${billing.pendingUsd.toFixed(4)}. This is a held allowance, not a bill. Only an original provider receipt settles it.`);
+  for (const entry of billing.entries) {
+    print(`${entry.goalId}  ${entry.status}${entry.archivedAt ? '  deleted' : ''}  $${entry.pendingUsd.toFixed(4)} pending\n  ${entry.text}`);
+    for (const item of entry.reservations) print(`  reservation ${item.id}  ${item.status}  $${item.amountUsd.toFixed(4)}`);
+    for (const item of entry.holds) print(`  action ${item.taskId || 'unrecorded'}  $${item.amountUsd.toFixed(4)}`);
+    if (entry.unattributedUsd > 0) print(`  from an earlier version, no action recorded  $${entry.unattributedUsd.toFixed(4)}`);
+  }
 }
 async function cleanup() { await service?.close(); await runtime?.close(); }
 try {
@@ -127,6 +140,7 @@ try {
       if (!runtime) { /* Existing desktop owns its lifetime. */ }
       else await new Promise(resolve => { process.once('SIGINT', resolve); process.once('SIGTERM', resolve); });
     } else if (command === 'status') showState(await app.snapshot());
+    else if (command === 'billing') showBilling(await app.outstandingBilling());
     else if (command === 'providers') print(await app.discover());
     else if (command === 'connect') {
       const key = values['key-env'] ? process.env[values['key-env']] : undefined;
