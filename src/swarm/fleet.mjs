@@ -215,9 +215,12 @@ export function staffOwnedTeam(controller, root, { task, workerCap, localChildTa
       'Record the returned child conversation IDs; then steer and wait for those same children. ' +
       'Do not start replacement local subflows or report a capacity gate as actual staffing. ' + specialistStaffingBrief(localChildTarget)
     : 'This Worker has only its lead conversation; do not start a local subflow. ';
+  const toolScopeBrief = 'For an authorized file or shell task, filesystem allowed directories describe path scope, not read-only permission. ' +
+    'Use a declared Bash or filesystem write tool before reporting a permission block; honor an actual tool denial. ' +
+    'The native Codex sandbox does not determine MCP tool permissions. ';
   const leadTask = `${task}\n\n` +
     `You coordinate ${workerCap} owned Worker Machine${workerCap === 1 ? '' : 's'}, including yourself. ` +
-    localStaffing +
+    localStaffing + toolScopeBrief +
     'Read fleet_info for the already staffed child run IDs, steer them with fleet_message, wait for their original results, ' +
     'and compare findings on the shared board. Do not redelegate a branch that is already staffed. ' +
     'Report which Worker runs and local agent conversations actually completed.';
@@ -230,7 +233,7 @@ export function staffOwnedTeam(controller, root, { task, workerCap, localChildTa
     return { name: `${angle.name}-${index + 1}`, angle: `${angle.angle} Own partition ${index + 1} of ${workerCap - 1}; coordinate concrete non-overlapping work with the team lead.` };
   })) {
     const childTask = `${task}\n\n` +
-      `YOUR DISTINCT ANGLE: ${branch.angle} ${localStaffing}` +
+      `YOUR DISTINCT ANGLE: ${branch.angle} ${localStaffing}${toolScopeBrief}` +
       'post findings with evidence to the shared board, and report actual conversation IDs and remaining uncertainty. ' +
       'Your coordinating Worker can send you messages through the owned relay.';
     const child = controller.delegate(leadWorker, { name: branch.name, task: childTask, deferRun: true });

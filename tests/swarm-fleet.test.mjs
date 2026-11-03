@@ -531,6 +531,11 @@ test('selected five-Worker staffing admits actual runs beneath one external supe
       Array(4).fill(lead.workerId));
     assert.equal(Object.values(controller.registry.state.workers).length, 6, 'external Todd is outside the five Machine cap');
     assert.match(controller.registry.run(lead.runId).task, /start_subflow_ tool exactly 4 times/);
+    for (const run of runs) {
+      const brief = controller.registry.run(run.runId).task;
+      assert.match(brief, /allowed directories describe path scope, not read-only permission/);
+      assert.match(brief, /Use a declared Bash or filesystem write tool before reporting a permission block; honor an actual tool denial/);
+    }
     assert.throws(() => staffOwnedTeam(controller, root, { task: 'Duplicate', workerCap: 5 }), /all 5 Workers/);
     await Promise.all([...controller.settled.values()]);
     assert.equal(Object.values(controller.registry.state.runs).filter((run) => run.state === 'completed').length, 5);
