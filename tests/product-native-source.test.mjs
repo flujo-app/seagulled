@@ -6,19 +6,22 @@ import path from 'node:path';
 import {tmpdir} from 'node:os';
 import {createProductSource} from '../src/product-source.mjs';
 
-async function equipment(task,{native=true,compiled=true}={}){
+async function equipment(task,{native=true,compiled=true,platform,stopGraceMs,kill}={}){
   const directory=mkdtempSync(path.join(tmpdir(),'seagulled-product-native-'));
   const product=path.join(directory,'product');
   for(const name of ['node/node.exe','node/node','source-app/bin/flujo.mjs','source-app/.next/BUILD_ID','cloud-sdk/lib/managed.mjs']){
     const filename=path.join(product,name);mkdirSync(path.dirname(filename),{recursive:true});writeFileSync(filename,'fixture');
   }
-  const calls=[],launches=[];
+  const calls=[],launches=[],children=[];
   const source=createProductSource({dataDir:directory,sourceInstallation:path.join(product,'source-app'),
     ...(native?{nativeTransport:{url:'http://127.0.0.1:1/native-source/admission',token:'A'.repeat(43)},nativeGoalId:'test-owned-goal'}:{}),
+    ...(platform?{platform}:{}),...(stopGraceMs?{stopGraceMs}:{}),
     env:{PATH:process.env.PATH,UNRELATED_ACCOUNT_SECRET:'must not inherit'},
     spawnImpl(command,args,options){
       const child=new EventEmitter();child.pid=123456;child.exitCode=null;
-      if(command==='taskkill'){queueMicrotask(()=>child.emit('exit',0));}else launches.push({command,args,options});
+      child.signals=[];child.end=signal=>{child.signalCode=signal;child.emit('exit',null,signal);};
+      child.kill=signal=>{child.signals.push(signal);(kill??((target,sent)=>queueMicrotask(()=>target.end(sent))))(child,signal);return true;};
+      if(command==='taskkill'){queueMicrotask(()=>child.emit('exit',0));}else{launches.push({command,args,options});children.push(child);}
       return child;
     },
     async fetchImpl(url,options){calls.push({url,options});
@@ -27,7 +30,7 @@ async function equipment(task,{native=true,compiled=true}={}){
       return Response.json({choices:[{message:{content:'fixture'}}]});
     },
   });
-  try{await task({source,calls,launches,product});}finally{
+  try{await task({source,calls,launches,product,children});}finally{
     await source.close();const target=path.resolve(directory);assert.equal(path.dirname(target),path.resolve(tmpdir()));
     assert.match(path.basename(target),/^seagulled-product-native-/);assert.equal(lstatSync(target).isSymbolicLink(),false);
     rmSync(target,{recursive:true,force:true});
@@ -61,3 +64,21 @@ test('ordinary Source neither inherits native credentials nor dispatches Worker 
   await e.source.source();assert.equal(e.launches[0].options.env.SEAGULLED_NATIVE_PARENT_TOKEN,undefined);
   await assert.rejects(e.source.requestWorker({}));assert.equal(e.calls.length,1);
 },{native:false}));
+
+test('POSIX stop returns only after the child has exited',()=>equipment(async e=>{
+  await e.source.source();let closed=false;
+  const closing=e.source.close().then(()=>{closed=true;});
+  await new Promise(resolve=>setTimeout(resolve,5));
+  assert.equal(closed,false);assert.deepEqual(e.children[0].signals,['SIGTERM']);
+  e.children[0].end('SIGTERM');await closing;assert.equal(closed,true);
+},{platform:'linux',kill(){}}));
+
+test('POSIX stop escalates once and never hangs on a child that ignores signals',()=>equipment(async e=>{
+  await e.source.source();await e.source.close();
+  assert.deepEqual(e.children[0].signals,['SIGTERM','SIGKILL']);
+},{platform:'linux',stopGraceMs:5,kill(){}}));
+
+test('a Source ended by a signal is replaced instead of reusing its stale binding',()=>equipment(async e=>{
+  await e.source.source();e.children[0].end('SIGKILL');
+  await e.source.source();assert.equal(e.launches.length,2);
+},{platform:'linux'}));
