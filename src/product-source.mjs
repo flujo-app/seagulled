@@ -10,6 +10,17 @@ import {installedProductRuntime, productNodeBinary} from './product-runtime.mjs'
 const refused = () => Object.assign(new Error('The private product Source installation is incomplete.'), {code:'COMPANY_UNAVAILABLE', reasonCode:'source', outcome:'not_applied'});
 const cancelled = () => Object.assign(new Error('Cancelled'), {name:'AbortError', outcome:'not_applied'});
 const file = value => {try{return statSync(value).isFile();}catch{return false;}};
+// A child ended by a signal keeps exitCode null, so both fields must be read.
+const running = owned => owned?.exitCode===null&&!owned.signalCode;
+function exited(owned,timeoutMs){
+  if(!running(owned))return Promise.resolve(true);
+  return new Promise(resolve=>{
+    const finish=value=>{clearTimeout(timer);owned.off('exit',onExit);resolve(value);};
+    const onExit=()=>finish(true);
+    const timer=setTimeout(()=>finish(false),timeoutMs);
+    owned.once('exit',onExit);
+  });
+}
 async function loopbackPort(){
   const server=createServer();
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});
@@ -19,7 +30,7 @@ async function loopbackPort(){
 }
 
 /** One private Source per runtime. Paths and process authority never enter public state. */
-export function createProductSource({dataDir,env=process.env,spawnImpl=spawn,fetchImpl=fetch,nativeTransport,nativeGoalId,sourceInstallation}={}){
+export function createProductSource({dataDir,env=process.env,spawnImpl=spawn,fetchImpl=fetch,nativeTransport,nativeGoalId,sourceInstallation,platform=process.platform,stopGraceMs=10_000}={}){
   // Only the owning Parent assembly supplies this private binding. It enables
   // neither provider availability nor cloud/Worker creation on its own.
   if(nativeTransport!==undefined)createNativeSourceAdmissionClient(nativeTransport);
@@ -38,10 +49,15 @@ export function createProductSource({dataDir,env=process.env,spawnImpl=spawn,fet
   let child,pending,binding,closing=false;
   async function stop(){
     const owned=child;child=undefined;binding=undefined;
-    if(!owned||owned.exitCode!==null)return;
-    if(process.platform==='win32'){
+    if(!running(owned))return;
+    if(platform==='win32'){
       await new Promise(resolve=>{const killer=spawnImpl('taskkill',['/pid',String(owned.pid),'/T','/F'],{windowsHide:true,stdio:'ignore'});killer.once('exit',resolve);killer.once('error',resolve);});
-    }else owned.kill('SIGTERM');
+    }else{
+      // Match the Windows path: return once the child has gone. The wait is
+      // bounded so a child that ignores both signals cannot hold shutdown open.
+      owned.kill('SIGTERM');
+      if(!await exited(owned,stopGraceMs)){owned.kill('SIGKILL');await exited(owned,stopGraceMs);}
+    }
   }
   async function start(){
     if(closing)throw cancelled();
@@ -63,7 +79,7 @@ export function createProductSource({dataDir,env=process.env,spawnImpl=spawn,fet
     const deadline=Date.now()+90_000;
     while(Date.now()<deadline){
       if(closing){await stop();throw cancelled();}
-      if(startupError||child?.exitCode!==null){await stop();throw refused();}
+      if(startupError||!running(child)){await stop();throw refused();}
       try{
         const response=await fetchImpl(sourceOrigin+'/api/workspaces',{signal:AbortSignal.timeout(2500)});
         if(response.status===200){
@@ -88,7 +104,7 @@ export function createProductSource({dataDir,env=process.env,spawnImpl=spawn,fet
   return {
     async source({signal}={}){
       if(signal?.aborted||closing)throw cancelled();
-      if(binding&&child?.exitCode===null)return {...binding};
+      if(binding&&running(child))return {...binding};
       if(!pending)pending=start().finally(()=>{pending=undefined;});
       if(!signal)return {...await pending};
       let cancel;
