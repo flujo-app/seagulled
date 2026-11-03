@@ -93,7 +93,7 @@ $('fly-connect').addEventListener('click',async()=>{
   }catch(reason){if(epoch===setupEpoch)error('setup-error',reason);}finally{busy.delete('fly');renderSetup();}
 });
 function formOptions(){const budgetUsd=presets[Number($('budget-slider').value)],id=$('goal-provider').value;
-  return {budgetUsd:budgetUsd??null,unlimited:budgetUsd===null,maxWorkers:Number($('workers').value),conversationsPerWorker:Number($('agents').value),memoryMb:Number($('memory').value),...(id==='modal'?{privateH100:true}:{providerId:id,privateH100:false}),...(id==='codex'?{model:$('goal-model').value,reasoningEffort:$('goal-effort').value}:{})};}
+  return {budgetUsd:budgetUsd??null,unlimited:budgetUsd===null,maxWorkers:Number($('workers').value),conversationsPerWorker:Number($('agents').value),memoryMb:Number($('memory').value),...(id==='modal'?{privateH100:true,privateModel:$('private-model').value}:{providerId:id,privateH100:false}),...(id==='codex'?{model:$('goal-model').value,reasoningEffort:$('goal-effort').value}:{})};}
 async function updatePlan(){
   const epoch=++planEpoch,options=formOptions();$('project-save').disabled=true;$('budget-value').textContent=options.unlimited?'∞':`$${options.budgetUsd}`;$('budget-slider').setAttribute('aria-valuetext',options.unlimited?'Unlimited':`$${options.budgetUsd}`);
   $('workers-value').textContent=options.maxWorkers;$('agents-value').textContent=options.conversationsPerWorker;
@@ -115,11 +115,21 @@ function showProject(goal=null){
   for(const option of $('goal-provider').options)option.disabled=Boolean(state.setup?.providers)&&!state.setup.providers.includes(option.value)&&option.value!==currentProvider;
   $('goal-provider').value=currentProvider??state.setup?.providers?.[0]??'modal';
   const model=$('goal-model');if(goal?.model&&!Array.from(model.options).some(option=>option.value===goal.model)){const option=node('option',goal.model);option.value=goal.model;model.append(option);}model.value=goal?.model??'gpt-6-luna';$('goal-effort').value=goal?.reasoningEffort??'medium';$('model-options').hidden=$('goal-provider').value!=='codex';
+  $('private-model').value=goal?.privateModel??'qwen';renderPrivateOptions();
   clearError('project-error');void updatePlan();openDialog($('project-dialog'));$('goal').focus();
 }
 for(const id of ['budget-slider','agents'])$(id).addEventListener('input',()=>{if(id==='agents')manualMemory=false;void updatePlan();});$('workers').addEventListener('input',()=>{autoWorkers=false;void updatePlan();});$('memory').addEventListener('change',()=>{manualMemory=true;void updatePlan();});
 $('new-swarm').addEventListener('click',()=>{if(!state.setup?.completedAt)showSetup();else showProject();});$('manage-accounts').addEventListener('click',()=>{$('project-dialog').close();showSetup();});
-$('goal-provider').addEventListener('change',()=>{$('model-options').hidden=$('goal-provider').value!=='codex';});
+// The private route's model choice shows the provider's own list-price estimates (never billed amounts).
+function renderPrivateOptions(){
+  const route=provider('private-h100'),choices=route?.privateModels||[],select=$('private-model');
+  for(const option of select.options){const choice=choices.find(item=>item.id===option.value);if(choice)option.textContent=`${choice.label} · ~$${choice.activeUsdPerHour.toFixed(2)}/h while running`;}
+  const choice=choices.find(item=>item.id===select.value);
+  $('private-price').textContent=choice?`Starting reserves ~$${choice.enableUsd}; each request up to ~$${choice.requestUsd.toFixed(2)}. Paid GPU time on your Modal account; estimates, not billed amounts.`:'Paid GPU time on your Modal account; estimates only.';
+  $('private-options').hidden=$('goal-provider').value!=='modal';
+}
+$('goal-provider').addEventListener('change',()=>{$('model-options').hidden=$('goal-provider').value!=='codex';renderPrivateOptions();});
+$('private-model').addEventListener('change',renderPrivateOptions);
 for(const button of document.querySelectorAll('[data-close]'))button.addEventListener('click',()=>$(button.dataset.close).close());
 $('project-form').addEventListener('submit',async event=>{
   event.preventDefault();if(formBusy||!$('goal').value.trim())return;formBusy=true;$('project-save').disabled=true;clearError('project-error');

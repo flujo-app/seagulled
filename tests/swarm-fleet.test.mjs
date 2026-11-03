@@ -616,11 +616,17 @@ test('private H100 Fly route accepts only the verified owned endpoint identity b
     assert.match(accepted.detail, /product-owned FLUJO source/, 'binding passes to owned source discovery without fetching a model');
     assert.equal((await fleetStatus({ dataDir, providerId: 'private-h100', fleetRoute: valid,
       goalId: 'different-goal' })).available, false, 'another goal cannot borrow the route');
+    const nemotron = { ...valid, model: { ...valid.model, name: 'nemotron-3.5-super-vl',
+      baseUrl: 'https://owner--seagulled-nemotron-a1b2c3d4e5f6-serve.modal.run/v1' } };
+    assert.match((await fleetStatus({ dataDir, providerId: 'private-h100', fleetRoute: nemotron, goalId: 'owned-goal' })).detail,
+      /product-owned FLUJO source/, 'the B300 Nemotron route binds to its own owned app');
     for (const route of [
     { ...valid, providerId: 'openai' },
     { ...valid, verification: 'unverified' },
     { ...valid, ownedAttemptId: 'missing' },
     { ...valid, model: { ...valid.model, name: 'other-model' } },
+    { ...valid, model: { ...valid.model, name: 'nemotron-3.5-super-vl' } },
+    { ...valid, model: { ...valid.model, baseUrl: 'https://owner--seagulled-nemotron-a1b2c3d4e5f6-serve.modal.run/v1' } },
     { ...valid, model: { ...valid.model, baseUrl: 'https://original-project.modal.run/v1' } },
     { ...valid, model: { ...valid.model, baseUrl: 'http://owner-seagulled-qwen-a1b2c3d4e5f6.modal.run/v1' } },
     ]) {

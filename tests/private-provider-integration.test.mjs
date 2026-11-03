@@ -20,12 +20,18 @@ test('real runtime, provider and coordinator contracts settle fixture GPU reques
     credentialStore: { set: async (id, value) => secrets.set(id, value), get: async id => secrets.get(id), delete: async id => secrets.delete(id) },
     commandRunner: async (command, args, options) => {
       if (!command.startsWith(helperRoot)) return { code: 1, stdout: '' };
-      if (args.some(arg => arg.endsWith('provision.py'))) {
-        appName = options.env.SEAGULLED_PRIVATE_APP_NAME; token = JSON.parse(options.input).token;
+      if (args.at(-1).endsWith('deploy.py')) {
+        // FACTORY's self-hosted model script: describe the owned deployment, then deploy it.
+        const request = JSON.parse(options.input);
+        appName = request.appName;
+        assert.match(appName, /^seagulled-qwen-[a-f0-9]{12}$/);
+        if (request.action === 'describe') return { code: 0, stdout: JSON.stringify({ settings: { appName, profile: 'qwen',
+          label: 'Qwen3.8-27B FP8 on H100', model: 'qwen3.8-27b', gpu: 'H100', replicas: 1, contextWindow: 262144,
+          usdPerHourPerReplica: 4.84, scaledownMinutes: 1, startupTimeoutMinutes: 30 }, hints: { compact_tokens: 80000 } }) };
+        token = request.key;
         const saved = JSON.parse(readFileSync(path.join(dataDir, 'state.json')));
         assert.equal(saved.goals[0].pendingUsd, 6);
-        assert.match(appName, /^seagulled-qwen-[a-f0-9]{12}$/);
-        return { code: 0, stdout: JSON.stringify({ endpoint: `https://fixture--${appName}-inference.modal.run` }) };
+        return { code: 0, stdout: JSON.stringify({ endpoints: [`https://fixture--${appName}-serve.modal.run`] }) };
       }
       if (args.includes('--version')) return { code: 0, stdout: 'fixture version' };
       if (args.includes('token') && args.includes('info')) return { code: 0, stdout: 'User: fixture-personal-identity' };
@@ -38,7 +44,7 @@ test('real runtime, provider and coordinator contracts settle fixture GPU reques
     fetchImpl: async (url, options) => {
       assert.equal(options.headers.authorization, `Bearer ${token}`);
       if (url.endsWith('/v1/models')) return new Response(JSON.stringify({ data: [{ id: 'qwen3.8-27b' }] }));
-      assert.equal(url, `https://fixture--${appName}-inference.modal.run/v1/chat/completions`);
+      assert.equal(url, `https://fixture--${appName}-serve.modal.run/v1/chat/completions`);
       const savedBytes = readFileSync(path.join(dataDir, 'state.json'), 'utf8');
       assert.equal(savedBytes.includes(token), false);
       const saved = JSON.parse(savedBytes), attempt = JSON.parse(readFileSync(path.join(providerDir, 'private-h100/attempt.json')));
@@ -48,11 +54,11 @@ test('real runtime, provider and coordinator contracts settle fixture GPU reques
         assert.equal(payload.chat_template_kwargs.enable_thinking, false);
         assert.equal(saved.goals[0].privateCompute.admissionId, attempt.reservation.id);
         assert.equal(saved.goals[0].pendingUsd, 6);
-        assert.equal(attempt.phase, 'unverified');
+        assert.equal(attempt.phase, 'provisioning');
+        assert.equal(JSON.parse(readFileSync(path.join(providerDir, 'private-h100/model/model.json'))).phase, 'unverified');
         assert.equal(attempt.pendingRunId, undefined);
         assert.equal(attempt.leaseGoalId, undefined);
-        assert.equal(typeof attempt.catalogVerifiedAt, 'string');
-        const challenge = `SEAGULLED-${attempt.attemptId.slice(0, 8).toUpperCase()}`;
+        const challenge = payload.messages[0].content.match(/FACTORY-[A-F0-9]{8}$/)?.[0];
         assert.equal(payload.messages[0].content, `Reply with exactly this text and nothing else: ${challenge}`);
         startupChecks++;
         return new Response(JSON.stringify({ model: 'qwen3.8-27b', choices: [{

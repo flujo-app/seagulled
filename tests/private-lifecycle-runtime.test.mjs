@@ -5,15 +5,16 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createRuntime } from '../src/runtime.mjs';
 
-function fixture(t, { enableFailure, cleanupFailure, cleanupReceipt, deferredStartup, deferredCleanup, requestReceipt } = {}) {
+function fixture(t, { enableFailure, cleanupFailure, cleanupReceipt, deferredStartup, deferredCleanup, requestReceipt, models } = {}) {
   const dataDir = mkdtempSync(path.join(tmpdir(), 'seagulled-gpu-lifecycle-'));
   let runtime, sink, startupResolve, cleanupResolve, enabled = false, executions = 0;
   const calls = [];
   const providers = {
     publicState: () => [{ id: 'private-h100', available: true, connected: enabled, ready: enabled }],
     async discover() { return this.publicState(); },
-    async privateComputeState() { return { provisionable: true, admission: { enableUsd: 6 } }; },
-    async privateComputeEnable({ admissionId, budgetUsd, workerAllowed }) {
+    async privateComputeState({ model } = {}) { models?.push(['state', model]); return { provisionable: true, admission: { enableUsd: 6 } }; },
+    async privateComputeEnable({ admissionId, budgetUsd, workerAllowed, model }) {
+      models?.push(['enable', model]);
       const saved = JSON.parse(readFileSync(path.join(dataDir, 'state.json'), 'utf8'));
       assert.equal(saved.goals[0].privateCompute.admissionId, admissionId);
       assert.equal(saved.goals[0].pendingUsd, 6);
@@ -63,6 +64,26 @@ test('private Go reserves before mutation, estimates once, leases one goal and r
   assert.equal(f.runtime.snapshot().spend.estimatedUsd, 1.25);
   assert.equal(f.runtime.snapshot().spend.reportedUsd, 0);
   assert.deepEqual(f.calls, ['enable', `lease:${goal.id}`, `retire:${goal.id}`]);
+});
+
+test('the chosen private model reaches the startup reserve and enable, and can be edited with the route', async t => {
+  const models = [];
+  const f = fixture(t, { models });
+  await assert.rejects(f.runtime.chat('Pick a model without the route.', { privateModel: 'nemotron' }), /private route/);
+  await assert.rejects(f.runtime.chat('Pick an unknown model.', { privateH100: true, privateModel: 'mixtral' }), /Qwen on H100 or Nemotron on B300/);
+  const goal = await f.runtime.chat('Build on the B300.', { privateH100: true, privateModel: 'nemotron' });
+  assert.equal(goal.privateModel, 'nemotron');
+  const result = await f.runtime.wait(goal.id);
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(models, [['state', 'nemotron'], ['enable', 'nemotron']]);
+  const edited = await f.runtime.updateGoal(goal.id, { privateModel: 'qwen' });
+  assert.equal(edited.privateModel, 'qwen');
+  const ordinary = await f.runtime.updateGoal(goal.id, { privateH100: false });
+  assert.equal(ordinary.privateModel, undefined);
+  await assert.rejects(f.runtime.updateGoal(goal.id, { privateModel: 'nemotron' }), /private route/);
+  const defaulted = await f.runtime.chat('Default private model.', { privateH100: true });
+  assert.equal(defaulted.privateModel, 'qwen');
+  await f.runtime.wait(defaulted.id);
 });
 
 test('uncertain startup preserves its allowance and replay hold even when owned cleanup is confirmed', async t => {

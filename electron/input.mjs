@@ -42,6 +42,11 @@ export function validateGoalOptions(value={}) {
     options.providerId=value.providerId;
   }
   if(value.privateH100!==undefined)options.privateH100=value.privateH100;
+  if(value.privateModel!==undefined){
+    if(!['qwen','nemotron'].includes(value.privateModel))throw new Error('Private model is invalid.');
+    if(value.privateH100!==true)throw new Error('Choose the private route before its model.');
+    options.privateModel=value.privateModel;
+  }
   if(value.budget!==undefined){
     if(!value.budget||typeof value.budget!=='object'||Array.isArray(value.budget))throw new Error('Budget is invalid.');
     const amount=Number(value.budget.amount),currency=value.budget.currency;

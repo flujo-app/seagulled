@@ -8,7 +8,7 @@ Startup, account checks and explicit sign-in waits use the muted Starfield loadi
 
 | Selection | Authentication | What the swarm receives today |
 | --- | --- | --- |
-| Modal | Reuses a verified personal CLI profile, or runs bundled `python -m modal setup` with a product-private `MODAL_CONFIG_PATH` | Account readiness only. Modal Proxy Token inference is a separate connection; the isolated private H100 route requires its own admitted deployment and probe |
+| Modal | Reuses a verified personal CLI profile, or runs bundled `python -m modal setup` with a product-private `MODAL_CONFIG_PATH` | Account readiness only. Modal Proxy Token inference is a separate connection; the isolated private route (Qwen on H100 or Nemotron on B300, served through FACTORY) requires its own admitted deployment and probe |
 | Fly | Reuses a verified personal config, or runs bundled `flyctl auth login` in a hidden PTY with product-private `FLY_CONFIG_DIR`; verifies identity afterward | A backend-only lease containing the exact bundled helper/config paths and verified account scope; credentials are not copied into product source |
 | Codex | Checks `codex login status` for ChatGPT authentication; otherwise runs `codex login` and rechecks | Local native CLI session reuse. The isolated Worker subscription route remains unavailable |
 | Claude | Checks `claude auth status` for `loggedIn: true` and `authMethod: "claude.ai"`; otherwise runs `claude auth login --claudeai` and rechecks | Local native CLI session reuse. The isolated Worker subscription route remains unavailable |

@@ -31,6 +31,28 @@ test('UI saves and edits the exact model, effort and 25-by-2 goal intent',async 
   assert.deepEqual(f.errors,[]);
 });
 
+test('UI saves the private model chosen next to the Modal route and restores it for editing',async t=>{
+  const f=await launchJourney(t,{configured:true,accountReady:true});
+  await f.runtime.completeSetup({providers:['modal','codex']});await f.page.reload();
+  await f.page.getByRole('button',{name:'New swarm'}).click();
+  await f.page.getByLabel('Goal',{exact:true}).fill('Review the open pull requests');
+  await f.page.getByLabel('Provider',{exact:true}).selectOption('modal');
+  assert.equal(await f.page.locator('#private-options').isVisible(),true);
+  assert.equal(await f.page.locator('#model-options').isHidden(),true);
+  await f.page.getByLabel('Private model',{exact:true}).selectOption('nemotron');
+  assert.match(await f.page.locator('#private-price').textContent(),/estimates/);
+  await f.page.getByRole('button',{name:'Save',exact:true}).click();
+  await f.page.locator('#project-dialog').waitFor({state:'hidden'});
+  await f.page.locator('.swarm-card').waitFor();
+  const saved=JSON.parse(readFileSync(join(f.runtime.dataDir,'state.json'),'utf8')).goals[0];
+  assert.equal(saved.privateH100,true);assert.equal(saved.privateModel,'nemotron');
+  await f.page.getByRole('button',{name:'Swarm settings'}).click();
+  assert.equal(await f.page.getByLabel('Private model',{exact:true}).inputValue(),'nemotron');
+  await f.page.getByLabel('Provider',{exact:true}).selectOption('codex');
+  assert.equal(await f.page.locator('#private-options').isHidden(),true);
+  assert.deepEqual(f.errors,[]);
+});
+
 test('explicit goal choices reach the native CLI without changing the saved connection',async()=>{
   const invocations=[];
   const commandRunner=async(_command,args)=>{
