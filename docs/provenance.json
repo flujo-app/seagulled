@@ -152,9 +152,9 @@
     },
     "factory": {
       "name": "flujo-factory",
-      "version": "0.3.0",
+      "version": "0.5.0",
       "distribution": "public GitHub release",
-      "sha256": "cdfba72aeb582eccbb0a3da7dd544a503ab1bec34479b6e1ca90af6ddc4b2abe"
+      "sha256": "abb0d4e5d0f239cd4a7b164428ab69a625f3fa14ae4afd4bddcdd8f73a03f469"
     },
     "cloud": {
       "name": "flujo-cloud",

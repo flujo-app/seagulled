@@ -1,6 +1,6 @@
 {
   "name": "seagulled",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Talk to Todd. He puts a company of agents on your goal, then comes back to judge the work.",
   "type": "module",
   "main": "electron/main.mjs",
@@ -55,7 +55,7 @@
     "appId": "app.flujo.seagulled",
     "productName": "Seagulled",
     "directories": {
-      "output": "release/0.2.0"
+      "output": "release/0.3.0"
     },
     "files": [
       "electron/**/*",
