@@ -239,3 +239,5 @@ Provider owner, with parent runtime/CLI and desktop form changes. The private ro
   - a startup whose app was never created now retires with verified cleanup, while the runtime keeps its uncertain spend hold.
 
 Seagulled's company Workers still run on the recovered swarm-teams fleet (FLUJO Workers through flujo-cloud), not on FACTORY lite workers. Moving them onto FACTORY is tracked separately. No paid deployment or provider call was made for this change.
+
+Card archival and billing (parent and desktop): `deleteGoal` is refused only by a recovery hold or unverified private cleanup, never by pending billing. Archiving changes no allowance. `outstandingBilling()`, `GET /api/billing/outstanding` and `seagulled billing` list every unsettled goal, archived or not, with its open reservations, its unkeyed holds with their task IDs, and `unattributedUsd` for holds saved by earlier builds. Only an original usage receipt keyed to a reservation lowers a hold; there is no manual clearing action.

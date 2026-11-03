@@ -42,6 +42,7 @@ export async function createServer({ runtime, port = 0, uiDir = uiRoot } = {}) {
           req.on('close', () => streams.delete(res)); return;
         }
         if (url.pathname === '/api/state' && req.method === 'GET') return send(200, runtime.snapshot());
+        if (url.pathname === '/api/billing/outstanding' && req.method === 'GET') return send(200, runtime.outstandingBilling());
         if (url.pathname === '/api/budget/default' && req.method === 'GET') return send(200, await runtime.defaultBudget(url.searchParams.get('currency') || 'USD'));
         if (url.pathname === '/api/auth/state' && req.method === 'GET') return send(200, await runtime.authState());
         if (url.pathname === '/api/voice/capabilities' && req.method === 'GET') return send(200, await runtime.voiceCapabilities());

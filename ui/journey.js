@@ -170,6 +170,9 @@ function render(){
       button.addEventListener('click',async()=>{if(action==='edit'){showProject(goal);return;}button.disabled=true;try{if(action==='delete')await bridge.deleteGoal(goal.id);else await bridge.controlGoal(goal.id,goal.status==='paused'?'resume':'pause');await refresh();}catch(reason){button.disabled=false;const box=card.querySelector('.card-error')||node('p',undefined,'card-error');box.textContent=reason.message;card.insertBefore(box,actions);announce(reason.message);}});actions.append(button);
     }card.append(actions);host.append(card);
   }
+  // Archiving a card settles nothing, so its held allowance stays in view.
+  const unsettled=(state.goals||[]).filter(goal=>goal.deletedAt&&Number(goal.pendingUsd)>0);
+  if(unsettled.length){const held=node('aside',undefined,'archived-billing');held.setAttribute('aria-label','Deleted swarms with unsettled billing');held.append(node('strong','Unsettled billing after delete'));for(const goal of unsettled)held.append(node('p',`${goal.text}: $${Number(goal.pendingUsd).toFixed(2)} held. Not a bill.`));host.append(held);}
   if(pages>1){const controls=node('nav',undefined,'pages');controls.setAttribute('aria-label','Swarm pages');for(const [symbol,label,delta] of [['←','Previous swarms',-1],['→','Next swarms',1]]){const button=node('button',symbol,'icon');button.setAttribute('aria-label',label);button.disabled=page+delta<0||page+delta>=pages;button.addEventListener('click',()=>{page+=delta;render();});controls.append(button);}controls.append(node('output',`${page+1} / ${pages}`));host.append(controls);}renderSetup();
 }
 const unsubscribe=bridge.onEvent(event=>{if(event?.type==='state'&&event.state){state=event.state;render();}});

@@ -23,6 +23,10 @@ async function session(t, readiness) {
       if (goal && ++reads === 3 && readiness === 'checking') goal = { ...goal, status: 'completed', result: 'Offline CLI receipt', execution: { requested: 'company', readiness: 'blocked' } };
       return { version: 1, conversation: [], goals: goal ? [goal] : [], providers: [], spend: { usd: 0 } };
     },
+    outstandingBilling: () => ({ pendingUsd: 2, entries: [{ goalId: 'fixture-archived', text: 'Archived fixture', status: 'failed',
+      archivedAt: '2026-11-03T00:00:00.000Z', pendingUsd: 2, unattributedUsd: 1,
+      reservations: [{ id: 'fixture-reservation', amountUsd: 0.5, status: 'unknown' }],
+      holds: [{ amountUsd: 0.5, taskId: 'fixture-task' }] }] }),
     async chat(text, options) {
       submitted = { text, ...options };
       goal = { id: 'fixture-company', text, status: 'queued', executionMode: options.executionMode || 'company',
@@ -63,4 +67,17 @@ test('CLI forwards the exact 10x10 request to the desktop without treating readi
   assert.equal(result.code, 2, result.stderr);
   assert.deepEqual(fixture.submitted(), { text: 'Ten teams please', maxWorkers: 10, conversationsPerWorker: 10 });
   assert.doesNotMatch(result.stdout, /100.*verified|company has started/i);
+});
+
+test('CLI lists unsettled billing for a deleted swarm with its exact action IDs', async t => {
+  const fixture = await session(t, 'blocked');
+  const result = await run(['billing', '--home', fixture.dataDir]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /Unsettled: \$2\.0000\. This is a held allowance, not a bill\./);
+  assert.match(result.stdout, /fixture-archived  failed  deleted  \$2\.0000 pending/);
+  assert.match(result.stdout, /reservation fixture-reservation  unknown  \$0\.5000/);
+  assert.match(result.stdout, /action fixture-task  \$0\.5000/);
+  assert.match(result.stdout, /no action recorded  \$1\.0000/);
+  const json = await run(['billing', '--home', fixture.dataDir, '--json']);
+  assert.equal(JSON.parse(json.stdout).entries[0].goalId, 'fixture-archived');
 });

@@ -23,6 +23,10 @@ function fixture(t, { connected = true, mode = 'complete', receipt, providerIds 
       sink({ type: 'task', goalId: goal.id, task: { id: 'owned-task', role: 'developer', status: 'running' } });
       if (mode === 'wait') await new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(Object.assign(new Error('Owned process terminated'), { name: 'AbortError' })), { once: true }));
       if (mode === 'unknown') throw Object.assign(new Error('Remote response lost'), { code: 'UNKNOWN' });
+      if (mode === 'failed-held') {
+        sink({ type: 'usage', goalId: goal.id, usage: { costKind: 'unknown', costUsd: null, reservedUsd: 0.5, billingPending: true, taskId: 'owned-task' } });
+        throw Object.assign(new Error('Retired worker failed'), { outcome: 'failed' });
+      }
       if (mode === 'denied') {
         available = false;
         throw Object.assign(new Error('Provider credits unavailable'), { outcome: 'not_applied' });
@@ -43,7 +47,7 @@ function fixture(t, { connected = true, mode = 'complete', receipt, providerIds 
   };
   const app = createRuntime({ executionMode: 'local', dataDir, providers, swarm });
   t.after(async () => { await app.close(); rmSync(dataDir, { recursive: true, force: true }); });
-  return { app, dataDir, providers, swarm };
+  return { app, dataDir, providers, swarm, emit: event => sink(event) };
 }
 
 test('unlimited goals persist null allowance and require a finite budget when disabled', async t => {
@@ -99,18 +103,97 @@ test('swarm deletion stops active execution before marking removal', async t => 
   assert.ok(deleted.deletedAt);
 });
 
-test('swarm deletion cannot conceal unknown outcomes or pending billing', async t => {
+test('swarm deletion cannot conceal an unknown outcome or unconfirmed resource cleanup', async t => {
   const unknown = fixture(t, { mode: 'unknown' });
   const goal = await unknown.app.chat('Unknown original');
   await unknown.app.wait(goal.id);
   await assert.rejects(unknown.app.deleteGoal(goal.id), /reconciliation/);
   assert.equal(unknown.app.snapshot().goals[0].deletedAt, undefined);
-  const pending = fixture(t, { receipt: { costKind: 'unknown', costUsd: null, reservedUsd: 0.5, billingPending: true } });
-  const held = await pending.app.chat('Keep billing hold');
-  await pending.app.wait(held.id);
-  await assert.rejects(pending.app.deleteGoal(held.id), /reconciliation/);
-  assert.equal(pending.app.snapshot().goals[0].deletedAt, undefined);
-  assert.equal(pending.app.snapshot().goals[0].pendingUsd, 0.5);
+
+  const { app, dataDir, providers, swarm } = fixture(t);
+  const failed = await app.chat('Private cleanup never confirmed');
+  await app.wait(failed.id); await app.close();
+  const file = path.join(dataDir, 'state.json');
+  const saved = JSON.parse(readFileSync(file, 'utf8'));
+  Object.assign(saved.goals[0], { status: 'failed', pendingUsd: 6, billingPending: true,
+    privateCompute: { admissionId: 'fixture-gpu', reservedUsd: 6, reservationStatus: 'unknown', cleanupStatus: 'required' } });
+  saved.spend.pendingUsd = 6;
+  writeFileSync(file, JSON.stringify(saved));
+  const reopened = createRuntime({ executionMode: 'local', dataDir, providers, swarm });
+  try {
+    await assert.rejects(reopened.deleteGoal(failed.id), /cleanup needs reconciliation/);
+    assert.equal(reopened.snapshot().goals[0].deletedAt, undefined);
+    assert.deepEqual(reopened.outstandingBilling().entries[0].reservations,
+      [{ id: 'fixture-gpu', amountUsd: 6, status: 'unknown' }]);
+  } finally { await reopened.close(); }
+});
+
+test('a cleaned-up failed swarm archives with its unknown billing unchanged and still discoverable', async t => {
+  const { app, dataDir, providers, swarm } = fixture(t, { mode: 'failed-held' });
+  const goal = await app.chat('Failed after its worker retired');
+  const failed = await app.wait(goal.id);
+  assert.equal(failed.status, 'failed'); assert.equal(failed.recoveryHold, false);
+  assert.equal(failed.pendingUsd, 0.5);
+  const before = app.snapshot();
+
+  const archived = await app.deleteGoal(goal.id);
+  assert.ok(archived.deletedAt);
+  assert.equal(archived.pendingUsd, 0.5); assert.equal(archived.billingPending, true);
+  assert.deepEqual(app.snapshot().spend, before.spend);
+  assert.deepEqual(app.snapshot().conversation, before.conversation);
+  assert.equal((await app.deleteGoal(goal.id)).deletedAt, archived.deletedAt, 'archival is idempotent');
+  assert.equal(app.snapshot().spend.pendingUsd, 0.5);
+
+  const expected = { pendingUsd: 0.5, entries: [{ goalId: goal.id, text: goal.text, status: 'failed',
+    archivedAt: archived.deletedAt, pendingUsd: 0.5, reservations: [],
+    holds: [{ amountUsd: 0.5, at: archived.unkeyedHolds[0].at, taskId: 'owned-task' }], unattributedUsd: 0 }] };
+  assert.deepEqual(app.outstandingBilling(), expected);
+  await app.close();
+
+  const reopened = createRuntime({ executionMode: 'local', dataDir, providers, swarm });
+  try {
+    assert.deepEqual(reopened.outstandingBilling(), expected);
+    assert.equal(reopened.snapshot().goals[0].recoveryHold, false);
+    const server = await createServer({ runtime: reopened });
+    t.after(() => server.close());
+    const url = `${server.url}/api/billing/outstanding`;
+    assert.equal((await fetch(url)).status, 401);
+    assert.deepEqual(await (await fetch(url, { headers: { Authorization: `Bearer ${server.token}` } })).json(), expected);
+  } finally { await reopened.close(); }
+});
+
+test('a legacy unkeyed hold archives without being cleared and reports as unattributed', async t => {
+  const { app, dataDir, providers, swarm } = fixture(t);
+  const goal = await app.chat('Older failed card');
+  await app.wait(goal.id); await app.close();
+  const file = path.join(dataDir, 'state.json');
+  const saved = JSON.parse(readFileSync(file, 'utf8'));
+  Object.assign(saved.goals[0], { status: 'failed', pendingUsd: 1.25, billingPending: true });
+  saved.spend.pendingUsd = 1.25;
+  writeFileSync(file, JSON.stringify(saved));
+  const reopened = createRuntime({ executionMode: 'local', dataDir, providers, swarm });
+  try {
+    const archived = await reopened.deleteGoal(goal.id);
+    assert.ok(archived.deletedAt); assert.equal(archived.pendingUsd, 1.25);
+    assert.equal(reopened.snapshot().spend.pendingUsd, 1.25);
+    const [entry] = reopened.outstandingBilling().entries;
+    assert.equal(entry.unattributedUsd, 1.25); assert.deepEqual(entry.holds, []);
+  } finally { await reopened.close(); }
+});
+
+test('an original keyed receipt still settles a reservation after its card is archived', async t => {
+  const { app, emit } = fixture(t);
+  const goal = await app.chat('Late provider receipt');
+  await app.wait(goal.id);
+  emit({ type: 'reservation', goalId: goal.id, reservation: { id: 'fixture-action', amountUsd: 0.75 } });
+  const archived = await app.deleteGoal(goal.id);
+  assert.ok(archived.deletedAt); assert.equal(archived.pendingUsd, 0.75);
+  assert.deepEqual(app.outstandingBilling().entries[0].reservations.map(item => [item.id, item.status]), [['fixture-action', 'pending']]);
+  emit({ type: 'usage', goalId: goal.id, usage: { reservationId: 'fixture-action', costKind: 'reported', costUsd: 0.4 } });
+  const settled = app.snapshot().goals[0];
+  assert.equal(settled.pendingUsd, 0); assert.equal(settled.billingPending, false);
+  assert.ok(settled.deletedAt);
+  assert.deepEqual(app.outstandingBilling(), { pendingUsd: 0, entries: [] });
 });
 
 test('swarm HTTP deletion requires session authentication and persists removal', async t => {

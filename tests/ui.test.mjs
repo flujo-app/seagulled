@@ -36,6 +36,17 @@ test('home keeps the continuous Todd loop and a plus; saving creates a truthful 
   await page.getByRole('button',{name:'Delete swarm'}).click();await page.waitForFunction(()=>!document.querySelector('.swarm-card'));
   assert.ok(f.runtime.snapshot().goals[0].deletedAt);assert.deepEqual(f.errors,[]);
 });
+test('a deleted swarm with a held allowance leaves the cards and stays visible as unsettled',async t=>{
+  let sink;const swarm={setEventHandler(handler){sink=handler;},async prepareCompany(){throw Object.assign(new Error('Offline fixture source unavailable'),{code:'COMPANY_UNAVAILABLE',reasonCode:'source',outcome:'not_applied'});}};
+  const f=await launchJourney(t,{configured:true,swarm});await f.page.locator('#new-swarm').waitFor();
+  const goal=await f.runtime.chat('Held card fixture',{providerId:'codex'});
+  sink({type:'usage',goalId:goal.id,usage:{costKind:'unknown',costUsd:null,reservedUsd:0.5,billingPending:true}});
+  await f.page.waitForFunction(()=>document.querySelector('.swarm-card'));
+  assert.equal(await f.page.locator('.archived-billing').count(),0);
+  await f.page.getByRole('button',{name:'Delete swarm'}).click();await f.page.waitForFunction(()=>!document.querySelector('.swarm-card'));
+  assert.match(await f.page.locator('.archived-billing').innerText(),/Held card fixture: \$0\.50 held\. Not a bill\./);
+  assert.equal(f.runtime.snapshot().goals[0].pendingUsd,0.5);assert.deepEqual(f.errors,[]);
+});
 test('cards paginate by three and never animate unverified worker capacity',async t=>{
   const f=await launchJourney(t,{configured:true});await f.page.locator('#new-swarm').waitFor();
   for(let i=0;i<4;i++)await f.runtime.chat(`Fixture goal ${i}`,{providerId:'codex',maxWorkers:10,conversationsPerWorker:10});
