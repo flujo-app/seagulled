@@ -3,11 +3,12 @@ import { homedir } from 'node:os';
 import { Registry } from '../../upstream/swarm-teams/fleet/registry.mjs';
 import { boundFleetSource, fleetStatus, flyAccountLease, flyUnavailable, goalCapacity, runFleetLeaf } from './fleet.mjs';
 import { budgetCeiling } from '../budget.mjs';
+import { DEFAULT_PRIVATE_MODEL, PRIVATE_MODELS } from '../providers/private-h100.mjs';
 
 export const TODD_PERSONA = `You are Todd, the lead of a bounded team: busy, blunt, dryly funny, and good at checking actual work. Translate the user's goal into concrete assignments, inspect the developer and reviewer results supplied to you, and revise the plan when evidence warrants it. The host application handles delegation. Do not invoke Codex collaboration, spawn agents, or attempt tool calls yourself; answer only with the requested JSON or prose. Never claim that a plan, fixture, estimate, or proposed change is a completed real-world action. State uncertainty and remaining work plainly. In user-facing prose name downloadable files by filename, without host paths, commands, or ports.`;
 
 const MAX_CALLS = 6;
-const PRIVATE_REQUEST_RESERVE_USD = 2.50;
+const privateRequestReserve = (goal) => (PRIVATE_MODELS[goal.privateModel] ?? PRIVATE_MODELS[DEFAULT_PRIVATE_MODEL]).requestUsd;
 const trim = (value, length = 64_000) => String(value ?? '').slice(0, length);
 const finite = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0;
 const COMPANY_REASON = Object.freeze({
@@ -405,11 +406,11 @@ export class SwarmCoordinator {
         }
         if (!result) {
           if (goal.providerId === 'private-h100') {
-            if (remaining < PRIVATE_REQUEST_RESERVE_USD) throw Object.assign(
+            if (remaining < privateRequestReserve(goal)) throw Object.assign(
               new Error('The remaining allowance cannot admit a private H100 request.'), { outcome: 'not_applied' });
             privateRequestReserved = true;
             this.emit({ type: 'reservation', goalId: goal.id,
-              reservation: { id: run.id, amountUsd: PRIVATE_REQUEST_RESERVE_USD } });
+              reservation: { id: run.id, amountUsd: privateRequestReserve(goal) } });
           }
           result = await this.providers.run({ providerId: goal.providerId, model: goal.model, reasoningEffort: goal.reasoningEffort, prompt, signal, maxUsd: Number.isFinite(remaining) ? remaining : undefined,
             goalId: goal.id, requestId: goal.providerId === 'private-h100' ? run.id : undefined,
@@ -417,7 +418,7 @@ export class SwarmCoordinator {
         }
         const usage = usageOf({ ...result?.usage,
           ...(privateRequestReserved ? { reservationId: run.id,
-            ...(!finite(result?.usage?.costUsd) ? { reservedUsd: PRIVATE_REQUEST_RESERVE_USD,
+            ...(!finite(result?.usage?.costUsd) ? { reservedUsd: privateRequestReserve(goal),
               billingPending: true } : {}) } : {}) });
         if (usage.costKind === 'unknown' || usage.costUsd === null && usage.costKind !== 'subscription') uncertainSpend = true;
         if (usage.costUsd !== null) spent += usage.costUsd;
@@ -444,7 +445,7 @@ export class SwarmCoordinator {
         const status = known ? 'failed' : 'unknown';
         const pendingReservation = error?.reservation?.kind === 'estimated-upper'
           && finite(error.reservation.amountUsd) ? error.reservation.amountUsd
-          : privateRequestReserved ? PRIVATE_REQUEST_RESERVE_USD : null;
+          : privateRequestReserved ? privateRequestReserve(goal) : null;
         const usage = error?.usage || pendingReservation !== null
           ? usageOf({ ...error.usage, ...(pendingReservation !== null ? {
             costUsd: error?.outcome === 'not_applied' ? 0 : null,

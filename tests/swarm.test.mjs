@@ -109,6 +109,18 @@ test('a private request reservation survives an unknown inference outcome as pen
   assert.equal(events.filter((event) => event.type === 'usage').length, 1);
 });
 
+test('a private request holds the reserve of its own model', async () => {
+  for (const [privateModel, amountUsd] of [[undefined, 2.5], ['qwen', 2.5], ['nemotron', 4.36]]) {
+    const providers = manager([]);
+    const events = [];
+    providers.run = async () => { throw Object.assign(new Error('private response lost'), { outcome: 'unknown' }); };
+    const swarm = new SwarmCoordinator({ providers, dataDir: directory(), onEvent: (event) => events.push(event) });
+    await assert.rejects(swarm.execute({ goal: goal({ providerId: 'private-h100', ...(privateModel ? { privateModel } : {}) }) }), /private response lost/);
+    assert.equal(events.find((event) => event.type === 'reservation').reservation.amountUsd, amountUsd);
+    assert.equal(events.find((event) => event.type === 'usage').usage.reservedUsd, amountUsd);
+  }
+});
+
 test('unknown spend stops subsequent paid work after the terminal receipt', async () => {
   const providers = manager([]);
   providers.run = async (input) => {
