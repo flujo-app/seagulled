@@ -97,11 +97,12 @@ class FakeFleet {
   }
 }
 const honestWorker = ({ fleet, agent, round, message }) => {
-  const child = n => fleet.emit(agent, 'item/completed', { item: { type: 'subflow', phase: 'done', conversationId: `${agent}-child-${n}`, status: 'completed', depth: 1 } });
+  const turnId = `turn-${agent}-${round}`;
+  const child = n => fleet.emit(agent, 'item/completed', { turnId, item: { type: 'subflow', phase: 'done', conversationId: `${agent}-child-${n}`, status: 'completed', depth: 1 } });
   const children = /exactly (\d+) times/.exec(message)?.[1];
   for (let n = 0; n < Number(children ?? 0); n++) child(n);
   fleet.emit(agent, 'thread/tokenUsage/updated', { tokenUsage: { last: { inputTokens: 10, outputTokens: 2 } } });
-  fleet.emit(agent, 'item/completed', { item: { type: 'agentMessage', text: round === 2 ? `FINAL from ${agent}` : `report from ${agent}` } });
+  fleet.emit(agent, 'item/completed', { turnId, item: { type: 'agentMessage', text: round === 2 ? `FINAL from ${agent}` : `report from ${agent}` } });
 };
 function company({ script = {}, goal = {}, route = openAiRoute(), root = fresh(), ...extra } = {}) {
   let fleet;
@@ -481,4 +482,25 @@ test('FACTORY keeps durable admission around the fleet run and never replays it'
   assert.equal((await runner(input)).text, 'offline result');
   await assert.rejects(runner(input), { code: 'UNKNOWN' });
   assert.equal(calls, 1);
+});
+
+test('a lead that writes no closing report leaves the Workers\' reports as the result, not its old progress note', async () => {
+  const quiet = (input) => { if (input.round === 2) return undefined; return honestWorker(input); };
+  const run = company({ script: { onMessage: quiet } });
+  const result = await runFleetLeaf(run.input);
+  assert.equal(run.fleet().commands.filter(entry => entry.agent === 'm0-a0').length, 2, 'the lead was asked for a closing report');
+  assert.equal(result.text, '--- m1-a0 ---\nreport from m1-a0\n\n--- m0-a0 ---\nreport from m0-a0');
+  assert.equal(run.seen.status.some(text => /wrote no closing report/.test(text)), true);
+  assert.equal(readFileSync(result.artifacts.at(-1).path, 'utf8'), result.text);
+});
+
+test('a model route that reports no token counts reads as unknown, not as zero', async () => {
+  const silent = ({ fleet, agent, round, message }) => {
+    const turnId = `turn-${agent}-${round}`;
+    for (let n = 0; n < Number(/exactly (\d+) times/.exec(message)?.[1] ?? 0); n++) fleet.emit(agent, 'item/completed', { turnId, item: { type: 'subflow', phase: 'done', conversationId: `${agent}-child-${n}`, status: 'completed', depth: 1 } });
+    fleet.emit(agent, 'item/completed', { turnId, item: { type: 'agentMessage', text: 'report' } });
+  };
+  const result = await runFleetLeaf(company({ script: { onMessage: silent } }).input);
+  assert.equal(result.usage.inputTokens, null);
+  assert.equal(result.usage.outputTokens, null);
 });

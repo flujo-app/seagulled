@@ -1,8 +1,8 @@
 import path from 'node:path';
-import {existsSync} from 'node:fs';
+import {existsSync, rmSync} from 'node:fs';
 import {runFleetLeaf} from './fleet.mjs';
 
-const unavailable = () => Object.assign(new Error('The FACTORY SDK is unavailable.'),
+const unavailable = (detail='The FACTORY SDK is unavailable.') => Object.assign(new Error(detail),
   {code:'COMPANY_UNAVAILABLE', reasonCode:'factory', outcome:'not_applied'});
 const held = () => Object.assign(new Error('FACTORY retains the original company dispatch. Reconcile it before another run.'),
   {code:'UNKNOWN', unknown:true});
@@ -32,7 +32,7 @@ export function createFactoryFleetRunner({loadFactory=installedFactory, fleetRun
     if (existsSync(database)) throw held();
     const control = new FactoryControl(database);
     const stop = () => control.pause();
-    let result, failure;
+    let result, failure, nothingStarted = false;
     try {
       control.initialize({mission:goal.text, budgetCents:goal.unlimited === true ? 0 : Math.floor(goal.budgetUsd * 100),
         ...(goal.unlimited === true ? {growthMode:'budget-only'} : {maxCells:goal.maxWorkers + 1, maxDepth:2})});
@@ -53,7 +53,7 @@ export function createFactoryFleetRunner({loadFactory=installedFactory, fleetRun
         try {
           result = await fleetRunner(input);
           // A readiness refusal is not a completed company operation.
-          if (result?.available !== true) throw unavailable();
+          if (result?.available !== true) { nothingStarted = true; throw unavailable(result?.detail); }
           return {state:'ready'};
         } catch (error) {failure=error; throw error;}
       });
@@ -64,6 +64,11 @@ export function createFactoryFleetRunner({loadFactory=installedFactory, fleetRun
       signal?.removeEventListener('abort', stop);
       control.pause();
       control.close();
+      // A refusal starts nothing, so there is nothing to reconcile and the goal can try again once the route is back.
+      if (nothingStarted) {
+        try { rmSync(path.dirname(database), {recursive:true, force:true, maxRetries:5, retryDelay:200}); }
+        catch { /* The refusal stands; a held goal can still be reconciled. */ }
+      }
     }
   };
 }

@@ -22,7 +22,7 @@ const profiles = Object.fromEntries(selfHostedProfiles().map(profile => [profile
 export const PRIVATE_MODELS = Object.freeze(Object.fromEntries(Object.keys(FAMILY).filter(id => profiles[id]).map(id => {
   const profile = profiles[id];
   return [id, Object.freeze({ id, family: FAMILY[id], label: `${profile.label.replace(/ on .*$/, '')} on ${profile.gpu}`, gpu: profile.gpu,
-    model: profile.model, cpu: profile.cpu, memoryGiB: profile.memoryMib / 1024, ratePerSecond: profile.usdPerSecond,
+    model: profile.model, contextWindow: profile.contextWindow, cpu: profile.cpu, memoryGiB: profile.memoryMib / 1024, ratePerSecond: profile.usdPerSecond,
     activeUsdPerHour: Math.round(profile.usdPerSecond * 3600 * 100) / 100,
     enableUsd: Math.ceil(ENABLE_WINDOW_SECONDS * profile.usdPerSecond),
     requestUsd: Math.ceil((MAX_REQUEST_MS / 1000 + IDLE_RESERVE_SECONDS) * profile.usdPerSecond * 100) / 100 })];
@@ -266,7 +266,7 @@ export class PrivateH100Manager {
       return { available: false, detail: 'Lease private H100 to this goal before routing workers.' };
     const endpoint = ownedEndpoint(this.record.endpoint, this.record.appName);
     if (!endpoint) return { available: false, detail: 'The owned private H100 endpoint needs reconciliation.' };
-    return { available: true, providerId: 'private-h100', model: { name: this.#spec().model, baseUrl: `${endpoint}/v1`,
+    return { available: true, providerId: 'private-h100', model: { name: this.#spec().model, contextWindow: this.#spec().contextWindow, baseUrl: `${endpoint}/v1`,
       apiKey: this.token, provider: 'openai', adapter: 'openai' }, verification: 'inference-verified',
       costPolicy: 'estimated-gpu-seconds', verificationVersion: VERIFICATION_VERSION,
       ownedAttemptId: this.record.attemptId, leaseGoalId: goalId };

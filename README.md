@@ -4,7 +4,7 @@
 Talk to Todd. He delegates your goal to a team, checks what they bring back, and occasionally comes in and shits on everything.
 Download the Windows portable app from [Releases](https://github.com/flujo-app/seagulled/releases). Open it and tell Todd what you want done. 
 
-Version 0.4.0 includes the public [FACTORY 0.7.0 SDK](https://github.com/flujo-app/FACTORY/releases/tag/v0.7.0) and its cloud helpers. Company Workers run on a FACTORY fleet: one Fly Machine per Worker, with FLUJO installed on each by FACTORY. The Windows download bundles Node-independent account helpers and needs no separate install.
+Version 0.4.0 includes the public [FACTORY 0.7.1 SDK](https://github.com/flujo-app/FACTORY/releases/tag/v0.7.1) and its cloud helpers. Company Workers run on a FACTORY fleet: one Fly Machine per Worker, with FLUJO installed on each by FACTORY. The Windows download includes its account helpers, so there is nothing else to install.
 
 Goals default to ten requested Workers and ten total conversations per Worker. Requested counts, observed activity and verified execution remain separate. Budgets, model choices and pause/stop controls persist privately. Provider billing can remain unknown after work ends.
 

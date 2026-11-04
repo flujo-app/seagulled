@@ -18,7 +18,7 @@ when absent, downloads public account helpers using the committed SHA256 locks. 
 lock. No credentials, account files, conversations or runtime database are
 needed for the build. Keep personal runtime data outside this source tree.
 
-Production dependencies resolve from the lock: FACTORY 0.7.0 and flujo-cloud
+Production dependencies resolve from the lock: FACTORY 0.7.1 and flujo-cloud
 0.2.0 from their versioned public GitHub releases. FACTORY uses its public SDK
 exports; no private compatibility package is needed. Seagulled no longer bundles
 FLUJO: FACTORY installs its pinned FLUJO release on each Worker Machine. The

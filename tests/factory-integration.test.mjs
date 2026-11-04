@@ -27,6 +27,17 @@ test('installed public FACTORY SDK owns dispatch, keeps its ledger and refuses r
   assert.equal(calls,1);assert.deepEqual(readFileSync(database),original);
 });
 
+test('a readiness refusal keeps its own reason, and the goal can try again',async t=>{
+  const input=fixture(t);let calls=0;
+  const runner=createFactoryFleetRunner({fleetRunner:async()=>++calls===1
+    ? {available:false,detail:'The selected provider model endpoint is unavailable (endpoint did not respond); local provider work remains available.'}
+    : {available:true,text:'second attempt'}});
+  await assert.rejects(runner(input),error=>error.code==='COMPANY_UNAVAILABLE'&&error.outcome==='not_applied'&&/endpoint did not respond/.test(error.message));
+  assert.equal((await runner(input)).text,'second attempt');
+  await assert.rejects(runner(input),{code:'UNKNOWN'},'a company that did start is still never replayed');
+  assert.equal(calls,2);
+});
+
 test('cancellation pauses FACTORY authority while preserving the original fleet outcome',async t=>{
   const input=fixture(t),controller=new AbortController();
   input.signal=controller.signal;

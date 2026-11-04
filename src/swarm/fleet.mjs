@@ -383,11 +383,17 @@ const textTraces = (file) => {
     return readFileSync(file, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
   } catch (error) { if (error.code === 'ENOENT') return []; throw error; }
 };
-const lastAnswer = (traces, agentId) => traces.filter((event) => event.source === agentId && event.kind === 'item/completed'
-  && event.body?.item?.type === 'agentMessage' && !event.body.item.depth).at(-1)?.body.item.text ?? '';
-const tokenTotals = (traces) => traces.filter((event) => event.kind === 'thread/tokenUsage/updated').reduce((sum, event) => ({
-  inputTokens: sum.inputTokens + (event.body?.tokenUsage?.last?.inputTokens ?? 0),
-  outputTokens: sum.outputTokens + (event.body?.tokenUsage?.last?.outputTokens ?? 0) }), { inputTokens: 0, outputTokens: 0 });
+/** An agent's last written words, optionally from one turn only so that an older progress note cannot pass as its report. */
+const lastAnswer = (traces, agentId, turnId) => traces.filter((event) => event.source === agentId && event.kind === 'item/completed'
+  && event.body?.item?.type === 'agentMessage' && !event.body.item.depth && (!turnId || event.body.turnId === turnId)).at(-1)?.body.item.text ?? '';
+/** A model route may not report token counts at all. That is unknown, not zero. */
+const tokenTotals = (traces) => {
+  const reports = traces.filter((event) => event.kind === 'thread/tokenUsage/updated');
+  if (!reports.length) return { inputTokens: null, outputTokens: null };
+  return reports.reduce((sum, event) => ({
+    inputTokens: sum.inputTokens + (event.body?.tokenUsage?.last?.inputTokens ?? 0),
+    outputTokens: sum.outputTokens + (event.body?.tokenUsage?.last?.outputTokens ?? 0) }), { inputTokens: 0, outputTokens: 0 });
+};
 
 /**
  * One goal's company on its own FACTORY fleet: one Machine per Worker. FACTORY owns provisioning,
@@ -604,7 +610,12 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     const childCount = teamLimits.concurrency;
     const staffingProof = goal.workerTopologyVersion === 3 ? verifiedTeamStaffing(localConversations, workerCap, childCount) : null;
     record({ state: 'run-completed', localConversations });
-    const text = lastAnswer(traces, 'm0-a0');
+    // A lead can end a turn without writing anything. The Workers' own reports are then the result, never an old progress note.
+    let text = lastAnswer(traces, 'm0-a0', leadTurn.turnId);
+    if (!text) {
+      text = settled.map((job) => [job.agent, lastAnswer(traces, job.agent)]).filter(([, answer]) => answer).map(([agent, answer]) => `--- ${agent} ---\n${answer}`).join('\n\n');
+      onStatus('The team lead wrote no closing report, so the result holds the reports the Workers wrote.');
+    }
     await retire({ capture: true });
     const artifactDir = path.join(dataDir, 'artifacts', goal.id);
     const resultPath = path.join(artifactDir, 'fly-result.txt');

@@ -44,9 +44,9 @@
   "productDependencies": {
     "factory": {
       "name": "flujo-factory",
-      "version": "0.7.0",
+      "version": "0.7.1",
       "distribution": "public GitHub release",
-      "sha256": "a9223765017ddad7720a6dc6313ce0619bdd671eb82ee28f48fc9b45895e6cd7"
+      "sha256": "713f4c7a8d2f501d8c11478449bab010d20a9ce28c806b236ee13ace7daa014a"
     },
     "cloud": {
       "name": "flujo-cloud",
