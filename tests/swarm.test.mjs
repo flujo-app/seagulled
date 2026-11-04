@@ -32,8 +32,7 @@ const offlineCompany = (providers, options = {}) => {
     && lease.flyctlPath === flyctlPath && lease.flyConfigDir === accountDir
     && lease.orgSlug === 'personal-fixture' && lease.scope === 'private'
     && lease.accountRef === accountRef;
-  const sourceBinding = options.sourceBinding ?? { cloudSdkRoot: '/fixture/sdk', sourceOrigin: 'http://127.0.0.1:1',
-    sourceInstanceDir: '/fixture/instances', sourceDataRoot: '/fixture/data', sourceAppRoot: '/fixture/app' };
+  const sourceBinding = options.sourceBinding ?? { cloudSdkRoot: '/fixture/sdk' };
   const swarm = new SwarmCoordinator({ providers, dataDir, fleet: 'auto', ...options,
     sourceProvider: options.sourceProvider ?? (async () => sourceBinding),
     sourceInspector: options.sourceInspector ?? (async () => ({ available: true, binding: sourceBinding })),
@@ -350,7 +349,7 @@ test('ready stage rejects a replaced source proof and another goal’s source le
   const { swarm, sourceBinding } = offlineCompany(providers, {
     sourceInspector: async () => ++proofs === 1
       ? { available: true, binding: sourceBinding }
-      : { available: true, binding: { ...sourceBinding, sourceOrigin: 'http://127.0.0.1:2' } } });
+      : { available: true, binding: { ...sourceBinding, cloudSdkRoot: '/fixture/other-sdk' } } });
   const input = goal({ executionMode: 'company', workerTopologyVersion: 2 });
   const source = await swarm.prepareCompany(input, { stage: 'source' });
   await assert.rejects(swarm.prepareCompany(input, { stage: 'ready', priorAdmission: { ...source } }),

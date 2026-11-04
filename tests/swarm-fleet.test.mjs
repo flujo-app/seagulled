@@ -1,1283 +1,484 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { EventEmitter } from 'node:events';
-import { assertFleetAccountCurrent, conversationFailure, fleetStatus, fleetDiagnosticStatus, fleetExecutionLimits, goalCapacity,
-  fleetTopology, flyAccountLease, isolatedFlyEnvironment, bindVerifiedFlyOrganization,
-  recordConfirmedQuotaHold, runFleetLeaf, staffOwnedTeam,
-  verifiedLocalConversations } from '../src/swarm/fleet.mjs';
-import { createOwnedRelay, isRelayPreCreationFailure,
-  relayFailureCleanupConfirmed } from '../src/swarm/relay.mjs';
-import { assertFreshAppName, readFlyOrgApps, verifyFreshAppPlan } from '../src/swarm/fly-network.mjs';
-import { buildSpecs } from '../upstream/swarm-teams/template/flows.mjs';
-import { Controller } from '../upstream/swarm-teams/fleet/controller.mjs';
-import { flyProvisioner } from '../upstream/swarm-teams/fleet/provisioners.mjs';
-import { FlujoClient } from '../upstream/swarm-teams/lib/flujo-client.mjs';
+import * as factorySdk from 'flujo-factory';
+import { boundFleetSource, assertFleetAccountCurrent, codexAuthFile, fleetExecutionLimits, fleetStatus, flyAccountLease, goalCapacity, isolatedFlyEnvironment,
+  recordConfirmedQuotaHold, runFleetLeaf, turnFailure, verifiedLocalConversations, verifiedTeamStaffing, workerBrief, workerProgramForRoute } from '../src/swarm/fleet.mjs';
+import { createFactoryFleetRunner } from '../src/swarm/factory.mjs';
+import { teamProfile } from '../src/swarm/team-profile.mjs';
+import { PRODUCT_WORKER_IMAGE, installedProductRuntime } from '../src/product-runtime.mjs';
 
-const relayNetwork = 'seagulled-g-0123456789abcdef0123456789abcdef';
 const accountRef = `fly-account-sha256:${'a'.repeat(64)}`;
-const sdkFixtureManifest = (root, managed = './lib/managed.mjs') => {
-  writeFileSync(path.join(root, 'package.json'), JSON.stringify({
-    name: 'flujo-cloud', type: 'module', exports: {
-      '.': managed, './process': './lib/process.mjs',
-      './private-files': './lib/private-files.mjs', './snapshot': './lib/snapshot.mjs',
-    },
-  }));
+const roots = [];
+process.once('exit', () => { for (const root of roots) rmSync(root, { recursive: true, force: true }); });
+const fresh = (name = 'seagulled-fleet-') => { const root = mkdtempSync(path.join(tmpdir(), name)); roots.push(root); return root; };
+
+function account(root) {
+  const flyctlPath = path.join(root, process.platform === 'win32' ? 'flyctl.exe' : 'flyctl');
+  const flyConfigDir = path.join(root, 'personal-fly');
+  mkdirSync(flyConfigDir, { recursive: true });
+  writeFileSync(flyctlPath, 'fixture executable');
+  writeFileSync(path.join(flyConfigDir, 'config.yml'), 'fixture personal config');
+  return { flyctlPath, flyConfigDir, orgSlug: 'personal-test', scope: 'private', accountRef };
+}
+function cloudHelpers(root) {
+  const cloudSdkRoot = path.join(root, 'cloud-sdk');
+  mkdirSync(path.join(cloudSdkRoot, 'lib'), { recursive: true });
+  for (const name of ['process.mjs', 'machines.mjs', 'bridge.mjs', 'images.mjs']) writeFileSync(path.join(cloudSdkRoot, 'lib', name), 'export {};');
+  return { cloudSdkRoot };
+}
+const openAiRoute = (extra = {}) => ({ available: true, providerId: 'openai', verification: 'unverified',
+  model: { name: 'exact-model', baseUrl: 'https://api.openai.com/v1', apiKey: 'fixture-secret-key-value', provider: 'openai', adapter: 'openai-responses' }, ...extra });
+const privateRoute = { available: true, providerId: 'private-h100', verification: 'inference-verified',
+  costPolicy: 'estimated-gpu-seconds', ownedAttemptId: '11111111-2222-3333-4444-555555555555', leaseGoalId: 'owned-goal',
+  model: { name: 'qwen3.8-27b', provider: 'openai', adapter: 'openai',
+    baseUrl: 'https://owner-seagulled-qwen-a1b2c3d4e5f6.modal.run/v1', apiKey: 'owned-fixture-token' } };
+
+/**
+ * Stands in for FACTORY's fleet with the same methods. A script decides what each Worker does with
+ * a message. Traces go to the same file the real fleet writes, so the runner reads them the same way.
+ */
+class FakeFleet {
+  constructor(options, script) {
+    Object.assign(this, { options, script, commands: [], calls: [], status: 'new', turns: new Map(), sequence: 0, stopped: false, retired: false, quiesced: [], disconnected: false, apps: [] });
+    mkdirSync(options.directory, { recursive: true });
+    this.traces = path.join(options.directory, 'traces.jsonl');
+  }
+  async deploy(plan, deployOptions) {
+    this.plan = plan; this.deployOptions = deployOptions;
+    if (this.script.deployFails) throw new Error('Machines refused');
+    this.apps = [{ name: plan.app }];
+    this.machines = Array.from({ length: plan.machines }, (_, index) => ({ id: `machine${index}`, name: `m${index}` }));
+    this.agents = this.machines.flatMap((_, machine) => Array.from({ length: plan.agentsPerMachine }, (_, agent) => ({ id: `m${machine}-a${agent}`, thread: `thread-${machine}-${agent}` })));
+    return this.snapshot();
+  }
+  snapshot() { return { machines: this.machines ?? [] }; }
+  emit(source, kind, body) { appendFileSync(this.traces, `${JSON.stringify({ seq: ++this.sequence, source, kind, body })}\n`); }
+  nativeRuntime(agent) {
+    const turn = this.turns.get(agent.id);
+    return { threadId: agent.thread, ...(turn ? { turnId: turn.id, turnStatus: turn.status } : {}), threadStatus: turn?.status === 'inProgress' ? 'active' : 'idle' };
+  }
+  async request(route) {
+    assert.equal(route, '/operator/status');
+    if (this.script.enrolFails) return { agents: [] };
+    return { agents: (this.agents ?? []).map(agent => ({ id: agent.id, nativeRuntime: this.nativeRuntime(agent) })) };
+  }
+  async observe() {
+    if (this.script.observeFailsOnce && !this.failedOnce) { this.failedOnce = true; throw new Error('proxy dropped'); }
+    return { ...await this.request('/operator/status'), traceCollection: { complete: true } };
+  }
+  async command(agent, command) {
+    assert.equal(command.action, 'message');
+    this.commands.push({ agent, ...command });
+    const round = this.commands.filter(entry => entry.agent === agent).length;
+    const id = `turn-${agent}-${round}`;
+    this.turns.set(agent, { id, status: 'inProgress' });
+    const outcome = await this.script.onMessage?.({ fleet: this, agent, round, message: command.message });
+    if (outcome === 'hold') return { accepted: true };
+    this.turns.set(agent, { id, status: outcome ?? 'completed' });
+    return { accepted: true };
+  }
+  async quiesce(options) { this.quiesced.push(options); if (this.script.quiesceFails) throw new Error('not stopped'); return { agents: this.agents?.length ?? 0 }; }
+  async stop() { this.stopped = true; }
+  async retire() { if (this.script.retireFails) throw new Error('retire refused'); this.retired = true; if (!this.script.appStaysListed) this.apps = []; }
+  async disconnect() { this.disconnected = true; }
+  async fly(args) {
+    this.calls.push(args);
+    if (args[0] === 'apps') return JSON.stringify(this.apps);
+    assert.equal(args[0], 'machine'); assert.equal(args[1], 'exec');
+    if (this.script.outputFails) return JSON.stringify({ exit_code: 1, stdout: '' });
+    const bytes = Buffer.from(`output of ${args[2]}`);
+    return JSON.stringify({ stdout: JSON.stringify({ version: 1, root: '/data/results', files: [{ relativePath: 'report.txt', bytes: bytes.length,
+      sha256: createHash('sha256').update(bytes).digest('hex'), data: bytes.toString('base64') }] }) });
+  }
+}
+const honestWorker = ({ fleet, agent, round, message }) => {
+  const child = n => fleet.emit(agent, 'item/completed', { item: { type: 'subflow', phase: 'done', conversationId: `${agent}-child-${n}`, status: 'completed', depth: 1 } });
+  const children = /exactly (\d+) times/.exec(message)?.[1];
+  for (let n = 0; n < Number(children ?? 0); n++) child(n);
+  fleet.emit(agent, 'thread/tokenUsage/updated', { tokenUsage: { last: { inputTokens: 10, outputTokens: 2 } } });
+  fleet.emit(agent, 'item/completed', { item: { type: 'agentMessage', text: round === 2 ? `FINAL from ${agent}` : `report from ${agent}` } });
 };
-const relayInventory = (journal, created, network = relayNetwork) => {
-  const apps = [{ id: 'unrelated-default-id', name: 'unrelated-default-app', network: 'default' },
-    { id: 'unrelated-private-id', name: 'unrelated-private-app', network: 'other-private' },
-    ...(created ? [{ id: 'fixture-app-id', name: journal.app, network }] : [])];
-  return new Response(JSON.stringify({ total_apps: apps.length, apps }), { status: 200 });
-};
+function company({ script = {}, goal = {}, route = openAiRoute(), root = fresh(), ...extra } = {}) {
+  let fleet;
+  const seen = { status: [], workers: [], company: [], reservations: [] };
+  const input = { goal: { id: 'owned-goal', text: 'Build the thing', providerId: route.providerId, maxWorkers: 2, conversationsPerWorker: 3, workerTopologyVersion: 3, ...goal },
+    task: 'ASSIGNMENT: build the thing', dataDir: path.join(root, 'data'), maxUsd: 5, fleetRoute: route, flyAccount: account(root), sourceBinding: cloudHelpers(root),
+    assertFlyAccountCurrent: async () => true, loadSdk: async () => factorySdk, pollMs: 1, retryWindowMs: 10, image: 'docker.io/library/node@sha256:fixture', probeModel: async () => ({ available: true }),
+    fleetFactory: options => (fleet = new FakeFleet(options, { onMessage: honestWorker, ...script })),
+    onStatus: text => seen.status.push(text), onWorker: worker => seen.workers.push(worker), onCompany: value => seen.company.push(value), ...extra };
+  return { input, seen, root, fleet: () => fleet };
+}
 
-test('complete org inventory admits unrelated default and other-network apps but rejects reused names and foreign goal members', async () => {
-  const outside = [{ id: 'default-id', name: 'another-owner-default', network: 'default' },
-    { id: 'other-id', name: 'another-owner-private', network: 'other-private' }];
-  const fetchImpl = async () => new Response(JSON.stringify({ total_apps: outside.length, apps: outside }));
-  const apps = await readFlyOrgApps({ org: 'personal', token: 'fixture-token-at-least-twenty', fetchImpl });
-  assert.doesNotThrow(() => assertFreshAppName(apps, 'swarm-worker-fresh123', relayNetwork));
-  assert.throws(() => assertFreshAppName(apps, 'another-owner-default', relayNetwork), /already exists/);
-  assert.throws(() => assertFreshAppName([...apps,
-    { id: 'foreign-id', name: 'unplanned-goal-app', network: relayNetwork }],
-  'swarm-worker-fresh123', relayNetwork), /unverified app/);
-  assert.doesNotThrow(() => assertFreshAppName([...apps,
-    { id: 'owned-id', name: 'confirmed-original', network: relayNetwork }],
-  'swarm-worker-next123', relayNetwork,
-  { 'confirmed-original': { kind: 'worker', state: 'confirmed', appId: 'owned-id',
-    ownerMarker: `FLUJO_CLOUD_OWNER_${'A'.repeat(32)}` } }));
-  await assert.rejects(readFlyOrgApps({ org: 'personal', token: 'fixture-token-at-least-twenty',
-    fetchImpl: async () => new Response(JSON.stringify({ total_apps: 3, apps: outside })) }), /incomplete/);
-});
-
-test('Stop during held org inventory aborts before a new app plan', async () => {
-  const stop = new AbortController();
-  let entered;
-  const held = new Promise((resolve) => { entered = resolve; });
-  const inventory = readFlyOrgApps({ org: 'personal', token: 'fixture-token-at-least-twenty',
-    signal: stop.signal, fetchImpl: async (_url, { signal }) => {
-      entered(signal);
-      await new Promise((resolve, reject) => {
-        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
-      });
-      return relayInventory({}, false);
-    } });
-  const requestSignal = await held;
-  assert.equal(requestSignal.aborted, false);
-  stop.abort(new DOMException('Stopped', 'AbortError'));
-  await assert.rejects(inventory, { name: 'AbortError' });
-});
-
-test('account drift during held inventory refuses a fresh app before its plan', async () => {
-  let current = true;
-  let release;
-  let entered;
-  const started = new Promise((resolve) => { entered = resolve; });
-  const held = new Promise((resolve) => { release = resolve; });
-  const plans = {};
-  let checks = 0;
-  const verification = verifyFreshAppPlan({ app: 'swarm-worker-fresh123', kind: 'worker',
-    org: 'personal', expectedOrg: 'personal', network: relayNetwork,
-    expectedNetwork: relayNetwork, accountRef, expectedAccountRef: accountRef,
-    getPlans: () => plans, token: 'fixture-token-at-least-twenty',
-    assertCurrent: async () => { checks++; if (!current) throw new Error('Selected account changed.'); },
-    fetchImpl: async () => { entered(); await held;
-      return new Response(JSON.stringify({ total_apps: 0, apps: [] })); },
-  });
-  await started;
-  assert.equal(checks, 1);
-  current = false;
-  release();
-  await assert.rejects(verification, /Selected account changed/);
-  assert.equal(checks, 2);
-  assert.deepEqual(plans, {});
-});
-
-test('fresh app verification reads sibling plans after held inventory and final account authority', async () => {
-  let plans = {};
-  let release;
-  let entered;
-  const started = new Promise((resolve) => { entered = resolve; });
-  const held = new Promise((resolve) => { release = resolve; });
-  const sibling = { id: 'sibling-id', name: 'swarm-worker-sibling', network: relayNetwork };
-  let checks = 0;
-  const options = { app: 'swarm-worker-fresh123', kind: 'worker', org: 'personal',
-    expectedOrg: 'personal', network: relayNetwork, expectedNetwork: relayNetwork,
-    accountRef, expectedAccountRef: accountRef, getPlans: () => plans,
-    token: 'fixture-token-at-least-twenty', assertCurrent: async () => { checks++; },
-    fetchImpl: async () => { entered(); await held;
-      return new Response(JSON.stringify({ total_apps: 1, apps: [sibling] })); },
-  };
-  const verified = verifyFreshAppPlan(options);
-  await started;
-  plans = { [sibling.name]: { kind: 'worker', state: 'confirmed', appId: sibling.id,
-    ownerMarker: `FLUJO_CLOUD_OWNER_${'A'.repeat(32)}` } };
-  release();
-  await verified;
-  assert.equal(checks, 2);
-  assert.deepEqual(Object.keys(plans), [sibling.name]);
-  await assert.rejects(verifyFreshAppPlan({ ...options,
-    fetchImpl: async () => new Response(JSON.stringify({ total_apps: 1, apps: [
-      { id: 'foreign-id', name: 'unplanned-goal-app', network: relayNetwork }] })) }), /unverified app/);
-});
-
-test('Stop blocks dispatch but permits a fresh same-account fence for exact cleanup', async () => {
-  const stop = new AbortController();
-  const lease = { accountRef, orgSlug: 'personal' };
-  const intent = { accountRef, org: 'personal' };
-  const observedSignals = [];
-  const assertCurrent = async (_, { signal }) => { observedSignals.push(signal); return true; };
-  stop.abort();
-  await assert.rejects(assertFleetAccountCurrent({ lease, intent, assertCurrent,
-    signal: stop.signal, operation: 'dispatch' }), { name: 'AbortError' });
-  assert.equal(observedSignals.length, 0, 'Stop prevents a new dispatch fence');
-  await assertFleetAccountCurrent({ lease, intent, assertCurrent,
-    signal: stop.signal, operation: 'cleanup' });
-  assert.deepEqual(observedSignals, [undefined], 'cleanup rechecks without the aborted signal');
-  await assert.rejects(assertFleetAccountCurrent({ lease: { ...lease,
-    accountRef: `fly-account-sha256:${'b'.repeat(64)}` }, intent, assertCurrent,
-  signal: stop.signal, operation: 'cleanup' }), /continuation could not be verified/);
-  await assert.rejects(assertFleetAccountCurrent({ lease, intent,
-    assertCurrent: async () => { throw new Error('Selected account changed.'); },
-    signal: stop.signal, operation: 'cleanup' }), /Selected account changed/);
-});
-
-test('goal capacity maps selected worker and agent counts to bounded Fly execution limits', async () => {
+test('goal capacity keeps its limits, and FACTORY runs at most nine local agents per Worker', () => {
   assert.deepEqual(goalCapacity({}), { maxWorkers: 10, conversationsPerWorker: 10, agentsPerWorker: 9 });
-  assert.deepEqual(fleetExecutionLimits({ goal: { maxWorkers: 6, conversationsPerWorker: 5 }, config: { maxWorkers: 2 } }), {
-    workerCap: 6, teamLimits: { agentTurns: 6, leadTurns: 12, concurrency: 4 },
-  });
-  assert.deepEqual(goalCapacity({ agentsPerWorker: 10 }),
-    { maxWorkers: 10, conversationsPerWorker: 11, agentsPerWorker: 10 }, 'legacy child limit is not silently reduced');
-  assert.deepEqual(goalCapacity({ conversationsPerWorker: 11, agentsPerWorker: 10 }),
-    { maxWorkers: 10, conversationsPerWorker: 11, agentsPerWorker: 10 }, 'migrated legacy goal remains valid');
-  assert.equal(fleetExecutionLimits({ goal: { maxWorkers: 6, conversationsPerWorker: 5 }, native: true }).workerCap, 6);
-  assert.deepEqual(fleetExecutionLimits({ goal: { maxWorkers: 25, conversationsPerWorker: 2 }, native: true }), {
-    workerCap: 25, teamLimits: { agentTurns: 6, leadTurns: 12, concurrency: 1 },
-  });
-  assert.equal(fleetExecutionLimits({ goal: { maxWorkers: 6, conversationsPerWorker: 5 }, native: true, diagnostic: true }).workerCap, 1);
-  assert.equal(fleetExecutionLimits({ goal: {}, config: { maxWorkers: 4 }, diagnostic: true }).workerCap, 4);
-  for (const setting of [{ maxWorkers: 0 }, { maxWorkers: 101 }, { maxWorkers: 2.5 },
-    { conversationsPerWorker: 0 }, { conversationsPerWorker: 11 },
-    { agentsPerWorker: 11 }, { agentsPerWorker: '4' }]) {
-    const dataDir = mkdtempSync(path.join(tmpdir(), 'seagulled-invalid-capacity-'));
+  assert.deepEqual(fleetExecutionLimits({ goal: { maxWorkers: 6, conversationsPerWorker: 5 } }), { workerCap: 6, teamLimits: { agentTurns: 6, leadTurns: 12, concurrency: 4 } });
+  assert.deepEqual(goalCapacity({ agentsPerWorker: 10 }), { maxWorkers: 10, conversationsPerWorker: 11, agentsPerWorker: 10 }, 'a saved legacy goal keeps reading the same');
+  for (const setting of [{ maxWorkers: 0 }, { maxWorkers: 101 }, { maxWorkers: 2.5 }, { conversationsPerWorker: 0 }, { conversationsPerWorker: 11 }, { agentsPerWorker: 11 }, { agentsPerWorker: '4' }]) {
     assert.throws(() => goalCapacity(setting), /must be an integer/);
-    await assert.rejects(runFleetLeaf({ goal: { id: 'invalid-capacity', providerId: 'openai', ...setting },
-      task: 'fixture', dataDir, maxUsd: 2 }), /must be an integer/);
-    assert.equal(existsSync(path.join(dataDir, 'fleet')), false);
   }
   assert.throws(() => goalCapacity({ conversationsPerWorker: 5, agentsPerWorker: 5 }), /disagree/);
-  assert.deepEqual(fleetTopology({ workerTopologyVersion: 2 }, { workerCap: 5, relay: true }), {
-    initialWorkers: 5, limits: { maxWorkers: 10, maxDepth: 3, maxChildren: 4, maxActiveRuns: 2 },
-  });
-  assert.deepEqual(fleetTopology({}, { workerCap: 5, relay: true }), {
-    initialWorkers: 1, limits: { maxWorkers: 5, maxDepth: 2, maxChildren: 4, maxActiveRuns: 2 },
-  }, 'already admitted goals retain the original one-starter, five-cap topology');
   assert.throws(() => goalCapacity({ workerTopologyVersion: 4 }), /must be 1, 2 or 3/);
 });
 
-test('Fly account lease selects one verified personal config and drops inherited service credentials', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-fly-account-'));
-  const flyctlPath = path.join(root, process.platform === 'win32' ? 'flyctl.exe' : 'flyctl');
-  const flyConfigDir = path.join(root, 'personal-fly');
-  mkdirSync(flyConfigDir);
-  writeFileSync(flyctlPath, 'fixture executable');
-  writeFileSync(path.join(flyConfigDir, 'config.yml'), 'fixture personal config');
-  const providers = { async flyFleetLease() { return { available: true, flyctlPath, flyConfigDir,
-    orgSlug: 'personal-test', scope: 'private', accountRef,
-    token: 'provider-internal-token-must-not-cross-the-lease' }; } };
-  const lease = await flyAccountLease(providers);
-  assert.deepEqual(lease, { flyctlPath, flyConfigDir, orgSlug: 'personal-test', scope: 'private', accountRef });
-  const env = isolatedFlyEnvironment(lease, { PATH: 'fixture-path', FLY_API_TOKEN: 'inherited-service-token',
-    FLY_ACCESS_TOKEN: 'inherited-access-token', FLY_CONFIG_DIR: 'foreign-config',
-    FLYCTL_PATH: 'foreign-helper', FLUJO_CLOUD_HOME: 'foreign-cloud-records',
-    FLUJO_SNAPSHOT_CONTROL_TOKEN: 'foreign-source-token', FLUJO_LOCAL_INSTANCE_DIR: 'fixture-local-instances' });
-  assert.deepEqual(env, { PATH: 'fixture-path', FLY_CONFIG_DIR: flyConfigDir, FLYCTL_PATH: flyctlPath });
-  assert.equal(isolatedFlyEnvironment(lease, { FLUJO_LOCAL_INSTANCE_DIR: 'foreign' }, flyConfigDir)
-    .FLUJO_LOCAL_INSTANCE_DIR, flyConfigDir, 'only the explicit product source directory crosses to the SDK');
-  assert.equal(await flyAccountLease({ async flyFleetLease() { return { available: true, flyctlPath, orgSlug: 'personal-test',
-    flyConfigDir: path.join(root, 'missing') }; } }), null);
-  const dataDir = mkdtempSync(path.join(tmpdir(), 'seagulled-fly-no-account-'));
-  assert.deepEqual(await runFleetLeaf({ goal: { id: 'no-account', providerId: 'openai' }, dataDir }),
-    { available: false, detail: 'A verified personal Fly sign-in, one selected personal organization, and the bundled Fly helper are required for isolated Workers.' });
-  assert.equal(existsSync(path.join(dataDir, 'fleet')), false);
+test('a saved goal with ten local agents is refused before anything is created', async () => {
+  const c = company({ goal: { conversationsPerWorker: 11, agentsPerWorker: 10, workerTopologyVersion: 2 } });
+  await assert.rejects(runFleetLeaf(c.input), error => error.outcome === 'not_applied');
+  assert.equal(c.fleet(), undefined);
+  assert.equal(existsSync(path.join(c.input.dataDir, 'fleet', 'owned-goal')), false);
 });
 
-test('a legacy profile cannot supply the product source or redirect its verified Fly organization', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-org-boundary-'));
-  const flyConfigDir = path.join(root, 'fly-auth');
-  mkdirSync(flyConfigDir);
-  writeFileSync(path.join(flyConfigDir, 'config.yml'), 'fixture');
-  const flyctlPath = path.join(root, 'flyctl');
-  writeFileSync(flyctlPath, 'fixture');
-  const flyAccount = { flyctlPath, flyConfigDir, orgSlug: 'personal-test', scope: 'private', accountRef };
-  const legacy = { provisioner: { kind: 'fly', org: 'production-org', region: 'iad' } };
-  const bound = bindVerifiedFlyOrganization(legacy, flyAccount);
-  assert.equal(bound.provisioner.org, 'personal-test');
-  assert.equal(bound.provisioner.region, 'iad');
-  assert.equal(legacy.provisioner.org, 'production-org');
-  assert.throws(() => bindVerifiedFlyOrganization(legacy, { ...flyAccount, orgSlug: undefined }),
-    /verified personal Fly sign-in/);
-  const profile = path.join(root, 'legacy-profile.json');
-  writeFileSync(profile, JSON.stringify({ supervisor: { origin: 'http://127.0.0.1:1' },
-    provisioner: { kind: 'fly', flujoCloudPath: root, org: 'production-org' } }));
-  const previous = process.env.SEAGULLED_FLEET_PROFILE;
-  process.env.SEAGULLED_FLEET_PROFILE = profile;
-  const fleetRoute = { available: true, providerId: 'openai', model: {
-    name: 'fixture', baseUrl: 'https://api.openai.com/v1', apiKey: 'fixture',
-    provider: 'openai', adapter: 'openai-responses' } };
-  try {
-    const result = await runFleetLeaf({ goal: { id: 'org-boundary', providerId: 'openai' },
-      dataDir: root, fleetRoute, flyAccount });
-    assert.equal(result.available, false);
-    assert.match(result.detail, /product-owned FLUJO source/);
-    assert.equal(existsSync(path.join(root, 'fleet')), false);
-  } finally {
-    if (previous === undefined) delete process.env.SEAGULLED_FLEET_PROFILE;
-    else process.env.SEAGULLED_FLEET_PROFILE = previous;
-  }
+test('the Fly account lease holds one verified personal config and drops inherited credentials', async () => {
+  const root = fresh(); const lease = account(root);
+  assert.deepEqual(await flyAccountLease({ flyFleetLease: async () => ({ available: true, ...lease, token: 'must not cross' }) }), lease);
+  assert.deepEqual(isolatedFlyEnvironment(lease, { PATH: 'fixture-path', FLY_API_TOKEN: 'inherited', FLY_ACCESS_TOKEN: 'inherited', FLY_CONFIG_DIR: 'foreign', FLYCTL_PATH: 'foreign', OPENAI_API_KEY: 'foreign' }),
+    { PATH: 'fixture-path', FLY_CONFIG_DIR: lease.flyConfigDir, FLYCTL_PATH: lease.flyctlPath });
+  assert.equal(await flyAccountLease({ flyFleetLease: async () => ({ available: true, ...lease, flyConfigDir: path.join(root, 'missing') }) }), null);
+  const c = company({ root });
+  assert.deepEqual(await runFleetLeaf({ ...c.input, flyAccount: undefined }), { available: false, detail: 'A verified personal Fly sign-in, one selected personal organization, and the bundled Fly helper are required for isolated Workers.' });
+  assert.equal(existsSync(path.join(c.input.dataDir, 'fleet')), false);
+});
+
+test('a stop blocks dispatch but a same-account check still permits cleanup', async () => {
+  const lease = { accountRef, orgSlug: 'o' }, intent = { accountRef, org: 'o' }, stopped = AbortSignal.abort();
+  await assert.rejects(assertFleetAccountCurrent({ lease, intent, assertCurrent: async () => true, signal: stopped }), { name: 'AbortError' });
+  await assertFleetAccountCurrent({ lease, intent, assertCurrent: async () => true, signal: stopped, operation: 'cleanup' });
+  await assert.rejects(assertFleetAccountCurrent({ lease, intent: { ...intent, org: 'other' }, assertCurrent: async () => true }), { code: 'UNKNOWN' });
+  await assert.rejects(assertFleetAccountCurrent({ lease, intent, assertCurrent: async () => false }), { code: 'UNKNOWN' });
+});
+
+test('the installed package has the cloud helpers FACTORY needs', async () => {
+  const installed = installedProductRuntime();
+  assert.ok(installed?.cloudSdkRoot);
+  const root = fresh();
+  assert.equal((await boundFleetSource({ sourceBinding: installed, flyAccount: account(root) })).available, true);
+  assert.equal((await boundFleetSource({ sourceBinding: { cloudSdkRoot: path.join(root, 'absent') }, flyAccount: account(root) })).available, false);
+  assert.equal((await boundFleetSource({ sourceBinding: {}, flyAccount: account(root) })).available, false);
+  assert.equal((await boundFleetSource({ sourceBinding: installed })).available, false);
+  assert.match(PRODUCT_WORKER_IMAGE, /^docker\.io\/library\/node@sha256:[a-f0-9]{64}$/);
+  // The SDK this version needs must really be the one installed.
+  assert.equal(typeof factorySdk.FactoryCloudLiteFleet, 'function');
+  assert.equal(typeof factorySdk.packFactorySdk, 'function');
+  assert.deepEqual(factorySdk.providerPrograms({ id: 'x-x', envKey: 'MODEL_KEY', model: 'm', apis: ['chat'], baseUrls: ['https://model.example/v1'] }), ['flujo']);
 });
 
 test('a real loopback model catalog must contain the exact model ID before readiness', async () => {
   let catalog = '{}';
-  const server = http.createServer((request, response) => {
-    const pathname = new URL(request.url, 'http://local').pathname;
-    if (pathname === '/api/workspaces') {
-      response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ workspaces: [] }));
-    } else if (pathname === '/v1/models') {
-      response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(catalog);
-    } else { response.writeHead(404); response.end(); }
-  });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-catalog-shape-'));
-  const origin = `http://127.0.0.1:${server.address().port}`;
-  const profile = path.join(root, 'profile.json');
-  writeFileSync(profile, JSON.stringify({ supervisor: { origin },
-    provisioner: { kind: 'fly', flujoCloudPath: root },
-    model: { name: 'exact-model', baseUrl: `${origin}/v1`, apiKey: 'fixture',
-      provider: 'openai', adapter: 'openai' } }));
-  const previous = process.env.SEAGULLED_FLEET_PROFILE;
-  const previousKey = process.env.OPENAI_API_KEY;
-  process.env.SEAGULLED_FLEET_PROFILE = profile;
-  delete process.env.OPENAI_API_KEY;
+  const server = http.createServer((request, response) => { response.writeHead(200, { 'content-type': 'application/json' }); response.end(catalog); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const root = fresh();
+  const route = { available: true, providerId: 'private-h100', leaseGoalId: 'g', verification: 'inference-verified', costPolicy: 'estimated-gpu-seconds', ownedAttemptId: privateRoute.ownedAttemptId,
+    model: { ...privateRoute.model } };
+  // The route check needs an owned address, so a local one fails first; the catalog logic runs on an OpenAI-shaped fetch instead.
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, options) => originalFetch(`http://127.0.0.1:${server.address().port}${new URL(url).pathname}`, options);
   try {
-    for (catalog of ['null', '{}', '{"data":null}', '{"data":[]}',
-      '{"data":[{"name":"exact-model"}]}', '<html>not a catalog</html>']) {
-      const status = await fleetDiagnosticStatus({ dataDir: root });
+    const ask = () => fleetStatus({ dataDir: root, providerId: 'private-h100', goalId: 'g', fleetRoute: route, flyAccount: account(root), sourceBinding: cloudHelpers(root) });
+    for (catalog of ['null', '{}', '{"data":null}', '{"data":[]}', '{"data":[{"name":"qwen3.8-27b"}]}', '<html>not a catalog</html>']) {
+      const status = await ask();
       assert.equal(status.available, false, `catalog ${catalog} cannot qualify model identity`);
       assert.equal(status.modelIdentityVerified, undefined);
     }
-    catalog = '{"data":[{"id":"another-model"},{"id":"exact-model"}]}';
-    const ready = await fleetDiagnosticStatus({ dataDir: root });
+    catalog = '{"data":[{"id":"another-model"},{"id":"qwen3.8-27b"}]}';
+    const ready = await ask();
     assert.equal(ready.available, true);
     assert.equal(ready.modelIdentityVerified, true);
-  } finally {
-    if (previous === undefined) delete process.env.SEAGULLED_FLEET_PROFILE;
-    else process.env.SEAGULLED_FLEET_PROFILE = previous;
-    if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
-    else process.env.OPENAI_API_KEY = previousKey;
-    server.closeAllConnections();
-    await new Promise((resolve) => server.close(resolve));
-  }
+  } finally { globalThis.fetch = originalFetch; server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
 });
 
-test('product fleet requires one bound private source and checks the SDK proof before any workspace call', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-bound-source-'));
-  const dataDir = path.join(root, 'swarm');
-  const sourceInstanceDir = path.join(root, 'instances');
-  const sourceDataRoot = path.join(root, 'flujo-data');
-  const sourceAppRoot = path.join(root, 'flujo-package');
-  const cloudSdkRoot = path.join(root, 'cloud-sdk');
-  const flyConfigDir = path.join(root, 'fly-auth');
-  for (const directory of [dataDir, sourceInstanceDir, sourceDataRoot, sourceAppRoot,
-    path.join(root, 'wrong-data'), path.join(root, 'wrong-app'),
-    path.join(cloudSdkRoot, 'lib'), flyConfigDir]) mkdirSync(directory, { recursive: true });
-  const snapshottedInstances = path.join(sourceDataRoot, 'workspaces', 'instances');
-  mkdirSync(snapshottedInstances, { recursive: true });
-  sdkFixtureManifest(cloudSdkRoot, './owned-api.mjs');
-  writeFileSync(path.join(cloudSdkRoot, 'owned-api.mjs'), `export class ManagedCloud {
-    constructor(options) { globalThis.__seagulledSourceFixture.options = options; this.fetch = options.fetchImpl; }
-    async source(input) { globalThis.__seagulledSourceFixture.input = input;
-      if (globalThis.__seagulledSourceFixture.sourceImpl) return globalThis.__seagulledSourceFixture.sourceImpl(this);
-      return globalThis.__seagulledSourceFixture.proof; }
-  }`);
-  const flyctlPath = path.join(root, 'flyctl');
-  writeFileSync(flyctlPath, 'fixture');
-  writeFileSync(path.join(flyConfigDir, 'config.yml'), 'fixture');
-  const flyAccount = { flyctlPath, flyConfigDir, orgSlug: 'personal-test', scope: 'private', accountRef };
-  const requests = [];
-  const server = http.createServer((request, response) => {
-    requests.push(new URL(request.url, 'http://local').pathname);
-    response.writeHead(200, { 'content-type': 'application/json' });
-    response.end(JSON.stringify({ workspaces: [] }));
-  });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const sourceOrigin = `http://127.0.0.1:${server.address().port}`;
-  const sourceBinding = { cloudSdkRoot, sourceOrigin, sourceInstanceDir, sourceDataRoot, sourceAppRoot };
-  const fleetRoute = { available: true, providerId: 'openai', model: {
-    name: 'fixture-model', baseUrl: 'https://api.openai.com/v1', apiKey: 'fixture-key',
-    provider: 'openai', adapter: 'openai-responses' } };
-  const previousProfile = process.env.SEAGULLED_FLEET_PROFILE;
-  const previousInstances = process.env.FLUJO_LOCAL_INSTANCE_DIR;
-  const previousFetch = globalThis.fetch;
-  process.env.SEAGULLED_FLEET_PROFILE = path.join(root, 'missing-legacy-profile.json');
-  process.env.FLUJO_LOCAL_INSTANCE_DIR = path.join(root, 'foreign-host-instances');
-  let modelFetches = 0;
-  globalThis.fetch = async () => { modelFetches++;
-    return new Response(JSON.stringify({ data: [{ id: 'fixture-model' }] }), { status: 200 }); };
-  globalThis.__seagulledSourceFixture = { proof: { source: sourceOrigin, dataRoot: sourceDataRoot,
-    appRoot: sourceAppRoot } };
+test('company admission requires the exact selected provider binding before any probe or intent', async () => {
+  const root = fresh(); const dataDir = path.join(root, 'data');
+  const valid = openAiRoute();
+  const originalFetch = globalThis.fetch; let fetches = 0;
+  globalThis.fetch = async () => { fetches++; throw new Error('no probe before the binding holds'); };
   try {
-    const status = (binding) => fleetStatus({ dataDir, providerId: 'openai', fleetRoute,
-      flyAccount, sourceBinding: binding });
-    assert.match((await status(undefined)).detail, /product-owned FLUJO source/);
-    assert.match((await status({ ...sourceBinding, sourceInstanceDir: path.join(root, '..', 'host-instances') })).detail,
-      /product-owned FLUJO source/);
-    assert.match((await status({ ...sourceBinding, sourceInstanceDir: snapshottedInstances })).detail,
-      /product-owned FLUJO source/);
-    assert.deepEqual(requests, []);
-    assert.equal(modelFetches, 0);
-    globalThis.__seagulledSourceFixture.proof = { source: sourceOrigin,
-      dataRoot: path.join(root, 'wrong-data'), appRoot: sourceAppRoot };
-    assert.match((await status(sourceBinding)).detail, /identity did not match/);
-    const rejected = await runFleetLeaf({ goal: { id: 'proof-mismatch', providerId: 'openai' },
-      task: 'fixture', dataDir, maxUsd: 2, fleetRoute, flyAccount, sourceBinding });
-    assert.equal(rejected.available, false);
-    assert.match(rejected.detail, /identity did not match/);
-    for (const proof of [
-      { source: 'http://127.0.0.1:1', dataRoot: sourceDataRoot, appRoot: sourceAppRoot },
-      { source: sourceOrigin, dataRoot: sourceDataRoot, appRoot: path.join(root, 'wrong-app') },
-    ]) {
-      globalThis.__seagulledSourceFixture.proof = proof;
-      assert.match((await status(sourceBinding)).detail, /identity did not match/);
-    }
-    assert.deepEqual(requests, [], 'a mismatched proof cannot reach the workspace API');
-    globalThis.__seagulledSourceFixture.proof = { source: sourceOrigin, dataRoot: sourceDataRoot,
-      appRoot: sourceAppRoot };
-    const ready = await status(sourceBinding);
-    assert.equal(ready.available, true);
-    assert.equal(ready.modelIdentityVerified, true, 'the exact model catalog was checked');
-    assert.equal('config' in ready, false);
-    assert.equal(JSON.stringify(ready).includes(root), false, 'private paths remain backend-only');
-    assert.deepEqual(globalThis.__seagulledSourceFixture.input, { source: sourceOrigin });
-    assert.equal(globalThis.__seagulledSourceFixture.options.env.FLUJO_LOCAL_INSTANCE_DIR, sourceInstanceDir);
-    assert.deepEqual(requests, ['/api/workspaces']);
-    assert.equal(modelFetches, 1);
-    assert.equal(existsSync(path.join(dataDir, 'fleet')), false, 'discovery does not create an intent');
-    const cancellation = new AbortController();
-    let discoveryStarted;
-    const started = new Promise((resolve) => { discoveryStarted = resolve; });
-    globalThis.fetch = (_, options) => new Promise((resolve, reject) => {
-      discoveryStarted();
-      options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
-    });
-    globalThis.__seagulledSourceFixture.sourceImpl = (managed) => managed.fetch(sourceOrigin, {
-      signal: AbortSignal.timeout(10_000) });
-    const cancelled = runFleetLeaf({ goal: { id: 'cancel-discovery', providerId: 'openai' },
-      task: 'fixture', dataDir, maxUsd: 2, fleetRoute, flyAccount, sourceBinding,
-      signal: cancellation.signal });
-    await started;
-    const stoppedAt = Date.now();
-    cancellation.abort();
-    await assert.rejects(cancelled, { name: 'AbortError' });
-    assert.ok(Date.now() - stoppedAt < 2000, 'Stop does not wait for the SDK proof timeout');
-    assert.equal(existsSync(path.join(dataDir, 'fleet')), false, 'Stop before source proof creates no intent');
-  } finally {
-    if (previousProfile === undefined) delete process.env.SEAGULLED_FLEET_PROFILE;
-    else process.env.SEAGULLED_FLEET_PROFILE = previousProfile;
-    if (previousInstances === undefined) delete process.env.FLUJO_LOCAL_INSTANCE_DIR;
-    else process.env.FLUJO_LOCAL_INSTANCE_DIR = previousInstances;
-    globalThis.fetch = previousFetch;
-    delete globalThis.__seagulledSourceFixture;
-    server.closeAllConnections();
-    await new Promise((resolve) => server.close(resolve));
-  }
-});
-
-test('private SDK preflight rejects an incompatible Worker source before relay or app creation', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-private-profile-'));
-  const dataDir = path.join(root, 'swarm');
-  const cloudSdkRoot = path.join(root, 'cloud-sdk');
-  const sourceInstanceDir = path.join(root, 'instances');
-  const sourceDataRoot = path.join(root, 'flujo-data');
-  const sourceAppRoot = path.join(root, 'flujo-app');
-  const flyConfigDir = path.join(root, 'fly-auth');
-  for (const directory of [dataDir, path.join(cloudSdkRoot, 'lib'), sourceInstanceDir,
-    sourceDataRoot, sourceAppRoot, flyConfigDir]) mkdirSync(directory, { recursive: true });
-  const flyctlPath = path.join(root, 'flyctl');
-  writeFileSync(flyctlPath, 'fixture');
-  writeFileSync(path.join(flyConfigDir, 'config.yml'), 'fixture');
-  const requests = [];
-  const server = http.createServer(async (request, response) => {
-    for await (const _chunk of request) { /* Drain fixture requests. */ }
-    const pathname = new URL(request.url, 'http://local').pathname;
-    requests.push(`${request.method} ${pathname}`);
-    const send = (status, value) => { response.writeHead(status, { 'content-type': 'application/json' });
-      response.end(JSON.stringify(value)); };
-    if (pathname === '/api/workspaces' && request.method === 'GET') return send(200, { workspaces: [] });
-    if (pathname === '/api/workspaces' && request.method === 'POST') return send(201, {});
-    if (pathname === '/api/workspaces' && request.method === 'DELETE') return send(200, {});
-    if (pathname === '/api/init') return send(200, {});
-    if (pathname === '/api/model' && request.method === 'GET') return send(200, []);
-    if (pathname === '/api/model' && request.method === 'POST') return send(201, {});
-    if (pathname === '/api/flow' && request.method === 'GET') return send(200, []);
-    if (pathname === '/api/flow/compile') return send(201, { flow: { id: 'boot-flow', name: 'swarm_boot' } });
-    return send(404, {});
-  });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const sourceOrigin = `http://127.0.0.1:${server.address().port}`;
-  sdkFixtureManifest(cloudSdkRoot);
-  writeFileSync(path.join(cloudSdkRoot, 'lib', 'managed.mjs'), `export class ManagedCloud {
-    static privateNetworkContractVersion = 1;
-    constructor() {}
-    async source() { return { source: '${sourceOrigin}', dataRoot: '${sourceDataRoot.replaceAll('\\', '\\\\')}',
-      appRoot: '${sourceAppRoot.replaceAll('\\', '\\\\')}' }; }
-    async preflight(input) { globalThis.__privateProfilePreflight.push(input);
-      throw new Error(globalThis.__privateProfileFailure); }
-    async openOwnedProxy() { throw new Error('No proxy should open.'); }
-    async credential() { throw new Error('No credential should be read.'); }
-  }`);
-  const sourceBinding = { cloudSdkRoot, sourceOrigin, sourceInstanceDir, sourceDataRoot, sourceAppRoot };
-  const flyAccount = { flyctlPath, flyConfigDir, orgSlug: 'personal', scope: 'private', accountRef };
-  const fleetRoute = { available: true, providerId: 'openai', model: {
-    name: 'fixture-model', baseUrl: 'https://api.openai.com/v1', apiKey: 'fixture-key',
-    provider: 'openai', adapter: 'openai-responses' } };
-  const previousFetch = globalThis.fetch;
-  globalThis.__privateProfilePreflight = [];
-  globalThis.__privateProfileFailure = 'Private-workspace source capability is incompatible.';
-  globalThis.fetch = async () => new Response(JSON.stringify({ data: [{ id: 'fixture-model' }] }),
-    { status: 200 });
-  try {
-    for (const [goalId, failure] of [
-      ['source-held', 'Private-workspace source capability is incompatible.'],
-      ['image-held', 'No compatible official worker image.'],
-    ]) {
-      globalThis.__privateProfileFailure = failure;
-      await assert.rejects(runFleetLeaf({ goal: { id: goalId, text: 'fixture', providerId: 'openai' },
-        task: 'fixture', dataDir, maxUsd: 2, fleetRoute, flyAccount, sourceBinding,
-        assertFlyAccountCurrent: async () => true }),
-      (error) => error.outcome === 'not_applied' && error.message === failure);
-      const intent = JSON.parse(readFileSync(path.join(dataDir, 'fleet', goalId, 'intent.json'), 'utf8'));
-      assert.deepEqual(intent.apps, {});
-    }
-    assert.equal(globalThis.__privateProfilePreflight.length, 2);
-    for (const input of globalThis.__privateProfilePreflight) {
-      assert.equal(input.profile, 'private-workspace');
-      assert.equal(input.source, sourceOrigin);
-      assert.deepEqual(input.flowIds, ['swarm_boot']);
-      assert.equal('network' in input, false);
-    }
-    assert.equal(requests.filter((entry) => entry === 'DELETE /api/workspaces').length, 2);
-  } finally {
-    globalThis.fetch = previousFetch;
-    delete globalThis.__privateProfilePreflight;
-    delete globalThis.__privateProfileFailure;
-    server.closeAllConnections(); await new Promise((resolve) => server.close(resolve));
-  }
-});
-
-test('Fly provisioner gives ManagedCloud only the selected account and owned record directory', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-managed-lease-'));
-  const lib = path.join(root, 'lib'); mkdirSync(lib);
-  writeFileSync(path.join(root, 'package.json'), '{"name":"flujo-cloud","type":"module"}');
-  writeFileSync(path.join(lib, 'managed.mjs'), 'export class ManagedCloud { constructor(options) { globalThis.__seagulledManagedLeaseFixture = options; } }');
-  writeFileSync(path.join(lib, 'process.mjs'), 'export const createFlyRunner = () => ({}); export const unusedLoopbackPort = async () => 1;');
-  writeFileSync(path.join(lib, 'private-files.mjs'), 'export const readPrivateJson = async () => ({});');
-  const cloudDirectory = path.join(root, 'private-product-records');
-  const flyEnv = { FLYCTL_PATH: path.join(root, 'bundled-flyctl'), FLY_CONFIG_DIR: path.join(root, 'personal-config') };
-  try {
-    await flyProvisioner({ flujoCloudPath: root, templateWorkspace: 'fixture', flyEnv, cloudDirectory });
-    assert.deepEqual(globalThis.__seagulledManagedLeaseFixture, { env: flyEnv, directory: cloudDirectory });
-    const relayJournal = path.join(root, 'relay.json');
-    await assert.rejects(createOwnedRelay({ journalPath: relayJournal, flujoCloudPath: root,
-      org: 'personal', network: relayNetwork }), /isolated personal Fly account/);
-    assert.equal(existsSync(relayJournal), false);
-  } finally { delete globalThis.__seagulledManagedLeaseFixture; }
-});
-
-test('selected five-Worker staffing admits actual runs beneath one external supervisor', async () => {
-  const registryPath = path.join(mkdtempSync(path.join(tmpdir(), 'seagulled-staff-')), 'registry.json');
-  const provisioned = [];
-  const controller = new Controller({ registryPath, operatorToken: 'fixture-operator-token-more-than-32-characters',
-    publicUrl: 'http://127.0.0.1:1', remoteUrl: 'http://relay.fixture', maxRunsPerWorker: 1,
-    provisioner: { async provision(worker, _fleet, context) {
-      provisioned.push({ workerId: worker.id, limits: context.teamLimits });
-      return { kind: 'fixture', workerId: worker.id };
-    }, async connect() { return { client: { async runFlow({ conversationId }) {
-      assert.equal(Object.values(controller.registry.state.workers).length, 6,
-        'no Worker conversation starts until all five Machine slots are reserved');
-      return { conversationId, status: 'completed', output: 'fixture result' };
-    } }, close: async () => undefined }; } },
-  });
-  try {
-    const goal = controller.registry.createGoal({ id: 'staff-fixture', text: 'Fixture work',
-      limits: { maxWorkers: 5, maxDepth: 2, maxChildren: 4, maxActiveRuns: 2 } });
-    goal.teamLimits = fleetExecutionLimits({ goal: { maxWorkers: 5, conversationsPerWorker: 5 } }).teamLimits;
-    controller.registry.save();
-    const root = controller.registry.reserve({ goalId: goal.id, role: 'supervisor', name: 'Todd' }).worker;
-    controller.registry.enroll(root.id, { kind: 'external', origin: 'http://127.0.0.1:1', workspace: 'fixture' });
-    const { lead, runs } = staffOwnedTeam(controller, root, { task: 'Fixture work', workerCap: 5,
-      localChildTarget: 4 });
-    assert.equal(runs.length, 5);
-    assert.equal(new Set(runs.map((run) => run.runId)).size, 5);
-    assert.equal(controller.registry.worker(lead.workerId).parentId, root.id);
-    assert.deepEqual(runs.slice(1).map((run) => controller.registry.worker(run.workerId).parentId),
-      Array(4).fill(lead.workerId));
-    assert.equal(Object.values(controller.registry.state.workers).length, 6, 'external Todd is outside the five Machine cap');
-    assert.match(controller.registry.run(lead.runId).task, /start_subflow_ tool exactly 4 times/);
-    for (const run of runs) {
-      const brief = controller.registry.run(run.runId).task;
-      assert.match(brief, /allowed directories describe path scope, not read-only permission/);
-      assert.match(brief, /Use a declared Bash or filesystem write tool before reporting a permission block; honor an actual tool denial/);
-    }
-    assert.throws(() => staffOwnedTeam(controller, root, { task: 'Duplicate', workerCap: 5 }), /all 5 Workers/);
-    await Promise.all([...controller.settled.values()]);
-    assert.equal(Object.values(controller.registry.state.runs).filter((run) => run.state === 'completed').length, 5);
-    assert.equal(provisioned.length, 5);
-    assert.ok(provisioned.every((item) => item.limits.concurrency === 4));
-    assert.throws(() => controller.startRun({ worker: controller.registry.worker(lead.workerId),
-      startedBy: root.id, task: 'A second lead conversation' }), /conversation run limit/);
-  } finally { await controller.close(); }
-});
-
-test('local conversation receipt accepts only the exact observed child tree', () => {
-  const parent = 'lead-id';
-  const items = Array.from({ length: 4 }, (_, index) => ({ id: `child-${index}`, parentConversationId: parent,
-    status: 'completed' }));
-  assert.deepEqual(verifiedLocalConversations({ status: 200, body: { items, total: 4, hasMore: false } }, parent, 4),
-    items.map(({ id, status }) => ({ id, status })));
-  assert.throws(() => verifiedLocalConversations({ status: 200, body: { items: items.slice(0, 3), total: 3,
-    hasMore: false } }, parent, 4), /exactly 4/);
-  assert.throws(() => verifiedLocalConversations({ status: 200, body: { items: [...items, {
-    id: 'extra', parentConversationId: parent }], total: 5, hasMore: false } }, parent, 4), /exactly 4/);
-  assert.throws(() => verifiedLocalConversations({ status: 200, body: { items, total: 4, hasMore: true } },
-    parent, 4), /did not confirm/);
-});
-
-test('fleet deadline blocks a late Worker before any model submission', async () => {
-  const registryPath = path.join(mkdtempSync(path.join(tmpdir(), 'seagulled-deadline-')), 'registry.json');
-  let modelCalls = 0;
-  let releaseProvisioning;
-  const provisioningGate = new Promise((resolve) => { releaseProvisioning = resolve; });
-  const controller = new Controller({ registryPath, operatorToken: 'fixture-operator-token-more-than-32-characters',
-    publicUrl: 'http://127.0.0.1:1', deadlineAt: Number.MAX_SAFE_INTEGER,
-    provisioner: { async provision(worker) {
-      await provisioningGate;
-      return { kind: 'fixture', workerId: worker.id };
-    }, async connect() { return { client: { async runFlow() { modelCalls++; return { status: 'completed', output: 'late' }; } },
-      close: async () => undefined }; } } });
-  try {
-    const goal = controller.registry.createGoal({ id: 'deadline-fixture', text: 'Fixture', limits: { maxWorkers: 2 } });
-    const root = controller.registry.reserve({ goalId: goal.id, role: 'supervisor' }).worker;
-    controller.registry.enroll(root.id, { kind: 'external', origin: 'http://127.0.0.1:1', workspace: 'fixture' });
-    const run = controller.delegate(root, { name: 'late-worker', task: 'Fixture' });
-    controller.deadlineAt = Date.now() - 1;
-    releaseProvisioning();
-    await controller.settled.get(run.runId);
-    assert.equal(controller.registry.run(run.runId).state, 'failed');
-    assert.equal(modelCalls, 0);
-    assert.throws(() => controller.delegate(root, { name: 'too-late', task: 'Fixture' }), /deadline has passed/);
-  } finally { releaseProvisioning(); await controller.close(); }
-});
-
-test('product Fly admission requires the exact selected provider binding before any probe or intent', async () => {
-  const dataDir = mkdtempSync(path.join(tmpdir(), 'seagulled-route-bound-'));
-  const valid = { available: true, providerId: 'openai',
-    model: { name: 'fixture-model', baseUrl: 'https://api.openai.com/v1', apiKey: 'fixture-key',
-      provider: 'openai', adapter: 'openai-responses' }, verification: 'unverified' };
-  for (const route of [undefined, { ...valid, providerId: 'anthropic' },
-    { ...valid, model: { ...valid.model, provider: 'anthropic' } },
-    { ...valid, model: { ...valid.model, adapter: 'anthropic' } },
-    { ...valid, model: { ...valid.model, baseUrl: 'https://alternate.example/v1' } }]) {
-    const status = await fleetStatus({ dataDir, providerId: 'openai', fleetRoute: route });
-    assert.equal(status.available, false);
-    const result = await runFleetLeaf({ goal: { id: 'route-bound', providerId: 'openai' },
-      task: 'fixture', dataDir, maxUsd: 2, fleetRoute: route });
-    assert.equal(result.available, false);
-    assert.equal(existsSync(path.join(dataDir, 'fleet')), false);
-  }
-});
-
-test('private H100 Fly route accepts only the verified owned endpoint identity before any probe', async () => {
-  const dataDir = mkdtempSync(path.join(tmpdir(), 'seagulled-private-route-'));
-  const previousProfile = process.env.SEAGULLED_FLEET_PROFILE;
-  process.env.SEAGULLED_FLEET_PROFILE = path.join(dataDir, 'missing-profile.json');
-  const valid = { available: true, providerId: 'private-h100', verification: 'inference-verified',
-    costPolicy: 'estimated-gpu-seconds', ownedAttemptId: '11111111-2222-3333-4444-555555555555',
-    leaseGoalId: 'owned-goal',
-    model: { name: 'qwen3.8-27b', provider: 'openai', adapter: 'openai',
-      baseUrl: 'https://owner-seagulled-qwen-a1b2c3d4e5f6.modal.run/v1', apiKey: 'owned-fixture-token' } };
-  try {
-    const catalogOnly = await fleetStatus({ dataDir, providerId: 'private-h100',
-      fleetRoute: { ...valid, verification: 'previously-verified' }, goalId: 'owned-goal' });
-    assert.match(catalogOnly.detail, /no usable Fly model binding/);
-    const accepted = await fleetStatus({ dataDir, providerId: 'private-h100', fleetRoute: valid, goalId: 'owned-goal' });
-    assert.match(accepted.detail, /product-owned FLUJO source/, 'binding passes to owned source discovery without fetching a model');
-    assert.equal((await fleetStatus({ dataDir, providerId: 'private-h100', fleetRoute: valid,
-      goalId: 'different-goal' })).available, false, 'another goal cannot borrow the route');
-    const nemotron = { ...valid, model: { ...valid.model, name: 'nemotron-3.5-super-vl',
-      baseUrl: 'https://owner--seagulled-nemotron-a1b2c3d4e5f6-serve.modal.run/v1' } };
-    assert.match((await fleetStatus({ dataDir, providerId: 'private-h100', fleetRoute: nemotron, goalId: 'owned-goal' })).detail,
-      /product-owned FLUJO source/, 'the B300 Nemotron route binds to its own owned app');
-    for (const route of [
-    { ...valid, providerId: 'openai' },
-    { ...valid, verification: 'unverified' },
-    { ...valid, ownedAttemptId: 'missing' },
-    { ...valid, model: { ...valid.model, name: 'other-model' } },
-    { ...valid, model: { ...valid.model, name: 'nemotron-3.5-super-vl' } },
-    { ...valid, model: { ...valid.model, baseUrl: 'https://owner--seagulled-nemotron-a1b2c3d4e5f6-serve.modal.run/v1' } },
-    { ...valid, model: { ...valid.model, baseUrl: 'https://original-project.modal.run/v1' } },
-    { ...valid, model: { ...valid.model, baseUrl: 'http://owner-seagulled-qwen-a1b2c3d4e5f6.modal.run/v1' } },
-    ]) {
-      const status = await fleetStatus({ dataDir, providerId: 'private-h100', fleetRoute: route, goalId: 'owned-goal' });
-      assert.equal(status.available, false);
-      assert.equal(existsSync(path.join(dataDir, 'fleet')), false);
-    }
-  } finally {
-    if (previousProfile === undefined) delete process.env.SEAGULLED_FLEET_PROFILE;
-    else process.env.SEAGULLED_FLEET_PROFILE = previousProfile;
-  }
-});
-
-test('a saved no-credits account hold survives a model-name change without probing', async () => {
-  const dataDir = mkdtempSync(path.join(tmpdir(), 'seagulled-account-hold-'));
-  const fleetDir = path.join(dataDir, 'fleet'); mkdirSync(fleetDir);
-  const oldModel = { name: 'gpt-4.1-mini', baseUrl: 'https://api.openai.com/v1', apiKey: 'same-fixture-key' };
-  const fingerprint = createHash('sha256').update(`${oldModel.baseUrl}\0${oldModel.name}\0${oldModel.apiKey}`).digest('hex').slice(0, 24);
-  writeFileSync(path.join(fleetDir, `model-admission-${fingerprint}.json`),
-    JSON.stringify({ state: 'held', provider: 'openai-api', reason: 'no credits remaining' }));
-  const route = { available: true, providerId: 'openai',
-    model: { ...oldModel, name: 'another-model', provider: 'openai', adapter: 'openai-responses' } };
-  const status = await fleetStatus({ dataDir, providerId: 'openai', fleetRoute: route });
-  assert.equal(status.available, false);
-  assert.match(status.detail, /no-credits hold/);
-  assert.equal(existsSync(path.join(dataDir, 'fleet', 'route-bound')), false);
-});
-
-test('confirmed original quota denial holds the account across new goals and model names', async () => {
-  const dataDir = mkdtempSync(path.join(tmpdir(), 'seagulled-confirmed-quota-'));
-  const model = { name: 'first-model', baseUrl: 'https://api.openai.com/v1', apiKey: 'fixture-secret-key',
-    provider: 'openai', adapter: 'openai-responses' };
-  const read = { status: 200, body: { status: 'error', lastError: {
-    httpStatus: 429, code: 'insufficient_quota', message: 'sensitive provider body must not be stored' } } };
-  assert.equal(recordConfirmedQuotaHold({ dataDir, model, providerId: 'openai',
-    goalId: 'first-goal', runId: 'original-run', read }), true);
-  const accountPath = path.join(dataDir, 'fleet', `account-admission-${createHash('sha256')
-    .update(`${model.baseUrl}\0${model.apiKey}`).digest('hex').slice(0, 24)}.json`);
-  const saved = readFileSync(accountPath, 'utf8');
-  assert.equal(JSON.parse(saved).runId, 'original-run');
-  assert.equal(saved.includes(model.apiKey), false);
-  assert.equal(saved.includes(read.body.lastError.message), false);
-  const originalFetch = globalThis.fetch;
-  let fetches = 0;
-  globalThis.fetch = async () => { fetches++; throw new Error('account hold must precede fetch'); };
-  try {
-    for (const [goalId, name] of [['new-goal-one', 'other-model'], ['new-goal-two', 'third-model']]) {
-      const fleetRoute = { available: true, providerId: 'openai', model: { ...model, name } };
-      const status = await fleetStatus({ dataDir, providerId: 'openai', fleetRoute });
-      assert.equal(status.available, false);
-      assert.match(status.detail, /no-credits hold/);
-      const result = await runFleetLeaf({ goal: { id: goalId, providerId: 'openai' },
-        task: 'fixture', dataDir, maxUsd: 2, fleetRoute });
+    for (const route of [undefined, { ...valid, providerId: 'anthropic' }, { ...valid, model: { ...valid.model, provider: 'anthropic' } },
+      { ...valid, model: { ...valid.model, adapter: 'anthropic' } }, { ...valid, model: { ...valid.model, baseUrl: 'https://alternate.example/v1' } }]) {
+      assert.equal((await fleetStatus({ dataDir, providerId: 'openai', fleetRoute: route, flyAccount: account(root), sourceBinding: cloudHelpers(root) })).available, false);
+      const c = company({ root, route: route ?? valid });
+      const result = await runFleetLeaf({ ...c.input, goal: { ...c.input.goal, providerId: 'openai' }, fleetRoute: route, dataDir });
       assert.equal(result.available, false);
-      assert.equal(existsSync(path.join(dataDir, 'fleet', goalId)), false);
+      assert.equal(existsSync(path.join(dataDir, 'fleet')), false);
     }
     assert.equal(fetches, 0);
   } finally { globalThis.fetch = originalFetch; }
 });
 
-test('an ambiguous rate-limit response does not become a no-credits account hold', () => {
-  const dataDir = mkdtempSync(path.join(tmpdir(), 'seagulled-rate-limit-'));
-  const model = { name: 'fixture', baseUrl: 'https://api.openai.com/v1', apiKey: 'different-key',
-    provider: 'openai', adapter: 'openai-responses' };
-  for (const read of [
-    { status: 200, body: { status: 'error', lastError: { httpStatus: 429, code: 'rate_limit_exceeded' } } },
-    { status: 200, body: { status: 'running', lastError: { httpStatus: 429, code: 'insufficient_quota' } } },
-    { status: 503, body: { status: 'error', lastError: { httpStatus: 429, code: 'insufficient_quota' } } },
-  ]) assert.equal(recordConfirmedQuotaHold({ dataDir, model, providerId: 'openai',
-    goalId: 'original-goal', runId: 'original-run', read }), false);
+test('the private route accepts only its verified owned endpoint, leased to this goal', async () => {
+  const root = fresh(); const dataDir = path.join(root, 'data'); const flyAccount = account(root); const sourceBinding = cloudHelpers(root);
+  const status = route => fleetStatus({ dataDir, providerId: 'private-h100', fleetRoute: route, goalId: 'owned-goal', flyAccount, sourceBinding });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ data: [{ id: 'qwen3.8-27b' }, { id: 'nemotron-3.5-super-vl' }] }));
+  try {
+    assert.equal((await status(privateRoute)).available, true);
+    const nemotron = { ...privateRoute, model: { ...privateRoute.model, name: 'nemotron-3.5-super-vl', baseUrl: 'https://owner--seagulled-nemotron-a1b2c3d4e5f6-serve.modal.run/v1' } };
+    assert.equal((await status(nemotron)).available, true);
+    assert.equal((await fleetStatus({ dataDir, providerId: 'private-h100', fleetRoute: privateRoute, goalId: 'different-goal', flyAccount, sourceBinding })).available, false);
+    for (const route of [{ ...privateRoute, providerId: 'openai' }, { ...privateRoute, verification: 'unverified' }, { ...privateRoute, ownedAttemptId: 'missing' },
+      { ...privateRoute, model: { ...privateRoute.model, name: 'other-model' } }, { ...privateRoute, model: { ...privateRoute.model, name: 'nemotron-3.5-super-vl' } },
+      { ...privateRoute, model: { ...privateRoute.model, baseUrl: 'https://original-project.modal.run/v1' } },
+      { ...privateRoute, model: { ...privateRoute.model, baseUrl: 'http://owner-seagulled-qwen-a1b2c3d4e5f6.modal.run/v1' } }]) {
+      assert.equal((await status(route)).available, false);
+    }
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('a saved no-credits hold survives a model change without probing', async () => {
+  const root = fresh(); const dataDir = path.join(root, 'data'); mkdirSync(path.join(dataDir, 'fleet'), { recursive: true });
+  const oldModel = { name: 'gpt-4.1-mini', baseUrl: 'https://api.openai.com/v1', apiKey: 'same-fixture-key' };
+  const fingerprint = createHash('sha256').update(`${oldModel.baseUrl}\0${oldModel.name}\0${oldModel.apiKey}`).digest('hex').slice(0, 24);
+  writeFileSync(path.join(dataDir, 'fleet', `model-admission-${fingerprint}.json`), JSON.stringify({ state: 'held', provider: 'openai-api', reason: 'no credits remaining' }));
+  const route = openAiRoute({ model: { ...oldModel, name: 'another-model', provider: 'openai', adapter: 'openai-responses' } });
+  const status = await fleetStatus({ dataDir, providerId: 'openai', fleetRoute: route, flyAccount: account(root), sourceBinding: cloudHelpers(root) });
+  assert.equal(status.available, false);
+  assert.match(status.detail, /no-credits hold/);
+});
+
+test('only an explicit no-credits failure holds an account, and the hold stores no provider text or key', async () => {
+  const root = fresh(); const dataDir = path.join(root, 'data'); const model = openAiRoute().model;
+  for (const failure of [{ status: 'failed', providerHttpStatus: 429, code: 'rate_limit_exceeded' }, { status: 'completed', providerHttpStatus: 429, code: 'insufficient_quota' }, { status: 'failed', providerHttpStatus: 500, message: 'no credits remaining' }]) {
+    assert.equal(recordConfirmedQuotaHold({ dataDir, model, providerId: 'openai', goalId: 'g', workerId: 'm0-a0', failure }), false);
+  }
   assert.equal(existsSync(path.join(dataDir, 'fleet')), false);
+  const failure = { status: 'failed', providerHttpStatus: 429, code: 'insufficient_quota', message: 'sensitive provider body' };
+  assert.equal(recordConfirmedQuotaHold({ dataDir, model, providerId: 'openai', goalId: 'g', workerId: 'm0-a0', failure }), true);
+  const held = path.join(dataDir, 'fleet', `account-admission-${createHash('sha256').update(`${model.baseUrl}\0${model.apiKey}`).digest('hex').slice(0, 24)}.json`);
+  const saved = readFileSync(held, 'utf8');
+  assert.equal(saved.includes(model.apiKey), false); assert.equal(saved.includes('sensitive'), false);
+  const status = await fleetStatus({ dataDir, providerId: 'openai', fleetRoute: openAiRoute(), flyAccount: account(root), sourceBinding: cloudHelpers(root) });
+  assert.match(status.detail, /no-credits hold/);
+  assert.deepEqual(turnFailure([{ source: 'm0-a0', kind: 'native.turn.completed', body: { turn: { status: 'failed', error: { code: 429 } } } },
+    { source: 'm0-a0', kind: 'flujo/error', body: { code: 'insufficient_quota', message: 'body' } }, { source: 'other', kind: 'flujo/error', body: { code: 'x' } }], 'm0-a0'),
+  { status: 'failed', providerHttpStatus: 429, code: 'insufficient_quota', message: 'body' });
 });
 
-test('workspace cleanup requires stable exact-name absence beyond an HTTP 200 deletion response', async () => {
-  const client = new FlujoClient({ origin: 'http://127.0.0.1:1', workspace: 'owned-boot' });
-  client.servers = async () => [];
-  client.api = async () => ({ status: 200, body: { deleted: true } });
-  let reads = 0;
-  client.workspaces = async () => ++reads === 1 ? [] : ['owned-boot'];
-  await assert.rejects(client.deleteWorkspace('owned-boot', { verificationDelayMs: 0 }), /Could not confirm deletion/);
-  reads = 0;client.workspaces = async () => { reads++;return []; };
-  assert.deepEqual(await client.deleteWorkspace('owned-boot', { verificationDelayMs: 0 }), { deleted: true });
-  assert.equal(reads,2);
+test('each provider route maps to a FACTORY program, with the key outside the plan', () => {
+  const limits = { localChildTarget: 2, teamLimits: { agentTurns: 6, leadTurns: 12 } };
+  const openai = workerProgramForRoute(openAiRoute(), limits);
+  assert.deepEqual(openai.plan.modelProvider, { id: 'openai', name: 'openai', envKey: 'SEAGULLED_MODEL_KEY', model: 'exact-model', baseUrls: ['https://api.openai.com/v1'], apis: ['responses'] });
+  assert.equal(openai.key, 'fixture-secret-key-value');
+  assert.equal(JSON.stringify(openai.plan).includes('fixture-secret-key-value'), false);
+  assert.deepEqual(openai.plan.flujo, { agentTurns: 6, leadTurns: 12, teamConcurrency: 2 });
+  assert.equal(openai.plan.agentsPerMachine, 1);
+  assert.deepEqual(factorySdk.flujoProviderModel(openai.plan.modelProvider, { key: openai.key }).adapter, 'openai-responses');
+  assert.deepEqual(workerProgramForRoute(privateRoute, limits).plan.modelProvider.apis, ['chat'], 'the private route stays on what it verified');
+  const anthropic = workerProgramForRoute({ providerId: 'anthropic', model: { name: 'c', baseUrl: 'https://api.anthropic.com', apiKey: 'k', adapter: 'anthropic' } }, limits);
+  assert.deepEqual(anthropic.plan.modelProvider.apis, ['anthropic']);
+  const codex = workerProgramForRoute({ providerId: 'codex', model: { name: 'gpt-6-luna', provider: 'codex', adapter: 'codex-cli', apiKey: '', reasoningEffort: 'high' } }, limits);
+  assert.equal(codex.plan.workerProgram, 'codex'); assert.equal(codex.plan.agentsPerMachine, 3); assert.equal(codex.members, 2); assert.equal(codex.key, undefined); assert.equal(codex.plan.reasoningEffort, 'high');
+  for (const program of [openai, codex]) assert.equal(factorySdk.validateCloudLitePlan({ runId: 'plan-check', app: 'plan-check-app', goal: 'x', ...program.plan }).workerProgram, program.plan.workerProgram);
+  assert.equal(codexAuthFile({ CODEX_HOME: path.join('x', 'y') }), path.join('x', 'y', 'auth.json'));
 });
 
-test('Seagulled can install a bounded Fly team without changing upstream defaults', () => {
-  const [agent, team] = buildSpecs({ model: 'fictional', availableServers: [], limits: { agentTurns: 6, leadTurns: 12, concurrency: 1 } });
-  const [agentDefault, teamDefault] = buildSpecs({ model: 'fictional', availableServers: [] });
-  assert.equal(team.nodes.find((node) => node.key === 'lead').maxTurns, 12);
-  assert.equal(agent.nodes.find((node) => node.key === 'agent').maxTurns, 6);
-  assert.equal(team.nodes.find((node) => node.key === 'agents').concurrencyLimit, 1);
-  assert.equal(agentDefault.nodes.find((node) => node.key === 'agent').maxTurns, 200);
-  assert.equal(teamDefault.nodes.find((node) => node.key === 'agents').concurrencyLimit, 10);
+test('a Worker brief carries its angle, its staffing and where output goes', () => {
+  const lead = workerBrief({ task: 'TASK', index: 0, workerCap: 3, localChildTarget: 4 });
+  assert.match(lead, /coordinate 3 Worker Machines/); assert.match(lead, /exactly 4 times/); assert.match(lead, /\/data\/results/); assert.match(lead, /not read-only permission/);
+  const child = workerBrief({ task: 'TASK', index: 2, workerCap: 3, localChildTarget: 4 });
+  assert.match(child, /YOUR DISTINCT ANGLE: Develop and check/); assert.match(child, /m0-a0/);
+  assert.match(workerBrief({ task: 'TASK', index: 0, workerCap: 1 }), /only its lead conversation/);
+  assert.match(workerBrief({ task: 'TASK', index: 1, workerCap: 2, memberOf: 'm0-a0' }), /team member under m0-a0/);
+  assert.throws(() => workerBrief({ task: 'T', index: 0, workerCap: 1, localChildTarget: 10 }), /0 to 9/);
+  const profile = teamProfile({ workerTopologyVersion: 3, conversationsPerWorker: 10 }, factorySdk.CASE_SPECIALISTS_V1);
+  assert.equal(profile.id, 'todd_specialists_v1');
+  assert.equal(JSON.stringify(profile).includes('Savia'), false);
+  assert.match(workerBrief({ task: 'T', index: 0, workerCap: 1, localChildTarget: 9, profile }), /nine roles/);
+  assert.equal(teamProfile({ workerTopologyVersion: 2, conversationsPerWorker: 10 }, factorySdk.CASE_SPECIALISTS_V1), undefined);
 });
 
-test('disabled model preflight makes no boot workspace or Fly intent', async () => {
-  const requests = [];
-  const server = http.createServer((request, response) => {
-    requests.push(request.url);
-    if (request.url.startsWith('/api/workspaces')) {
-      response.writeHead(200, { 'content-type': 'application/json' }); response.end('{"workspaces":[]}');
-    } else {
-      response.writeHead(404); response.end('{"error":"workspace disabled"}');
-    }
-  });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-fleet-preflight-'));
-  const origin = `http://127.0.0.1:${server.address().port}`;
-  const profile = path.join(root, 'profile.json');
-  writeFileSync(profile, JSON.stringify({ supervisor: { origin }, provisioner: { kind: 'fly', flujoCloudPath: root },
-    model: { name: 'fictional', baseUrl: `${origin}/v1`, apiKey: 'fictional' } }));
-  const previous = process.env.SEAGULLED_FLEET_PROFILE;
-  const previousKey = process.env.OPENAI_API_KEY;
-  process.env.SEAGULLED_FLEET_PROFILE = profile;
-  delete process.env.OPENAI_API_KEY;
+test('local conversation receipts come from the Worker trace and must match exactly', () => {
+  const done = (source, id, status = 'completed') => ({ source, kind: 'item/completed', body: { item: { type: 'subflow', phase: 'done', conversationId: id, status } } });
+  assert.deepEqual(verifiedLocalConversations([done('a', 'x'), done('a', 'y'), done('b', 'z')], 'a', 2), [{ id: 'x', status: 'completed' }, { id: 'y', status: 'completed' }]);
+  assert.throws(() => verifiedLocalConversations([done('a', 'x')], 'a', 2), error => error.outcome === 'failed' && /started 1 local/.test(error.message));
+  assert.throws(() => verifiedLocalConversations([done('a', 'x', 'error')], 'a', 1, { requireCompleted: true }), /has not completed/);
+  assert.deepEqual(verifiedLocalConversations([done('a', 'x', 'error')], 'a', 1), [{ id: 'x', status: 'error' }]);
+  assert.throws(() => verifiedLocalConversations([done('a', '../bad')], 'a', 1), { code: 'UNKNOWN' });
+  const entry = (workerId, lead, ids) => ({ workerId, leadConversationId: lead, children: ids.map(id => ({ id, status: 'completed' })) });
+  assert.deepEqual(verifiedTeamStaffing([entry('w1', 'l1', ['a']), entry('w2', 'l2', ['b'])], 2, 1), { workerCount: 2, localConversationCount: 2, conversationCountVerified: 4, childCompletionVerified: true });
+  assert.throws(() => verifiedTeamStaffing([entry('w1', 'l1', ['a']), entry('w2', 'l2', ['a'])], 2, 1), /repeats/);
+  assert.throws(() => verifiedTeamStaffing([entry('w1', 'l1', ['a'])], 2, 1), /incomplete/);
+});
+
+test('a company runs on one FACTORY fleet: staffed, reconciled, captured and retired, with its receipts', async () => {
+  const c = company({ goal: { memoryMb: 2048 } });
+  const result = await runFleetLeaf(c.input);
+  const fleet = c.fleet();
+  assert.equal(result.available, true);
+  // The plan and how it was deployed.
+  assert.equal(fleet.plan.machines, 2); assert.equal(fleet.plan.agentsPerMachine, 1); assert.equal(fleet.plan.workerProgram, 'flujo'); assert.equal(fleet.plan.memoryMb, 2048);
+  assert.equal(fleet.plan.supervision, 'operator'); assert.equal(fleet.plan.org, 'personal-test'); assert.match(fleet.plan.network, /^seagulled-g-[a-f0-9]{32}$/);
+  assert.deepEqual(fleet.plan.flujo, { agentTurns: 6, leadTurns: 12, teamConcurrency: 2 });
+  assert.equal(fleet.deployOptions.providerKey, 'fixture-secret-key-value');
+  assert.equal(fleet.deployOptions.image, 'docker.io/library/node@sha256:fixture');
+  assert.ok(existsSync(fleet.deployOptions.bundlePath), 'the SDK bundle comes from the installed package');
+  assert.equal(JSON.stringify(fleet.plan).includes('fixture-secret-key-value'), false);
+  assert.equal(fleet.options.flyEnv.FLY_CONFIG_DIR, c.input.flyAccount.flyConfigDir);
+  assert.equal(fleet.options.flyCommand, c.input.flyAccount.flyctlPath);
+  assert.equal(fleet.options.flujoCloudPath, c.input.sourceBinding.cloudSdkRoot);
+  // Workers start first, and the lead closes with their reports.
+  assert.deepEqual(fleet.commands.map(command => [command.agent, command.id]), [['m1-a0', 'company-m1-a0-1'], ['m0-a0', 'company-m0-a0-1'], ['m0-a0', 'company-m0-a0-2']]);
+  assert.match(fleet.commands[1].message, /coordinate 2 Worker Machines/);
+  assert.match(fleet.commands[2].message, /report from m1-a0/);
+  // The result and its proof.
+  assert.equal(result.text, 'FINAL from m0-a0');
+  assert.deepEqual({ ...result.sandbox, runId: undefined, teamLeadRuns: undefined }, { kind: 'fly', workerId: 'm0', runId: undefined, retired: true, cleanupConfirmed: true, verification: 'factory-fleet-v1',
+    workerCount: 2, localConversationCount: 4, conversationCountVerified: 6, childCompletionVerified: true, initialWorkerCount: 2, teamLeadRuns: undefined });
+  assert.deepEqual(result.sandbox.teamLeadRuns, ['turn-m0-a0-1', 'turn-m1-a0-1']);
+  assert.deepEqual(c.seen.company, [{ verifiedWorkers: 2, verifiedChildConversations: 4 }]);
+  // Estimated, never billed.
+  assert.deepEqual(result.usage, { inputTokens: 30, outputTokens: 6, costUsd: null, costKind: 'unknown', reservedUsd: 5, billingPending: true });
+  // Output first, then retirement, confirmed by reading the account.
+  assert.equal(fleet.quiesced.length, 1); assert.equal(fleet.stopped, true); assert.equal(fleet.retired, true); assert.equal(fleet.disconnected, true);
+  assert.deepEqual(fleet.calls.at(-1), ['apps', 'list', '--org', 'personal-test', '--json']);
+  const files = result.artifacts.filter(item => item.kind === 'worker-file');
+  assert.deepEqual(files.map(file => [file.workerId, readFileSync(file.path, 'utf8')]), [['m0', 'output of machine0'], ['m1', 'output of machine1']]);
+  assert.equal(readFileSync(result.artifacts.at(-1).path, 'utf8'), 'FINAL from m0-a0');
+  assert.deepEqual(c.seen.workers.filter(worker => worker.workerId === 'm1').map(worker => worker.status), ['provisioning', 'ready', 'dispatching', 'completed', 'retiring', 'retired']);
+  assert.ok(c.seen.workers.every(worker => worker.parentId === null && worker.depth === 1));
+  // Nothing private in what stays on disk beside the fleet's own journal.
+  const intent = readFileSync(path.join(c.input.dataDir, 'fleet', 'owned-goal', 'intent.json'), 'utf8');
+  assert.equal(intent.includes('fixture-secret-key-value'), false);
+  assert.equal(JSON.parse(intent).state, 'completed');
+});
+
+test('a run is never replayed: a second attempt on the same goal is held', async () => {
+  const c = company();
+  await runFleetLeaf(c.input);
+  await assert.rejects(runFleetLeaf(c.input), error => error.code === 'UNKNOWN' && /prior Fly fleet intent/.test(error.message));
+});
+
+test('a single-Worker goal needs no closing round', async () => {
+  const c = company({ goal: { maxWorkers: 1, conversationsPerWorker: 1 } });
+  const result = await runFleetLeaf(c.input);
+  assert.equal(result.available, true);
+  assert.equal(c.fleet().commands.length, 1);
+  assert.equal(c.fleet().plan.flujo.teamConcurrency, undefined);
+  assert.equal(result.text, 'report from m0-a0');
+});
+
+test('a dropped connection during monitoring does not end the run', async () => {
+  const c = company({ script: { observeFailsOnce: true } });
+  assert.equal((await runFleetLeaf(c.input)).available, true);
+});
+
+test('the private route holds its allowance before any Machine, and refuses without a reservation', async () => {
+  const c = company({ route: privateRoute, reservationId: 'run-1-fly', reserveCloud: reservation => { c.seen.reservations.push(reservation); assert.equal(c.fleet().plan, undefined); } });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ data: [{ id: 'qwen3.8-27b' }] }));
   try {
-    const status = await fleetDiagnosticStatus();
-    assert.equal(status.available, false);
-    assert.match(status.detail, /HTTP 404/);
-    assert.equal('config' in status, false, 'private profile never enters public state');
-    const result = await runFleetLeaf({ goal: { id: 'fictional-goal', text: 'fictional' }, task: 'fictional',
-      dataDir: root, maxUsd: 2, diagnostic: true });
-    assert.equal(result.available, false);
-    assert.equal(existsSync(path.join(root, 'fleet', 'fictional-goal')), false);
-    assert.deepEqual(requests, ['/api/workspaces', '/v1/models', '/api/workspaces', '/v1/models']);
-    const fingerprint = createHash('sha256').update(origin).digest('hex').slice(0, 24);
-    const holds = path.join(root, 'fleet'); mkdirSync(holds);
-    writeFileSync(path.join(holds, `source-admission-${fingerprint}.json`), JSON.stringify({ state: 'held' }));
-    const held = await fleetDiagnosticStatus({ dataDir: root });
-    assert.equal(held.available, false);
-    assert.match(held.detail, /held after a confirmed failure/);
-    assert.equal((await runFleetLeaf({ goal: { id: 'another-goal', text: 'fictional' }, task: 'fictional',
-      dataDir: root, maxUsd: 2, diagnostic: true })).available, false);
-    assert.equal(requests.length, 4, 'a held source is not re-probed or mutated');
-    const accountData = path.join(root, 'held-account');
-    const accountFleet = path.join(accountData, 'fleet'); mkdirSync(accountFleet, { recursive: true });
-    process.env.OPENAI_API_KEY = 'fixture-key';
-    const accountFingerprint = createHash('sha256').update('https://api.openai.com/v1\0gpt-4.1-mini\0fixture-key').digest('hex').slice(0, 24);
-    writeFileSync(path.join(accountFleet, `model-admission-${accountFingerprint}.json`), JSON.stringify({ state: 'held' }));
-    const creditHeld = await fleetDiagnosticStatus({ dataDir: accountData });
-    assert.equal(creditHeld.available, false);
-    assert.match(creditHeld.detail, /no credits/);
-    assert.deepEqual(requests.slice(4), ['/api/workspaces', '/v1/models'], 'credit hold avoids another API catalog request');
-  } finally {
-    if (previous === undefined) delete process.env.SEAGULLED_FLEET_PROFILE;
-    else process.env.SEAGULLED_FLEET_PROFILE = previous;
-    if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
-    else process.env.OPENAI_API_KEY = previousKey;
-    server.closeAllConnections();
-    await new Promise((resolve) => server.close(resolve));
-  }
+    const result = await runFleetLeaf(c.input);
+    assert.deepEqual(c.seen.reservations, [{ id: 'run-1-fly', amountUsd: 5 }]);
+    assert.equal(result.usage.reservationId, 'run-1-fly');
+    assert.deepEqual(c.fleet().plan.modelProvider.apis, ['chat']);
+    const refused = company({ route: privateRoute });
+    await assert.rejects(runFleetLeaf(refused.input), /durable allowance reservation/);
+    assert.equal(refused.fleet().plan, undefined);
+  } finally { globalThis.fetch = originalFetch; }
 });
 
-test('keyless Codex boot refusal stops before Fly provisioning and deletes its own workspace', async () => {
-  const requests = [];
-  let model;
-  const server = http.createServer(async (request, response) => {
-    const chunks = [];
-    for await (const chunk of request) chunks.push(chunk);
-    const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : undefined;
-    requests.push(`${request.method} ${new URL(request.url, 'http://local').pathname}`);
-    const send = (status, value) => { response.writeHead(status, { 'content-type': 'application/json' }); response.end(JSON.stringify(value)); };
-    const pathname = new URL(request.url, 'http://local').pathname;
-    if (pathname === '/api/workspaces' && request.method === 'GET') return send(200, { workspaces: [] });
-    if (pathname === '/api/workspaces' && request.method === 'POST') return send(201, { name: body.name });
-    if (pathname === '/api/workspaces' && request.method === 'DELETE') return send(200, {});
-    if (pathname === '/api/init') return send(200, {});
-    if (pathname === '/api/model' && request.method === 'GET') return send(200, []);
-    if (pathname === '/api/model' && request.method === 'POST') { model = body; return send(201, body); }
-    if (pathname === '/api/flow' && request.method === 'GET') return send(200, []);
-    if (pathname === '/api/flow/compile') return send(201, { flow: { id: 'boot-flow', name: 'swarm_boot' } });
-    if (pathname === '/api/mcp/servers') return send(200, []);
-    if (pathname === '/v1/chat/completions') return send(401, { error: 'fixture refusal' });
-    return send(404, {});
-  });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-codex-preflight-'));
-  const origin = `http://127.0.0.1:${server.address().port}`;
-  const profile = path.join(root, 'profile.json');
-  writeFileSync(profile, JSON.stringify({ supervisor: { origin }, provisioner: { kind: 'fly', flujoCloudPath: root },
-    model: { name: 'gpt-6-luna', provider: 'codex', adapter: 'codex-cli', apiKey: '' } }));
-  const previous = process.env.SEAGULLED_FLEET_PROFILE;
-  process.env.SEAGULLED_FLEET_PROFILE = profile;
-  try {
-    const status = await fleetDiagnosticStatus({ dataDir: root });
-    assert.equal(status.available, true);
-    assert.equal(status.provider, 'codex-subscription-candidate');
-    await assert.rejects(() => runFleetLeaf({ goal: { id: 'native-goal', text: 'fixture' }, task: 'fixture',
-      dataDir: root, maxUsd: 1, diagnostic: true }), (error) => error.outcome === 'failed' && /No Fly worker/.test(error.message));
-    assert.equal(model.provider, 'codex');
-    assert.equal(model.adapter, 'codex-cli');
-    assert.equal(model.ApiKey, '');
-    assert.equal('temperature' in model, false, 'Codex model rows do not accept creativity');
-    assert.ok(requests.includes('DELETE /api/workspaces'));
-    assert.equal(requests.filter((entry) => entry === 'POST /v1/chat/completions').length, 1);
-    assert.equal(requests.some((entry) => entry === 'GET /v1/models'), false);
-  } finally {
-    if (previous === undefined) delete process.env.SEAGULLED_FLEET_PROFILE;
-    else process.env.SEAGULLED_FLEET_PROFILE = previous;
-    server.closeAllConnections();
-    await new Promise((resolve) => server.close(resolve));
-  }
+test('a Codex subscription runs native sessions on FACTORY, with the login kept on this computer', async () => {
+  const route = { available: true, providerId: 'codex', verification: 'unverified', costPolicy: 'subscription-and-pending-cloud', authTransfer: 'host-refreshed-token',
+    codexAuthFile: path.resolve('fixture-auth.json'), codexCommand: 'codex', model: { name: 'gpt-6-luna', reasoningEffort: 'medium', provider: 'codex', adapter: 'codex-cli', apiKey: '', baseUrl: '' } };
+  const c = company({ route, goal: { maxWorkers: 1, conversationsPerWorker: 2 } });
+  const result = await runFleetLeaf(c.input);
+  const fleet = c.fleet();
+  assert.equal(fleet.plan.workerProgram, 'codex'); assert.equal(fleet.plan.agentsPerMachine, 2); assert.equal(fleet.deployOptions.providerKey, undefined);
+  assert.equal(fleet.options.auth.authFile, path.resolve('fixture-auth.json'));
+  assert.deepEqual(fleet.commands.map(command => command.agent), ['m0-a0', 'm0-a1', 'm0-a0']);
+  assert.equal(result.sandbox.localConversationCount, 1);
+  assert.equal(result.sandbox.conversationCountVerified, 2);
+  const unconfirmed = { ...route, authTransfer: 'encrypted-workspace-snapshot' };
+  assert.equal((await runFleetLeaf({ ...company({ route: unconfirmed }).input })).available, false);
 });
 
-test('Stop during local template installation cannot submit the boot model call', async () => {
-  const requests = [];
-  const controller = new AbortController();
-  const server = http.createServer(async (request, response) => {
-    for await (const _chunk of request) { /* Consume bounded fixture requests. */ }
-    const pathname = new URL(request.url, 'http://local').pathname;
-    requests.push(`${request.method} ${pathname}`);
-    const send = (status, value) => {
-      response.writeHead(status, { 'content-type': 'application/json' });
-      response.end(JSON.stringify(value));
-    };
-    if (pathname === '/api/workspaces' && request.method === 'GET') return send(200, { workspaces: [] });
-    if (pathname === '/api/workspaces' && request.method === 'POST') return send(201, {});
-    if (pathname === '/api/workspaces' && request.method === 'DELETE') return send(200, {});
-    if (pathname === '/api/init') return send(200, {});
-    if (pathname === '/api/model' && request.method === 'GET') {
-      send(200, []);
-      controller.abort();
-      return;
-    }
-    if (pathname === '/api/mcp/servers') return send(200, []);
-    return send(404, {});
-  });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-stop-boot-'));
-  const origin = `http://127.0.0.1:${server.address().port}`;
-  const profile = path.join(root, 'profile.json');
-  writeFileSync(profile, JSON.stringify({ supervisor: { origin }, provisioner: { kind: 'fly', flujoCloudPath: root },
-    model: { name: 'gpt-6-luna', provider: 'codex', adapter: 'codex-cli', apiKey: '' } }));
-  const previous = process.env.SEAGULLED_FLEET_PROFILE;
-  process.env.SEAGULLED_FLEET_PROFILE = profile;
-  try {
-    await assert.rejects(runFleetLeaf({ goal: { id: 'stopped-boot', text: 'fixture' }, task: 'fixture',
-      dataDir: root, maxUsd: 1, diagnostic: true, signal: controller.signal }),
-    (error) => error.name === 'AbortError' && error.outcome === 'not_applied');
-    assert.ok(requests.includes('DELETE /api/workspaces'));
-    assert.equal(requests.some((entry) => entry === 'POST /v1/chat/completions'), false);
-    assert.equal(requests.some((entry) => entry === 'POST /api/model'), false);
-  } finally {
-    if (previous === undefined) delete process.env.SEAGULLED_FLEET_PROFILE;
-    else process.env.SEAGULLED_FLEET_PROFILE = previous;
-    server.closeAllConnections();
-    await new Promise((resolve) => server.close(resolve));
-  }
-});
-
-test('owned relay journals before Fly mutation, forwards through its own proxy, and confirms retirement', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-relay-'));
-  const journalPath = path.join(root, 'relay.json');
-  const flyctlPath = path.join(root, 'flyctl-fixture');
-  const flyEnv = { FLYCTL_PATH: flyctlPath, FLY_CONFIG_DIR: path.join(root, 'personal-config') };
-  const calls = [];
-  const flyRunner = { run: async (args, { input } = {}) => {
-    calls.push(args.slice(0, 2).join(' '));
-    if (args[0] === 'orgs' && args[1] === 'show') {
-      assert.deepEqual(args, ['orgs', 'show', 'personal', '--json']);
-      return JSON.stringify({ Slug: 'personal', InternalNumericID: '1784604' });
-    }
-    if (args[0] === 'apps' && args[1] === 'create') {
-      const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
-      assert.equal(journal.state, 'creating-app');
-      assert.equal(journal.network, relayNetwork);
-      assert.deepEqual(args.slice(2), [journal.app, '--org', journal.org,
-        '--network', relayNetwork, '--json', '--yes']);
-    }
-    if (args[0] === 'secrets' && args[1] === 'import') {
-      const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
-      assert.deepEqual(args.slice(2), ['--app', journal.app, '--stage']);
-      assert.equal(input, `SEAGULLED_RELAY_OWNER_${journal.owner.toUpperCase()}=1\n`);
-    }
-    if (args[0] === 'secrets' && args[1] === 'list') {
-      const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
-      return JSON.stringify([{ Name: `SEAGULLED_RELAY_OWNER_${journal.owner.toUpperCase()}` }]);
-    }
-    if (args[0] === 'volumes' && args[1] === 'list') return '[]';
-    return args[0] === 'auth' ? 'fixture-private-token-0123456789' : '{}';
-  } };
-  let agentStopped = false;
-  let proxyStopped = false;
-  let stopped = false;
-  const networkOperations = [];
-  const fakeProxy = new EventEmitter();
-  fakeProxy.stdin = { end: () => undefined };
-  fakeProxy.kill = () => { proxyStopped = true; };
-  const relay = await createOwnedRelay({ journalPath, org: 'personal', network: relayNetwork,
-    flyRunner, flyEnv, flyctlPath,
-    verifyNetwork: async ({ operation = 'dispatch' }) => {
-      networkOperations.push(operation);
-      if (stopped && operation === 'dispatch') throw Object.assign(new Error('Cancelled'), { name: 'AbortError' });
-    },
-    portAllocator: async () => 48121,
-    spawnImpl: (binary, args, options) => {
-      assert.equal(binary, flyctlPath);
-      assert.deepEqual(options.env, flyEnv);
-      assert.ok(args.includes('--watch-stdin')); return fakeProxy;
-    },
-    agentFactory: ({ controllerOrigin, lanes }) => {
-      assert.equal(controllerOrigin, 'http://127.0.0.1:48122');
-      assert.equal(lanes, 2);
-      return { stop: () => { agentStopped = true; } };
-    },
-    fetchImpl: async (url, options) => {
-      const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
-      if (url.includes('/apps?org_slug=')) return relayInventory(journal, calls.includes('apps create'));
-      if (url.endsWith('/machines') && options.method === 'POST') {
-        const machine = JSON.parse(options.body);
-        assert.equal(machine.config.services.length, 0);
-        assert.equal(machine.config.metadata.seagulled, 'owned-relay');
-        assert.equal(machine.config.metadata.seagulled_owner, journal.owner);
-        return new Response(JSON.stringify({ id: 'fixturemachine' }), { status: 201 });
-      }
-      if (url.endsWith('/machines') && options.method === 'GET') {
-        return new Response(JSON.stringify([{ id: 'fixturemachine' }]), { status: 200 });
-      }
-      if (url.endsWith('/machines/fixturemachine/metadata')) {
-        return new Response(JSON.stringify({ seagulled: 'owned-relay', seagulled_owner: journal.owner }), { status: 200 });
-      }
-      if (url.endsWith('/health')) return new Response('{}', { status: 200 });
-      if (url.includes('/apps/seagulled-relay-') && options.method === 'GET') {
-        if (calls.includes('apps destroy')) return new Response('{}', { status: 404 });
-        return new Response(JSON.stringify({ id: 'fixture-app-id', name: journal.app,
-          organization: { slug: 'canonical-personal-slug', internal_numeric_id: 1784604 } }), { status: 200 });
-      }
-      throw new Error(`Unexpected relay fixture URL: ${url}`);
-    },
-  });
-  assert.match(relay.remoteUrl, /^http:\/\/seagulled-relay-[a-f0-9]+\.internal:4300$/);
-  await relay.start('http://127.0.0.1:48122');
-  stopped = true;
-  assert.equal(await relay.retire(), true);
-  assert.ok(networkOperations.includes('cleanup'));
-  assert.equal(agentStopped, true);
-  assert.equal(proxyStopped, true);
-  assert.deepEqual(calls, ['auth token', 'apps create', 'orgs show', 'secrets import', 'secrets list',
-    'orgs show', 'secrets list', 'orgs show', 'secrets list', 'volumes list', 'apps destroy']);
-  assert.equal(JSON.parse(readFileSync(journalPath, 'utf8')).state, 'retired');
-});
-
-test('owned relay Machine rejection destroys only its newly created app', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-relay-failure-'));
-  const journalPath = path.join(root, 'relay.json');
-  const calls = [];
-  await assert.rejects(() => createOwnedRelay({ journalPath, org: 'personal', network: relayNetwork,
-    flyRunner: { run: async (args) => {
-      calls.push(args.slice(0, 2).join(' '));
-      if (args[0] === 'secrets' && args[1] === 'list') {
-        const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
-        return JSON.stringify([{ name: `SEAGULLED_RELAY_OWNER_${journal.owner.toUpperCase()}` }]);
-      }
-      if (args[0] === 'volumes' && args[1] === 'list') return '[]';
-      return args[0] === 'auth' ? 'fixture-private-token-0123456789' : '{}';
-    } },
-    portAllocator: async () => 48123,
-    fetchImpl: async (url, options) => {
-      const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
-      if (url.includes('/apps?org_slug=')) return relayInventory(journal, calls.includes('apps create'));
-      if (url.endsWith('/machines') && options.method === 'POST') return new Response('{}', { status: 500 });
-      if (url.endsWith('/machines') && options.method === 'GET') return new Response('[]', { status: 200 });
-      if (url.includes('/apps/seagulled-relay-') && options.method === 'GET') {
-        if (calls.includes('apps destroy')) return new Response('{}', { status: 404 });
-        return new Response(JSON.stringify({ id: 'fixture-app-id', name: journal.app,
-          organization: { slug: journal.org } }), { status: 200 });
-      }
-      throw new Error(`Unexpected relay fixture URL: ${url}`);
-    },
-  }), /Machine creation returned HTTP 500/);
-  assert.deepEqual(calls, ['auth token', 'apps create', 'secrets import', 'secrets list',
-    'secrets list', 'volumes list', 'apps destroy']);
-  assert.equal(JSON.parse(readFileSync(journalPath, 'utf8')).cleanupConfirmed, true);
-});
-
-test('a colliding or incomplete org inventory rejects relay before journal and Fly effects', async () => {
-  for (const inventory of [
-    (app) => ({ total_apps: 1, apps: [{ id: 'foreign-id', name: app, network: 'default' }] }),
-    () => ({ total_apps: 2, apps: [] }),
-  ]) {
-    const root = mkdtempSync(path.join(tmpdir(), 'seagulled-relay-fresh-'));
-    const journalPath = path.join(root, 'relay.json');
-    let flyCalls = 0;
-    await assert.rejects(createOwnedRelay({ journalPath, org: 'personal', network: relayNetwork,
-      accountRef, flyRunner: { run: async () => { flyCalls++; throw new Error('Fly must remain untouched.'); } },
-      portAllocator: async () => { throw new Error('No port allocation.'); },
-      verifyFreshApp: async ({ app }) => {
-        const apps = await readFlyOrgApps({ org: 'personal', token: 'fixture-token-at-least-twenty',
-          fetchImpl: async () => new Response(JSON.stringify(inventory(app))) });
-        assertFreshAppName(apps, app, relayNetwork);
-      },
-      onPlannedApp: () => { throw new Error('No plan may be persisted.'); },
-    }), (error) => {
-      assert.match(error.message, /already exists|incomplete/);
-      assert.equal(isRelayPreCreationFailure(error, journalPath), true);
-      assert.equal(relayFailureCleanupConfirmed(error, undefined, false, journalPath), true);
-      return true;
-    });
-    assert.equal(existsSync(journalPath), false);
-    assert.equal(flyCalls, 0);
-  }
-});
-
-test('pre-creation proof is fresh and bound to one relay journal', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-relay-capability-'));
-  const journalPath = path.join(root, 'relay.json');
-  const foreignPath = path.join(root, 'another-relay.json');
-  const original = new Error('Original verification refusal.');
-  let refusal;
-  await assert.rejects(createOwnedRelay({ journalPath, org: 'personal', network: relayNetwork,
-    accountRef, verifyFreshApp: async () => { throw original; },
-    onPlannedApp: () => { throw new Error('No plan is permitted.'); },
-    flyRunner: { run: async () => { throw new Error('No Fly call is permitted.'); } },
-    portAllocator: async () => { throw new Error('No port allocation is permitted.'); },
-  }), (error) => { refusal = error; return error.message === original.message; });
-  assert.notEqual(refusal, original);
-  assert.equal(refusal.cause, original);
-  assert.equal(existsSync(journalPath), false);
-  assert.equal(isRelayPreCreationFailure(refusal, journalPath), true);
-  assert.equal(relayFailureCleanupConfirmed(refusal, undefined, false, journalPath), true);
-  assert.equal(isRelayPreCreationFailure(refusal, foreignPath), false);
-  assert.equal(relayFailureCleanupConfirmed(refusal, undefined, false, foreignPath), false);
-  assert.equal(isRelayPreCreationFailure(original, journalPath), false);
-  assert.equal(relayFailureCleanupConfirmed(original, undefined, false, journalPath), false,
-    'a reused original error cannot clear a later unknown cleanup hold');
-});
-
-test('relay rechecks account and network immediately before app creation', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-relay-precreate-'));
-  const journalPath = path.join(root, 'relay.json');
-  const calls = [];
-  await assert.rejects(createOwnedRelay({ journalPath, org: 'personal', network: relayNetwork,
-    flyRunner: { run: async (args) => {
-      calls.push(args.slice(0, 2).join(' '));
-      return args[0] === 'auth' ? 'fixture-private-token-0123456789' : '{}';
-    } }, portAllocator: async () => 48124,
-    fetchImpl: async (url) => {
-      if (url.includes('/apps?org_slug=')) return relayInventory(
-        JSON.parse(readFileSync(journalPath, 'utf8')), false);
-      throw new Error(`Unexpected relay fixture URL: ${url}`);
-    },
-    verifyNetwork: async () => { throw new Error('Selected Fly account changed.'); },
-  }), /Selected Fly account changed/);
-  assert.deepEqual(calls, ['auth token']);
-  assert.equal(JSON.parse(readFileSync(journalPath, 'utf8')).state, 'not-applied');
-});
-
-test('relay refuses a mismatched network readback before owner secret or Machine mutation', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-relay-network-mismatch-'));
-  const journalPath = path.join(root, 'relay.json');
-  const calls = [];
-  await assert.rejects(createOwnedRelay({ journalPath, org: 'personal', network: relayNetwork,
-    portAllocator: async () => 48125,
-    flyRunner: { run: async (args) => {
-      calls.push(args.slice(0, 2).join(' '));
-      return args[0] === 'auth' ? 'fixture-private-token-0123456789' : '{}';
-    } },
-    fetchImpl: async (url) => {
-      const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
-      if (url.includes('/apps?org_slug=')) return relayInventory(journal,
-        calls.includes('apps create'), 'default');
-      if (url.includes('/apps/seagulled-relay-')) return new Response(JSON.stringify({
-        id: 'fixture-app-id', name: journal.app, organization: { slug: journal.org },
-      }), { status: 200 });
-      throw new Error(`Unexpected relay fixture URL: ${url}`);
-    },
-  }), (error) => error.code === 'UNKNOWN');
-  assert.deepEqual(calls, ['auth token', 'apps create']);
-  assert.equal(JSON.parse(readFileSync(journalPath, 'utf8')).state, 'cleanup-unknown');
-});
-
-test('ambiguous relay app creation retains its intent and never destroys an unconfirmed app', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-relay-unknown-'));
-  const journalPath = path.join(root, 'relay.json');
-  const calls = [];
-  let postCreationFailure;
-  await assert.rejects(() => createOwnedRelay({ journalPath, org: 'personal', network: relayNetwork,
-    flyRunner: { run: async (args) => {
-      calls.push(args.slice(0, 2).join(' '));
-      if (args[0] === 'apps') throw new Error('fixture connection lost');
-      return 'fixture-private-token-0123456789';
-    } }, portAllocator: async () => 48123,
-    fetchImpl: async (url) => {
-      if (url.includes('/apps?org_slug=')) return relayInventory(
-        JSON.parse(readFileSync(journalPath, 'utf8')), calls.includes('apps create'));
-      throw new Error(`Unexpected relay fixture URL: ${url}`);
-    },
-  }), (error) => { postCreationFailure = error; return error.code === 'UNKNOWN'; });
-  assert.deepEqual(calls, ['auth token', 'apps create']);
-  assert.equal(JSON.parse(readFileSync(journalPath, 'utf8')).state, 'creation-unknown');
-  rmSync(journalPath);
-  assert.equal(isRelayPreCreationFailure(postCreationFailure, journalPath), false);
-  assert.equal(relayFailureCleanupConfirmed(postCreationFailure, undefined, existsSync(journalPath), journalPath),
-    false, 'a lost journal after possible app creation must retain the cleanup hold');
-});
-
-test('relay creation holds an app when its staged owner marker cannot be confirmed', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-relay-unmarked-'));
-  const journalPath = path.join(root, 'relay.json');
-  const calls = [];
-  await assert.rejects(() => createOwnedRelay({ journalPath, org: 'personal', network: relayNetwork,
-    flyRunner: { run: async (args) => {
-      calls.push(args.slice(0, 2).join(' '));
-      if (args[0] === 'secrets' && args[1] === 'list') return '[]';
-      return args[0] === 'auth' ? 'fixture-private-token-0123456789' : '{}';
-    } }, portAllocator: async () => 48123,
-    fetchImpl: async (url) => {
-      const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
-      if (url.includes('/apps?org_slug=')) return relayInventory(journal, calls.includes('apps create'));
-      if (url.includes('/apps/seagulled-relay-')) return new Response(JSON.stringify({
-        id: 'fixture-app-id', name: journal.app, organization: { slug: journal.org },
-      }), { status: 200 });
-      throw new Error(`Unexpected relay fixture URL: ${url}`);
-    },
-  }), (error) => error.code === 'UNKNOWN');
-  assert.deepEqual(calls, ['auth token', 'apps create', 'secrets import', 'secrets list']);
-  const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
-  assert.equal(journal.ownershipConfirmed, false);
-  assert.equal(journal.state, 'cleanup-unknown');
-});
-
-test('relay retirement refuses changed app identity, network, app marker, Machine markers, or foreign volumes', async () => {
-  for (const changed of ['app-id', 'network', 'app-marker', 'machine-owner', 'machine-type', 'foreign-volume']) {
-    const root = mkdtempSync(path.join(tmpdir(), 'seagulled-relay-foreign-'));
-    const journalPath = path.join(root, 'relay.json');
-    const calls = [];
-    let retired = false;
-    const relay = await createOwnedRelay({ journalPath, org: 'personal', network: relayNetwork,
-      portAllocator: async () => 48124,
-      flyRunner: { run: async (args) => {
-        calls.push(args.slice(0, 2).join(' '));
-        if (args[0] === 'secrets' && args[1] === 'list') {
-          const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
-          return JSON.stringify([{ Name: retired && changed === 'app-marker' ? 'FOREIGN_OWNER'
-            : `SEAGULLED_RELAY_OWNER_${journal.owner.toUpperCase()}` }]);
-        }
-        if (args[0] === 'volumes' && args[1] === 'list') {
-          return retired && changed === 'foreign-volume' ? '[{"id":"foreign-volume"}]' : '[]';
-        }
-        return args[0] === 'auth' ? 'fixture-private-token-0123456789' : '{}';
-      } },
-      fetchImpl: async (url, options) => {
-        const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
-        if (url.includes('/apps?org_slug=')) return relayInventory(journal, calls.includes('apps create'),
-          retired && changed === 'network' ? 'default' : relayNetwork);
-        if (url.endsWith('/machines') && options.method === 'POST') return new Response('{"id":"fixturemachine"}', { status: 201 });
-        if (url.endsWith('/machines') && options.method === 'GET') return new Response('[{"id":"fixturemachine"}]', { status: 200 });
-        if (url.endsWith('/machines/fixturemachine/metadata')) return new Response(JSON.stringify({
-          seagulled: retired && changed === 'machine-type' ? 'foreign' : 'owned-relay',
-          seagulled_owner: retired && changed === 'machine-owner' ? 'foreign-owner' : journal.owner,
-        }), { status: 200 });
-        if (url.includes('/apps/seagulled-relay-') && options.method === 'GET') return new Response(JSON.stringify({
-          id: retired && changed === 'app-id' ? 'foreign-app-id' : 'fixture-app-id',
-          name: journal.app, organization: { slug: journal.org },
-        }), { status: 200 });
-        throw new Error(`Unexpected relay fixture URL: ${url}`);
-      },
-    });
-    retired = true;
-    assert.equal(await relay.retire(), false);
-    assert.equal(calls.includes('apps destroy'), false, `${changed} must not be destroyed`);
-    assert.equal(JSON.parse(readFileSync(journalPath, 'utf8')).state, 'cleanup-unknown');
-  }
-});
-
-test('owned worker files are collected before subtree retirement', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-before-retire-'));
-  const order = [];
-  const controller = new Controller({ registryPath: path.join(root, 'registry.json'),
-    operatorToken: 'fixture-operator-token-at-least-32-characters', publicUrl: 'http://127.0.0.1:1',
-    provisioner: { retire: async (target) => { order.push(`delete:${target.app}`); } },
-    beforeRetire: async ({ target }) => { order.push(`collect:${target.app}`); } });
-  try {
-    const goal = controller.registry.createGoal({ id: 'owned-tree', text: 'fixture', limits: { maxWorkers: 3, maxDepth: 2, maxChildren: 2 } });
-    const supervisor = controller.registry.reserve({ goalId: goal.id, role: 'supervisor', name: 'Todd' }).worker;
-    controller.registry.enroll(supervisor.id, { kind: 'external', origin: 'http://127.0.0.1:1', workspace: 'fixture' });
-    const parent = controller.registry.reserve({ goalId: goal.id, parentId: supervisor.id, role: 'team', name: 'parent' }).worker;
-    controller.registry.enroll(parent.id, { kind: 'fly', app: 'parent-app' });
-    const child = controller.registry.reserve({ goalId: goal.id, parentId: parent.id, role: 'team', name: 'child' }).worker;
-    controller.registry.enroll(child.id, { kind: 'fly', app: 'child-app' });
-    const result = await controller.retire('operator', { workerId: parent.id });
-    assert.deepEqual(result.retired, [child.id, parent.id]);
-    assert.deepEqual(order, ['collect:child-app', 'delete:child-app', 'collect:parent-app', 'delete:parent-app']);
-  } finally { await controller.close(); }
-});
-
-test('retirement connects to an active original Worker with cleanup context after Stop', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-stop-retire-'));
-  const order = [];
-  const controller = new Controller({ registryPath: path.join(root, 'registry.json'),
-    operatorToken: 'fixture-operator-token-at-least-32-characters', publicUrl: 'http://127.0.0.1:1',
-    provisioner: {
-      connect: async (target, context) => {
-        assert.equal(target.app, 'owned-app');
-        assert.equal(context.operation, 'cleanup');
-        order.push('connect');
-        return { client: { cancel: async () => { order.push('cancel'); } },
-          close: async () => { order.push('close'); } };
-      },
-      retire: async () => { order.push('retire'); },
-    } });
-  try {
-    const goal = controller.registry.createGoal({ id: 'stopped-tree', text: 'fixture' });
-    const supervisor = controller.registry.reserve({ goalId: goal.id, role: 'supervisor', name: 'Todd' }).worker;
-    controller.registry.enroll(supervisor.id, { kind: 'external', origin: 'http://127.0.0.1:1', workspace: 'fixture' });
-    const worker = controller.registry.reserve({ goalId: goal.id, parentId: supervisor.id,
-      role: 'team', name: 'developer' }).worker;
-    controller.registry.enroll(worker.id, { kind: 'fly', app: 'owned-app' });
-    controller.registry.startRun({ workerId: worker.id, startedBy: 'operator', task: 'fixture' });
-    const receipt = await controller.retire('operator', { workerId: worker.id });
-    assert.deepEqual(receipt.retired, [worker.id]);
-    assert.deepEqual(order, ['connect', 'cancel', 'close', 'retire']);
-  } finally { await controller.close(); }
-});
-
-test('failed capture holds the exact owned sandbox without deleting it', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'seagulled-capture-hold-'));
-  let deleted = false;
-  const controller = new Controller({ registryPath: path.join(root, 'registry.json'),
-    operatorToken: 'fixture-operator-token-at-least-32-characters', publicUrl: 'http://127.0.0.1:1',
-    provisioner: { retire: async () => { deleted = true; } },
-    beforeRetire: async () => { throw new Error('fixture capture failed'); } });
-  try {
-    const goal = controller.registry.createGoal({ id: 'capture-hold', text: 'fixture' });
-    const supervisor = controller.registry.reserve({ goalId: goal.id, role: 'supervisor', name: 'Todd' }).worker;
-    controller.registry.enroll(supervisor.id, { kind: 'external', origin: 'http://127.0.0.1:1', workspace: 'fixture' });
-    const worker = controller.registry.reserve({ goalId: goal.id, parentId: supervisor.id, role: 'team', name: 'developer' }).worker;
-    controller.registry.enroll(worker.id, { kind: 'fly', app: 'owned-app' });
-    const receipt = await controller.retire('operator', { workerId: worker.id });
-    assert.deepEqual(receipt.cleanupUnconfirmed, [worker.id]);
-    assert.equal(deleted, false);
-    assert.equal(controller.registry.worker(worker.id).target.app, 'owned-app');
-    assert.equal(controller.registry.worker(worker.id).cleanup.confirmed, false);
-    assert.throws(() => controller.registry.reserve({ goalId: goal.id, parentId: supervisor.id, name: 'other' }), /Unknown runs or unconfirmed cleanup/);
-    await controller.retire('operator', { workerId: worker.id });
-    assert.equal(deleted, false, 'repeated retirement preserves the held original sandbox');
-  } finally { await controller.close(); }
-});
-
-test('failed Fly conversation preserves only bounded nonsecret diagnosis fields', () => {
-  const result = conversationFailure({ status: 200, body: { status: 'error', lastError: {
-    message: 'Bearer fictional-sensitive-token in provider response', code: 'api_error',
-    httpStatus: 401, errorClass: 'authentication', providerType: 'CodexError',
-    details: { authorization: 'fictional-sensitive-token' },
+test('a Worker that fails retires the fleet, keeps a bounded diagnosis and pays nothing more', async () => {
+  const c = company({ script: { onMessage: ({ fleet, agent }) => {
+    if (agent !== 'm1-a0') return honestWorker({ fleet, agent, round: 1, message: 'exactly 2 times' });
+    fleet.emit(agent, 'native.turn.completed', { turn: { status: 'failed', error: { code: 429 } } });
+    fleet.emit(agent, 'flujo/error', { code: 'insufficient_quota', message: 'sensitive provider body' });
+    return 'failed';
   } } });
-  assert.deepEqual(result, { readStatus: 200, conversationStatus: 'error', providerHttpStatus: 401,
-    code: 'api_error', errorClass: 'authentication', providerType: 'CodexError' });
-  assert.equal(JSON.stringify(result).includes('fictional-sensitive-token'), false);
+  await assert.rejects(runFleetLeaf(c.input), error => error.outcome === 'failed' && /team failed/.test(error.message) && error.usage.billingPending === true);
+  const fleet = c.fleet();
+  assert.equal(fleet.retired, true);
+  const intent = JSON.parse(readFileSync(path.join(c.input.dataDir, 'fleet', 'owned-goal', 'intent.json'), 'utf8'));
+  assert.equal(intent.state, 'run-failed');
+  assert.deepEqual(intent.failureDiagnostic, { agent: 'm1-a0', status: 'failed', providerHttpStatus: 429, code: 'insufficient_quota' });
+  assert.equal(JSON.stringify(intent).includes('sensitive'), false);
+  assert.ok(existsSync(path.join(c.input.dataDir, 'fleet', `account-admission-${createHash('sha256').update('https://api.openai.com/v1\0fixture-secret-key-value').digest('hex').slice(0, 24)}.json`)), 'the no-credits hold is saved');
+  assert.deepEqual(c.seen.workers.filter(worker => worker.workerId === 'm1').map(worker => worker.status).slice(3), ['failed', 'retiring', 'retired']);
+});
+
+test('a Worker that claims work without the requested conversations is not verified', async () => {
+  const c = company({ script: { onMessage: ({ fleet, agent, round, message }) => honestWorker({ fleet, agent, round, message: agent === 'm1-a0' ? 'no staffing' : message }) } });
+  await assert.rejects(runFleetLeaf(c.input), error => error.outcome === 'failed' && /started 0 local conversations/.test(error.message));
+  assert.equal(c.fleet().retired, true, 'the run still ends its spending');
+  assert.equal(c.seen.company.length, 0);
+});
+
+test('a stop ends the company: every session stops, the fleet is retired, and nothing counts as complete', async () => {
+  const controller = new AbortController();
+  const c = company({ signal: controller.signal, script: { onMessage: ({ agent }) => { if (agent === 'm0-a0') setTimeout(() => controller.abort(), 5); return 'hold'; } } });
+  await assert.rejects(runFleetLeaf(c.input), error => error.name === 'AbortError' && error.usage.billingPending === true);
+  const fleet = c.fleet();
+  assert.equal(fleet.quiesced.length, 1); assert.equal(fleet.stopped, true); assert.equal(fleet.retired, true);
+  assert.equal(fleet.calls.some(args => args[0] === 'machine'), false, 'unfinished work is not collected as output');
+  assert.equal(JSON.parse(readFileSync(path.join(c.input.dataDir, 'fleet', 'owned-goal', 'intent.json'), 'utf8')).state, 'stopped');
+  assert.equal(c.seen.company.length, 0);
+});
+
+test('a stop still retires when the sessions cannot prove they stopped', async () => {
+  const controller = new AbortController();
+  const c = company({ signal: controller.signal, script: { quiesceFails: true, onMessage: ({ agent }) => { if (agent === 'm0-a0') setTimeout(() => controller.abort(), 5); return 'hold'; } } });
+  await assert.rejects(runFleetLeaf(c.input), { name: 'AbortError' });
+  assert.equal(c.fleet().retired, true);
+});
+
+test('output that cannot be captured keeps the volumes, stops the Machines and holds the goal', async () => {
+  const c = company({ script: { outputFails: true } });
+  await assert.rejects(runFleetLeaf(c.input), error => error.code === 'UNKNOWN' && /cleanup is unconfirmed/.test(error.message));
+  const fleet = c.fleet();
+  assert.equal(fleet.stopped, true); assert.equal(fleet.retired, false);
+  assert.ok(c.seen.workers.some(worker => worker.status === 'cleanup-unconfirmed'));
+});
+
+test('a retirement that cannot be confirmed holds the goal instead of claiming success', async () => {
+  for (const script of [{ retireFails: true }, { appStaysListed: true }]) {
+    const c = company({ script });
+    await assert.rejects(runFleetLeaf(c.input), error => error.code === 'UNKNOWN' && /cleanup is unconfirmed/.test(error.message));
+    assert.equal(c.seen.company.length, 0);
+  }
+});
+
+test('a deployment that fails part way is retired and held, and its key stays out of the error', async () => {
+  const c = company({ script: { deployFails: true }, fleetFactory: undefined });
+  let fleet;
+  c.input.fleetFactory = options => { fleet = new FakeFleet(options, { deployFails: true, onMessage: honestWorker }); fleet.deploy = async () => { fleet.apps = [{ name: 'x' }]; throw new Error('Machines refused for fixture-secret-key-value'); }; return fleet; };
+  await assert.rejects(runFleetLeaf(c.input), error => error.code === 'UNKNOWN' && !error.message.includes('fixture-secret-key-value') && /\[redacted\]/.test(error.message));
+  assert.equal(fleet.retired, true);
+  assert.equal(readFileSync(path.join(c.input.dataDir, 'fleet', 'owned-goal', 'intent.json'), 'utf8').includes('fixture-secret-key-value'), false);
+});
+
+test('Workers that never become ready are retired at the time limit', async () => {
+  const c = company({ script: { enrolFails: true }, enrolTimeoutMs: 5 });
+  await assert.rejects(runFleetLeaf(c.input), error => error.code === 'UNKNOWN' && /did not become ready/.test(error.message));
+  assert.equal(c.fleet().retired, true);
+});
+
+test('account drift before dispatch stops the run before any Machine', async () => {
+  const c = company({ assertFlyAccountCurrent: async () => false });
+  await assert.rejects(runFleetLeaf(c.input), { code: 'UNKNOWN' });
+  assert.equal(c.fleet().plan, undefined);
+});
+
+test('FACTORY keeps durable admission around the fleet run and never replays it', async () => {
+  const root = fresh(); let calls = 0;
+  const runner = createFactoryFleetRunner({ fleetRunner: async () => { calls++; return { available: true, text: 'offline result' }; } });
+  const input = { goal: { id: 'goal-public', text: 'x', budgetUsd: 50, maxWorkers: 2, conversationsPerWorker: 2, providerId: 'openai', model: 'm', reasoningEffort: 'medium' }, dataDir: path.join(root, 'swarm') };
+  assert.equal((await runner(input)).text, 'offline result');
+  await assert.rejects(runner(input), { code: 'UNKNOWN' });
+  assert.equal(calls, 1);
 });

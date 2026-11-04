@@ -1,113 +1,12 @@
 {
   "schemaVersion": 1,
-  "sourceCommit": "f9d372a66dd2cb09f4bcfed34967404cf12d9007",
   "extraction": "source-only",
-  "privateUpstream": "flujo-app/swarm-teams",
-  "files": [
-    {
-      "path": "upstream/swarm-teams/fleet/attempt.mjs",
-      "sha256": "417e01ea12c9cfc011277faf83ec6ee0e926fdc1c41cac9b8e0beeb62c247b0c"
-    },
-    {
-      "path": "upstream/swarm-teams/fleet/controller.mjs",
-      "sha256": "21ae0ffe0f3ef726bb95811aae78c998f4a90ef3314384ce75a9951d6a93827e"
-    },
-    {
-      "path": "upstream/swarm-teams/fleet/owner.mjs",
-      "sha256": "1938c01be16e52f6f182623f8c22278c53205c939420a3b391685ca6b790ba46"
-    },
-    {
-      "path": "upstream/swarm-teams/fleet/provisioners.mjs",
-      "sha256": "eede10a2b41ec7b8f5ffb0dafe1070241cc49f845bde0ec16a6a86f60b6381f5"
-    },
-    {
-      "path": "upstream/swarm-teams/fleet/registry.mjs",
-      "sha256": "b2ec23c957a20b316300191b4d2fca2a3bd4f328988f80debddb9b991e2e54f6"
-    },
-    {
-      "path": "upstream/swarm-teams/fleet/relay.mjs",
-      "sha256": "08b4572c81fd8d4684d3ffe07ba4596f7a8727265e80ab05d3bf959f7d74d2bc"
-    },
-    {
-      "path": "upstream/swarm-teams/install.mjs",
-      "sha256": "f9edb7fafaea2442926d73bfe9404a7cb8c50d7f426931a1c491d72469408b8e"
-    },
-    {
-      "path": "upstream/swarm-teams/lib/flujo-client.mjs",
-      "sha256": "3e1d7f3e733d8b5a1180c347c42d895cda4b6134d2108080a80e3b8a0afcaa01"
-    },
-    {
-      "path": "upstream/swarm-teams/swarm.mjs",
-      "sha256": "55fcf414a27ba6cd8847ba7c9ea5117d63022c7da9218f8974924a96173bdb96"
-    },
-    {
-      "path": "upstream/swarm-teams/template/flows.mjs",
-      "sha256": "bd38b40c79c2bf134fe88880470aaaba85db673ec5203b03e38e4d6bd441faf9"
-    },
-    {
-      "path": "upstream/swarm-teams/test/fleet.test.mjs",
-      "sha256": "897b98cbf39f715bc5ca04bafcd52429f4fd0063e06e6ab6e07edabb0641f8ae"
-    },
-    {
-      "path": "upstream/swarm-teams/test/recovery.test.mjs",
-      "sha256": "3d0c96f8eadcd081019c5801e07b39c954ee499b4e4d0b719afcefc712a13407"
-    }
-  ],
-  "diagnosticSuccessor": {
-    "upstreamCommit": "c09bce13b2e80270d255fe3fed923b7238f9f2dd",
-    "pullRequest": "https://github.com/flujo-app/iambrokeplshlp/pull/55",
-    "scope": "source-only opt-in diagnostic isolation",
-    "merged": false
-  },
-  "productExtensions": [
-    "external goal identities",
-    "durable usage receipts",
-    "bounded run timeout",
-    "before-retirement output capture and recovery holds",
-    "Codex model installation without unsupported creativity",
-    "optional specialist briefs through existing shared subflow gates",
-    "controller forwarding of caller-supplied goal identities",
-    "persisted optional lifetime Worker cap and exact completed staffing proof"
-  ],
   "factoryExtraction": {
     "sourceCommit": "510b733f8af0305bb2969592fe25cc73549306a4",
     "originalPath": "src/receipts.mjs",
     "path": "upstream/factory/receipts.mjs",
     "sha256": "d1e4ff13538cc2ebbd1f0b11759887ec606253e7310fc2da83406d9d4c4f687c",
     "scope": "pure operational receipt allowlist projection; caller verifies bytes and hashes; no runtime state"
-  },
-  "specialistSuccessor": {
-    "privateEngineCommit": "78fd985fdf52140a7e8857a172d3f111fd350b83",
-    "pullRequest": "https://github.com/flujo-app/iambrokeplshlp/pull/59",
-    "scope": "optional existing-flow specialist briefs and stable controller goal identity",
-    "merged": false
-  },
-  "teamLimitsSuccessor": {
-    "privateEngineCommit": "290dd6a7c19fa92c267bddd04f625f6cfbe39459",
-    "upstreamCommit": "6b3a1cb4081b48faefddccc3d8a478e0219dfb33",
-    "pullRequest": "https://github.com/flujo-app/iambrokeplshlp/pull/60",
-    "scope": "validated generic team limits forwarded to root and delegated installs",
-    "merged": false
-  },
-  "lifecycleSuccessor": {
-    "privateEngineCommit": "4b0363e",
-    "pullRequest": "https://github.com/flujo-app/iambrokeplshlp/pull/57",
-    "scope": "bounded consumer hooks, artifact-capture holds, cancellation and cleanup verification",
-    "merged": false
-  },
-  "staffingSuccessor": {
-    "privateEngineCommit": "714f610ac894f4fc54e687aba6e03daa37a96b1e",
-    "upstreamCommit": "97e599818945b6031317117a855034a32eb2ac87",
-    "pullRequest": "https://github.com/flujo-app/iambrokeplshlp/pull/61",
-    "scope": "deferred initial Worker staffing, lead-only flows, installed tool inventories and explicit Fly environment/cloud record directory",
-    "merged": false
-  },
-  "clientCancellationSuccessor": {
-    "privateEngineCommit": "38042b976de9a927e0c5cba090581e3796067b8f",
-    "upstreamCommit": "e80c68256bc7009300fc5e213834dc19748b6639",
-    "pullRequest": "https://github.com/flujo-app/iambrokeplshlp/pull/62",
-    "scope": "optional client cancellation and deadlines, unknown original submissions, absolute HTTP timeout and installed MCP inventory lookup",
-    "merged": false
   },
   "avatarLoop": {
     "path": "ui/clips/todd-loop.mp4",
@@ -143,18 +42,11 @@
     "voiceClone": false
   },
   "productDependencies": {
-    "flujo": {
-      "name": "flujo-ai",
-      "version": "3.48.1",
-      "distribution": "npm",
-      "sourceRevision": "7a48a7bb3903feda12232d5634337b408707ea7c",
-      "workerImage": "ghcr.io/mario-andreschak/flujo@sha256:d736dc60c548e5a924c4f50ee5763fb4d602971ac0147ed09cf8f13e677c7acf"
-    },
     "factory": {
       "name": "flujo-factory",
-      "version": "0.5.0",
+      "version": "0.7.0",
       "distribution": "public GitHub release",
-      "sha256": "abb0d4e5d0f239cd4a7b164428ab69a625f3fa14ae4afd4bddcdd8f73a03f469"
+      "sha256": "a9223765017ddad7720a6dc6313ce0619bdd671eb82ee28f48fc9b45895e6cd7"
     },
     "cloud": {
       "name": "flujo-cloud",

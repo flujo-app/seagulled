@@ -497,7 +497,7 @@ export class ProviderManager {
       else if (id === 'modal') detail = 'Requires a Modal inference Proxy Token and an available endpoint model. Modal account tokens are not inference tokens.';
       else detail = 'Requires an API key; API billing is separate from CLI subscriptions.';
       const fleet = this.fleetRoute(id);
-      return { id, name, available: (id === 'codex' || id === 'claude') ? Boolean(detected?.installed && detected?.loggedIn && !detected?.blocked) : id === 'antigravity' ? false : !apiBlocked && Boolean(connection || keyAvailable), connected: Boolean(connection), methods: METHOD[id], detail, fleetSupported: Object.hasOwn(FLEET_MODEL, id), fleetEligible: fleet.available, fleetDetail: fleet.available ? 'Worker credential transfer authorized; FLUJO inference remains unverified.' : fleet.detail, ...(connection?.model ? { models: [connection.model] } : {}) };
+      return { id, name, available: (id === 'codex' || id === 'claude') ? Boolean(detected?.installed && detected?.loggedIn && !detected?.blocked) : id === 'antigravity' ? false : !apiBlocked && Boolean(connection || keyAvailable), connected: Boolean(connection), methods: METHOD[id], detail, fleetSupported: Object.hasOwn(FLEET_MODEL, id), fleetEligible: fleet.available, fleetDetail: fleet.available ? 'Worker credential use authorized; inference remains unverified.' : fleet.detail, ...(connection?.model ? { models: [connection.model] } : {}) };
     });
   }
 
@@ -509,20 +509,23 @@ export class ProviderManager {
       const detected = this.detected.get(providerId), connection = this.connected.get(providerId);
       if (!detected?.installed || !detected.loggedIn || detected.blocked || this.explicitlyDisconnected.has(providerId)
         || connection?.method !== 'subscription' || connection.fleetAllowed !== true) {
-        return { available: false, detail: 'Connect Codex and allow its login in isolated FLUJO Workers.' };
+        return { available: false, detail: 'Connect Codex and allow its login for isolated Workers.' };
       }
       const choices = validateInferenceOptions(inference);
       return { available: true, providerId, model: { ...FLEET_MODEL.codex,
         name: choices.model ?? connection.model ?? 'gpt-6-luna', reasoningEffort: choices.reasoningEffort ?? 'medium' },
-        verification: 'unverified', costPolicy: 'subscription-and-pending-cloud', authTransfer: 'encrypted-workspace-snapshot' };
+        verification: 'unverified', costPolicy: 'subscription-and-pending-cloud', authTransfer: 'host-refreshed-token',
+        // Backend only: the login stays here, and Workers get short-lived access tokens from it.
+        codexAuthFile: join(this.env.CODEX_HOME || join(this.env.USERPROFILE || this.env.HOME || homedir(), '.codex'), 'auth.json'),
+        codexCommand: this.commands.codex };
     }
-    if (providerId === 'claude') return { available: false, detail: 'Native subscription credentials are not qualified for isolated FLUJO workers.' };
+    if (providerId === 'claude') return { available: false, detail: 'Native subscription credentials are not qualified for isolated workers.' };
     if (providerId === 'antigravity') return { available: false, detail: 'Unattended Antigravity execution is unsupported.' };
-    if (providerId === 'modal') return { available: false, detail: 'Modal inference is available locally, but its FLUJO worker adapter is unqualified.' };
+    if (providerId === 'modal') return { available: false, detail: 'Modal inference is available locally, but its worker route is unqualified.' };
     const connection = this.connected.get(providerId);
     if (!connection || this.explicitlyDisconnected.has(providerId)) return { available: false, detail: 'Connect this API provider before using isolated workers.' };
     if (connection.method !== 'key' || !connection.key || !validModel(connection.model)) return { available: false, detail: 'This API connection cannot be used by isolated workers.' };
-    if (connection.fleetAllowed !== true) return { available: false, detail: 'Connect again and allow this key for isolated FLUJO workers.' };
+    if (connection.fleetAllowed !== true) return { available: false, detail: 'Connect again and allow this key for isolated workers.' };
     return {
       available: true,
       providerId,
@@ -540,7 +543,7 @@ export class ProviderManager {
     if (!METHOD[id].includes(method)) throw new Error(`${NAMES[id]} does not support that connection method here.`);
     if (model !== undefined && !validModel(model)) throw new Error('Invalid model name.');
     if (typeof fleetAllowed !== 'boolean') throw new Error('Worker credential consent must be a boolean.');
-    if (fleetAllowed && !Object.hasOwn(FLEET_MODEL, id)) throw new Error(`${NAMES[id]} is not qualified for isolated FLUJO workers.`);
+    if (fleetAllowed && !Object.hasOwn(FLEET_MODEL, id)) throw new Error(`${NAMES[id]} is not qualified for isolated workers.`);
     if (method === 'subscription') {
       await this.discover();
       if (!this.detected.get(id)?.installed) throw new Error(`${NAMES[id]} CLI is not installed.`);

@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { ProviderManager } from '../src/providers/index.mjs';
 import { runProcess } from '../src/providers/process.mjs';
 import { mkdtemp, readFile, rm, access } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const mockCommands = async (_command, args) => {
@@ -152,7 +152,8 @@ test('fleet routes require explicit worker consent and expose only public eligib
   assert.deepEqual(manager.fleetRoute('codex', 'goal', { model: 'gpt-6-luna', reasoningEffort: 'medium' }), {
     available: true, providerId: 'codex', model: { name: 'gpt-6-luna', reasoningEffort: 'medium',
       provider: 'codex', adapter: 'codex-cli', apiKey: '', baseUrl: '' },
-    verification: 'unverified', costPolicy: 'subscription-and-pending-cloud', authTransfer: 'encrypted-workspace-snapshot',
+    verification: 'unverified', costPolicy: 'subscription-and-pending-cloud', authTransfer: 'host-refreshed-token',
+    codexAuthFile: join(manager.env.CODEX_HOME || join(manager.env.USERPROFILE || manager.env.HOME || homedir(), '.codex'), 'auth.json'), codexCommand: manager.commands.codex,
   });
   await manager.connect({ id: 'codex', method: 'subscription', fleetAllowed: false });
   assert.equal(manager.fleetRoute('codex').available, false);
