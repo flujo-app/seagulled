@@ -34,7 +34,6 @@ npm(['ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund']);
 const [packed] = JSON.parse(npm(['pack', '--ignore-scripts', '--json']));
 const forbidden = /(?:^|\/)(?:\.private|__pycache__)\/|(?:^|\/)(?:\.env(?:\.|$)|state\.json|session\.json|runtime\.lock|modal\.toml|auth\.json)|\.pyc$/;
 assert.deepEqual(packed.files.filter(file => !file.path.startsWith('node_modules/') && forbidden.test(file.path)), [], 'Private state entered the CLI package.');
-assert.ok(packed.files.some(file => file.path === 'upstream/swarm-teams/fleet/controller.mjs'), 'Missing recovered controller.');
 assert.ok(packed.files.some(file => file.path === 'upstream/factory/receipts.mjs'), 'Missing receipt projection.');
 for (const name of bundled) {
   assert.ok(packed.files.some(file => file.path === `node_modules/${name}/package.json`), `Missing bundled dependency: ${name}`);
@@ -63,17 +62,17 @@ const packagedRoot = path.join(unpacked, 'package');
 const smoke = `
   import assert from 'node:assert/strict';
   import {installedFactory} from ${JSON.stringify(pathToFileURL(path.join(packagedRoot, 'src/swarm/factory.mjs')).href)};
-  import {createProductSource} from ${JSON.stringify(pathToFileURL(path.join(packagedRoot, 'src/product-source.mjs')).href)};
+  import {installedProductRuntime} from ${JSON.stringify(pathToFileURL(path.join(packagedRoot, 'src/product-runtime.mjs')).href)};
+  import {existsSync} from 'node:fs';
   const home = ${JSON.stringify(profile)};
   const sdk = await installedFactory(home);
   const control = new sdk.FactoryControl(home + '/factory.sqlite');
   try { control.initialize({mission:'CLI package validation', budgetCents:0, maxCells:1, maxDepth:1}); }
   finally { control.close(); }
-  const source = createProductSource({dataDir:home + '/source'});
-  try {
-    const binding = await source.source({signal:AbortSignal.timeout(95000)});
-    assert.equal((await fetch(binding.sourceOrigin + '/api/workspaces')).status, 200);
-  } finally { await source.close(); }
+  // What a company needs from this package: the cloud helpers and an SDK bundle for its Machines.
+  assert.ok(installedProductRuntime()?.cloudSdkRoot);
+  const packed = sdk.packFactorySdk(home + '/factory-sdk.tgz');
+  assert.ok(packed.files > 50 && existsSync(packed.file));
 `;
 execFileSync(process.execPath, ['--input-type=module', '--eval', smoke],
   {env, windowsHide:true, timeout:120000, maxBuffer:8 * 1024 * 1024});
@@ -85,7 +84,7 @@ const receipt = { sourceCommit: commit, version: pkg.version, artifact: path.bas
   platform:process.platform, arch:process.arch,
   bytes: statSync(target).size, sha256: createHash('sha256').update(readFileSync(target)).digest('hex'),
   entries: packed.entryCount, bundled, cleanGitExport: true, standaloneCli: true,
-  lifecycleScriptsExecuted: false, factoryLedger:true, localFlujoStartup:true,
+  lifecycleScriptsExecuted: false, factoryLedger:true, factoryBundle:true,
   published: false, liveProviderRun: false };
 writeFileSync(path.join(staging, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n');
 console.log(JSON.stringify(receipt, null, 2));

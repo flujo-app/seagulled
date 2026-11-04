@@ -1,7 +1,6 @@
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import { importCloudSdk } from '../swarm/cloud-sdk.mjs';
 import { safeReceipt } from '../../upstream/factory/receipts.mjs';
 
 const ID = /^[A-Za-z0-9_-]{1,100}$/;
@@ -15,11 +14,10 @@ const safeName = name => typeof name === 'string' && /^[A-Za-z0-9._ /-]{1,240}$/
     && !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part) && !/[. ]$/.test(part));
 
 /** Fixed output tree only. This function runs as trusted operator code, not model code. */
-export async function remoteCollector(workspace, parentRoot = '/data/flujo') {
+export async function remoteCollector(root) {
   const fs = require('node:fs/promises');
   const path = require('node:path');
   const { createHash } = require('node:crypto');
-  const root = path.join(parentRoot, 'workspaces', workspace, 'seagulled-output');
   const files = [];
   let rootFound = false;
   let total = 0, directories = 0;
@@ -47,22 +45,23 @@ export async function remoteCollector(workspace, parentRoot = '/data/flujo') {
       }
     };
     await visit(root,0);
-    return {version:1,workspace,files};
+    return {version:1,root,files};
   } catch(error) {
-    if(error.code==='ENOENT' && !rootFound) return {version:1,workspace,files:[],missingOutput:true};
+    if(error.code==='ENOENT' && !rootFound) return {version:1,root,files:[],missingOutput:true};
     throw Error('Owned output capture failed; credentials and command output are withheld.');
   }
 }
 
-export function collectorCommand(workspace) {
-  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(workspace)) throw Error('Invalid owned workspace.');
-  const source = `(${remoteCollector.toString()})(${JSON.stringify(workspace)}).then(value=>process.stdout.write(JSON.stringify(value))).catch(()=>process.exit(1))`;
+const OUTPUT_ROOT = /^\/data\/[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+export function collectorCommand(root) {
+  if (!OUTPUT_ROOT.test(root)) throw Error('Invalid owned output folder.');
+  const source = `(${remoteCollector.toString()})(${JSON.stringify(root)}).then(value=>process.stdout.write(JSON.stringify(value))).catch(()=>process.exit(1))`;
   const encoded = Buffer.from(source).toString('base64');
   return `node -e 'eval(Buffer.from("${encoded}","base64").toString())'`;
 }
 
-function validateFiles(value, workspace) {
-  if (value?.version!==1 || value.workspace!==workspace || !Array.isArray(value.files) || value.files.length>100) throw Error('Invalid owned output receipt.');
+function validateFiles(value, root) {
+  if (value?.version!==1 || value.root!==root || !Array.isArray(value.files) || value.files.length>100) throw Error('Invalid owned output receipt.');
   if (value.missingOutput) throw Error('The owned output directory is missing; deliverables have not been captured.');
   let total=0;
   const names=new Set();
@@ -77,14 +76,14 @@ function validateFiles(value, workspace) {
   });
 }
 
-/** Harvest before retirement, using the managed journal's exact app and Machine. */
-export async function collectFlyArtifacts({target,goalId,workerId,dataDir,flujoCloudPath,managed}={}) {
+/** Harvest before retirement, from the fleet journal's exact app and Machine. `run` is that fleet's own Fly command. */
+export async function collectFlyArtifacts({target,goalId,workerId,dataDir,run}={}) {
   if (!ID.test(goalId??'') || !ID.test(workerId??'') || !APP.test(target?.app??'')
-    || !ID.test(target.machineId??'') || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(target.workspace??'')
-    || typeof dataDir!=='string') throw Error('A valid owned Fly output target is required.');
+    || !ID.test(target.machineId??'') || !OUTPUT_ROOT.test(target.outputRoot??'')
+    || typeof dataDir!=='string' || typeof run!=='function') throw Error('A valid owned Fly output target is required.');
   const group=path.join(dataDir,'artifacts',goalId,workerId);
   const receiptPath=path.join(group,'.seagulled-receipt.json');
-  const identity={app:target.app,machineId:target.machineId,workspace:target.workspace};
+  const identity={app:target.app,machineId:target.machineId,outputRoot:target.outputRoot};
   const project=entries=>entries.map(file=>({...safeReceipt({path:path.join(group,...file.relativePath.split('/')),sha256:file.sha256,state:'ready'}),
     bytes:file.bytes,relativePath:file.relativePath,workerId,kind:'worker-file'}));
   let cached, hasReceipt = false;
@@ -117,31 +116,20 @@ export async function collectFlyArtifacts({target,goalId,workerId,dataDir,flujoC
   }
   try {await fs.lstat(group);throw Error('Output folder exists without its receipt; preserve it for reconciliation.');}
   catch(error){if(error.code!=='ENOENT')throw error;}
-  if (!managed) {
-    const {ManagedCloud}=await importCloudSdk('.', flujoCloudPath);
-    managed=new ManagedCloud();
+  const raw=await run(['machine','exec',target.machineId,collectorCommand(target.outputRoot),'--app',target.app,'--json'],{timeoutMs:60_000});
+  if(raw.length>8*1024*1024) throw Error('Owned output response is too large.');
+  let execution,payload;
+  try {
+    execution=JSON.parse(raw);
+    // fly-go MachineExecResponse uses omitempty for a zero ExitCode; flyctl
+    // re-serializes that response. Explicit nonzero/malformed codes still fail.
+    if (!execution || typeof execution !== 'object' || Array.isArray(execution)
+      || Object.hasOwn(execution,'exit_code') && execution.exit_code!==0
+      || typeof execution.stdout!=='string') throw Error();
+    payload=JSON.parse(execution.stdout);
   }
-  const files=await managed.operation(target.app,'collect-output',async()=>{
-    const {metadata,journal}=await managed.deployment(target.app);
-    if(metadata.phase!=='ready' || journal.app!==target.app || journal.machineId!==target.machineId || journal.workspace!==target.workspace) throw Error('Output target does not match its ready journal.');
-    const bridge=await managed.runtime();
-    if(!await bridge.ownedApp(journal)) throw Error('The owned output app is absent.');
-    await bridge.waitForMachine(journal,15_000);
-    const raw=await bridge.fly.run(['machine','exec',target.machineId,collectorCommand(target.workspace),'--app',target.app,'--json'],{timeoutMs:30_000});
-    if(raw.length>8*1024*1024) throw Error('Owned output response is too large.');
-    let execution,payload;
-    try {
-      execution=JSON.parse(raw);
-      // fly-go MachineExecResponse uses omitempty for a zero ExitCode; flyctl
-      // re-serializes that response. Explicit nonzero/malformed codes still fail.
-      if (!execution || typeof execution !== 'object' || Array.isArray(execution)
-        || Object.hasOwn(execution,'exit_code') && execution.exit_code!==0
-        || typeof execution.stdout!=='string') throw Error();
-      payload=JSON.parse(execution.stdout);
-    }
-    catch { throw Error('Owned output command did not produce a complete receipt.'); }
-    return validateFiles(payload,target.workspace);
-  });
+  catch { throw Error('Owned output command did not produce a complete receipt.'); }
+  const files=validateFiles(payload,target.outputRoot);
   await fs.mkdir(path.dirname(group),{recursive:true,mode:0o700});
   if(await fs.realpath(path.dirname(group))!==path.resolve(path.dirname(group))) throw Error('Owned output folder crosses a link.');
   const temporary=`${group}.${randomUUID()}.tmp`;

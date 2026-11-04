@@ -1,7 +1,8 @@
 import path from 'node:path';
 import { homedir } from 'node:os';
-import { Registry } from '../../upstream/swarm-teams/fleet/registry.mjs';
-import { boundFleetSource, fleetStatus, flyAccountLease, flyUnavailable, goalCapacity, runFleetLeaf } from './fleet.mjs';
+import { Registry } from './registry.mjs';
+import { boundFleetSource, FACTORY_TEAM_LIMIT, fleetStatus, flyAccountLease, flyUnavailable, goalCapacity, runFleetLeaf } from './fleet.mjs';
+import { installedProductRuntime } from '../product-runtime.mjs';
 import { budgetCeiling } from '../budget.mjs';
 import { DEFAULT_PRIVATE_MODEL, PRIVATE_MODELS } from '../providers/private-h100.mjs';
 
@@ -12,7 +13,7 @@ const privateRequestReserve = (goal) => (PRIVATE_MODELS[goal.privateModel] ?? PR
 const trim = (value, length = 64_000) => String(value ?? '').slice(0, length);
 const finite = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0;
 const COMPANY_REASON = Object.freeze({
-  source: 'The product-owned local source is unavailable for the company.',
+  source: 'The cloud helpers for this company are unavailable in this installation.',
   account: 'A verified personal Fly account is unavailable for the company.',
   provider: 'The selected provider has no verified company route.',
   capacity: 'The requested company size is outside the supported limits.',
@@ -32,7 +33,7 @@ const companyStamp = (goal) => JSON.stringify({ id: goal.id, text: goal.text,
 const sameFlyAccount = (left, right) => left?.orgSlug === right?.orgSlug
   && left?.flyctlPath === right?.flyctlPath && left?.flyConfigDir === right?.flyConfigDir
   && left?.scope === right?.scope && left?.accountRef === right?.accountRef;
-const sourceFields = Object.freeze(['cloudSdkRoot', 'sourceOrigin', 'sourceInstanceDir', 'sourceDataRoot', 'sourceAppRoot']);
+const sourceFields = Object.freeze(['cloudSdkRoot']);
 const completeSourceBinding = (binding) => Boolean(binding
   && sourceFields.every((key) => typeof binding[key] === 'string' && binding[key]));
 const sameSourceBinding = (left, right) => completeSourceBinding(left) && completeSourceBinding(right)
@@ -84,7 +85,7 @@ export class SwarmCoordinator {
     this.fleetRunner = fleetRunner;
     this.sourceBinding = sourceBinding && typeof sourceBinding === 'object'
       ? Object.freeze({ ...sourceBinding }) : null;
-    this.sourceProvider = sourceProvider ?? (async () => this.sourceBinding);
+    this.sourceProvider = sourceProvider ?? (async () => this.sourceBinding ?? installedProductRuntime());
     this.sourceInspector = sourceInspector;
     this.readyInspector = readyInspector;
     this.companySources = new Map();
@@ -100,7 +101,7 @@ export class SwarmCoordinator {
     const flyAccount = fleetRoute.available === true ? await flyAccountLease(this.providers) : null;
     if (fleetRoute.available === true && !flyAccount) return { available: false, detail: flyUnavailable };
     return fleetStatus({ dataDir: this.dataDir, providerId, goalId, fleetRoute, flyAccount,
-      sourceBinding: this.sourceBinding });
+      sourceBinding: this.sourceBinding ?? installedProductRuntime() });
   }
 
   /** Two read-only stages. The returned leases remain backend-only and are never persisted. */
@@ -120,6 +121,7 @@ export class SwarmCoordinator {
     let capacity;
     try { capacity = goalCapacity(goal); }
     catch { throw companyUnavailable('capacity'); }
+    if (capacity.agentsPerWorker > FACTORY_TEAM_LIMIT) throw companyUnavailable('capacity');
     if (priorGoal && !companyIdentityMatches(priorGoal, goal, capacity)
       && (priorGoal.state === 'done' || Object.values(this.registry.state.runs).some((run) =>
         run.goalId === goal.id && run.sandbox?.kind === 'fly'))) throw companyUnavailable('unavailable');
@@ -149,8 +151,7 @@ export class SwarmCoordinator {
         throw companyUnavailable('source');
       }
       aborted(signal);
-      if (!checked?.available || !completeSourceBinding(checked.binding)
-        || checked.binding.sourceOrigin !== supplied?.sourceOrigin) {
+      if (!checked?.available || !completeSourceBinding(checked.binding)) {
         throw companyUnavailable('source');
       }
       const lease = Object.freeze({ kind: 'company-source', goalId: goal.id, providerId: goal.providerId,
@@ -239,6 +240,19 @@ export class SwarmCoordinator {
     return Object.values(this.registry.state.runs).some((run) => {
       const sandbox = run.sandbox;
       const workers = sandbox?.workerCount;
+      // A company run on a FACTORY fleet: one Machine per Worker, all retired, every conversation counted.
+      if (sandbox?.verification === 'factory-fleet-v1') {
+        return run.goalId === goalId && run.role === 'developer' && run.state === 'completed' && sandbox.kind === 'fly'
+          && sandbox.retired === true && sandbox.cleanupConfirmed === true
+          && workers === record.requestedWorkers && sandbox.initialWorkerCount === record.requestedWorkers
+          && sandbox.localConversationCount === workers * record.requestedAgentsPerWorker
+          && sandbox.conversationCountVerified === workers * record.requestedConversationsPerWorker
+          && (record.workerTopologyVersion !== 3 || sandbox.childCompletionVerified === true)
+          && Array.isArray(sandbox.teamLeadRuns) && sandbox.teamLeadRuns.length === record.requestedWorkers
+          && sandbox.teamLeadRuns.every((id) => typeof id === 'string' && /^[\w-]{1,100}$/.test(id))
+          && new Set(sandbox.teamLeadRuns).size === record.requestedWorkers;
+      }
+      // Receipts saved by earlier versions keep the rules they were written under.
       return run.goalId === goalId && run.role === 'developer' && run.state === 'completed'
         && sandbox?.kind === 'fly' && (record.workerTopologyVersion === 3
           ? sandbox.verification === 'original-worker-hierarchy-v2' && sandbox.childCompletionVerified === true

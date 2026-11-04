@@ -1,26 +1,15 @@
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
-import { homedir } from 'node:os';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
-import { Controller } from '../../upstream/swarm-teams/fleet/controller.mjs';
-import { flyProvisioner } from '../../upstream/swarm-teams/fleet/provisioners.mjs';
-import { FlujoClient } from '../../upstream/swarm-teams/lib/flujo-client.mjs';
-import { installTemplate } from '../../upstream/swarm-teams/install.mjs';
-import { BOOT_FLOW } from '../../upstream/swarm-teams/template/flows.mjs';
+import { homedir } from 'node:os';
 import { collectFlyArtifacts } from '../artifacts/fly.mjs';
-import { createOwnedRelay, relayFailureCleanupConfirmed } from './relay.mjs';
-import { assertNetworkVacant, assertPlannedNetworkMembers, readFlyOrgApps,
-  verifyFreshAppPlan } from './fly-network.mjs';
 import { planSwarm } from '../budget.mjs';
-import { productImageResolver } from '../product-runtime.mjs';
+import { PRODUCT_WORKER_IMAGE } from '../product-runtime.mjs';
 import { teamProfile, specialistStaffingBrief } from './team-profile.mjs';
-import { cloudSdkEntry, importCloudSdk } from './cloud-sdk.mjs';
 
-const legacyProfilePath = () => path.join(process.env.SWARM_TEAMS_HOME || path.join(homedir(), '.swarm-teams'), 'config.json');
-const profilePath = () => process.env.SEAGULLED_FLEET_PROFILE || legacyProfilePath();
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const unknown = (message) => Object.assign(new Error(message), { code: 'UNKNOWN', unknown: true });
+const cancelled = () => Object.assign(new Error('Goal execution was cancelled.'), { name: 'AbortError' });
 const assertAdmission = (signal, deadlineAt) => {
   if (signal?.aborted) throw Object.assign(new Error('Cancelled'), { name: 'AbortError', outcome: 'not_applied' });
   if (deadlineAt !== undefined && Date.now() >= deadlineAt) {
@@ -61,11 +50,9 @@ export async function assertFleetAccountCurrent({ lease, intent, assertCurrent, 
     throw unknown('The selected Fly account continuation could not be verified.');
   }
 }
-/** The cloud SDK and all Fly CLI children receive only this selected personal account. */
-export function isolatedFlyEnvironment(account, sourceEnv = process.env, sourceInstanceDir) {
-  if (!validFlyAccount(account)) {
-    throw new Error(flyUnavailable);
-  }
+/** The cloud helpers and all Fly CLI children receive only this selected personal account. */
+export function isolatedFlyEnvironment(account, sourceEnv = process.env) {
+  if (!validFlyAccount(account)) throw new Error(flyUnavailable);
   const env = {};
   for (const key of ['PATH', 'Path', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'HOME', 'USERPROFILE',
     'APPDATA', 'LOCALAPPDATA', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'NODE_EXTRA_CA_CERTS']) {
@@ -73,75 +60,23 @@ export function isolatedFlyEnvironment(account, sourceEnv = process.env, sourceI
   }
   env.FLY_CONFIG_DIR = account.flyConfigDir;
   env.FLYCTL_PATH = account.flyctlPath;
-  if (sourceInstanceDir !== undefined) {
-    if (typeof sourceInstanceDir !== 'string' || !path.isAbsolute(sourceInstanceDir)) {
-      throw new Error('A product-private FLUJO instance directory is required.');
-    }
-    env.FLUJO_LOCAL_INSTANCE_DIR = sourceInstanceDir;
-  }
   return env;
 }
-/** A product goal always bills the provider-verified personal org, never a legacy profile slug. */
-export function bindVerifiedFlyOrganization(config, account) {
-  if (!validFlyAccount(account)) throw new Error(flyUnavailable);
-  return { ...config, provisioner: { ...config.provisioner, org: account.orgSlug } };
-}
-const productSourceUnavailable = 'A packaged, product-owned FLUJO source and cloud SDK are not ready for isolated Workers.';
-const inside = (root, candidate) => {
-  const relative = path.relative(root, candidate);
-  return Boolean(relative && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
-};
-function verifiedSourceBinding(binding, dataDir) {
-  if (!binding || typeof dataDir !== 'string' || !path.isAbsolute(dataDir)) return null;
-  try {
-    const origin = new URL(binding.sourceOrigin);
-    if (origin.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(origin.hostname)
-      || binding.sourceOrigin !== origin.origin) return null;
-    for (const key of ['cloudSdkRoot', 'sourceInstanceDir', 'sourceDataRoot', 'sourceAppRoot']) {
-      if (typeof binding[key] !== 'string' || !path.isAbsolute(binding[key])) return null;
-    }
-    const productRoot = realpathSync(path.dirname(path.resolve(dataDir)));
-    const sourceInstanceDir = realpathSync(binding.sourceInstanceDir);
-    const sourceDataRoot = realpathSync(binding.sourceDataRoot);
-    const sourceAppRoot = realpathSync(binding.sourceAppRoot);
-    const cloudSdkRoot = realpathSync(binding.cloudSdkRoot);
-    const workspaceRoot = path.join(sourceDataRoot, 'workspaces');
-    if (!inside(productRoot, sourceInstanceDir) || !inside(productRoot, sourceDataRoot)
-      || sourceInstanceDir === workspaceRoot || inside(workspaceRoot, sourceInstanceDir)
-      || sourceAppRoot === sourceDataRoot || inside(sourceDataRoot, sourceAppRoot)
-      || cloudSdkRoot === sourceDataRoot || inside(sourceDataRoot, cloudSdkRoot)
-      || !statSync(sourceInstanceDir).isDirectory() || !statSync(sourceDataRoot).isDirectory()
-      || !statSync(sourceAppRoot).isDirectory() || !statSync(cloudSdkRoot).isDirectory()
-      || !regularFile(cloudSdkEntry('.', cloudSdkRoot))) return null;
-    return { cloudSdkRoot, sourceOrigin: origin.origin, sourceInstanceDir, sourceDataRoot, sourceAppRoot };
-  } catch { return null; }
-}
-/** Backend-only, read-only proof of this product's exact local source and Fly identity. */
-export async function boundFleetSource({ dataDir, sourceBinding, flyAccount, signal, deadlineAt } = {}) {
+const productSourceUnavailable = 'The cloud helpers for isolated Workers are not ready in this installation.';
+const CLOUD_HELPERS = ['process.mjs', 'machines.mjs', 'bridge.mjs', 'images.mjs'];
+/** FACTORY runs the fleet; it needs the installed cloud helpers for its Fly calls. */
+export async function boundFleetSource({ sourceBinding, flyAccount, signal, deadlineAt } = {}) {
   assertAdmission(signal, deadlineAt);
-  const binding = verifiedSourceBinding(sourceBinding, dataDir);
-  if (!binding) return { available: false, detail: productSourceUnavailable };
-  if (!validFlyAccount(flyAccount)) return { available: false, detail: flyUnavailable };
+  let cloudSdkRoot;
   try {
-    const { ManagedCloud } = await importCloudSdk('.', binding.cloudSdkRoot);
-    const env = isolatedFlyEnvironment(flyAccount, process.env, binding.sourceInstanceDir);
-    const discoveryFetch = (url, options = {}) => fetch(url, { ...options,
-      signal: AbortSignal.any([options.signal, signal,
-        deadlineAt === undefined ? undefined : AbortSignal.timeout(Math.max(1, deadlineAt - Date.now()))]
-        .filter(Boolean)) });
-    const managed = new ManagedCloud({ env, directory: path.join(dataDir, 'fleet', 'source-proof'),
-      fetchImpl: discoveryFetch });
-    const source = await managed.source({ source: binding.sourceOrigin });
-    assertAdmission(signal, deadlineAt);
-    if (source.source !== binding.sourceOrigin || realpathSync(source.dataRoot) !== binding.sourceDataRoot
-      || realpathSync(source.appRoot) !== binding.sourceAppRoot) {
-      return { available: false, detail: 'The product FLUJO source identity did not match its owned binding.' };
+    if (!path.isAbsolute(sourceBinding?.cloudSdkRoot ?? '')) return { available: false, detail: productSourceUnavailable };
+    cloudSdkRoot = realpathSync(sourceBinding.cloudSdkRoot);
+    if (!CLOUD_HELPERS.every((name) => regularFile(path.join(cloudSdkRoot, 'lib', name)))) {
+      return { available: false, detail: productSourceUnavailable };
     }
-    return { available: true, binding };
-  } catch {
-    assertAdmission(signal, deadlineAt);
-    return { available: false, detail: 'The product FLUJO source could not be verified.' };
-  }
+  } catch { return { available: false, detail: productSourceUnavailable }; }
+  if (!validFlyAccount(flyAccount)) return { available: false, detail: flyUnavailable };
+  return { available: true, binding: { cloudSdkRoot } };
 }
 const boundedCount = (value, fallback, maximum, name) => {
   if (value === undefined) return fallback;
@@ -172,28 +107,12 @@ export function goalCapacity(goal = {}) {
   const conversationsPerWorker = selected ?? (legacy === undefined ? 10 : legacy + 1);
   return { maxWorkers, conversationsPerWorker, agentsPerWorker: conversationsPerWorker - 1 };
 }
-export function fleetTopology(goal, { workerCap, relay = false } = {}) {
-  if (goal?.workerTopologyVersion === 3) {
-    if (!Number.isInteger(workerCap) || workerCap < 1 || workerCap > 10) throw new RangeError('Worker count must be 1 to 10.');
-    return {initialWorkers:workerCap,limits:{maxWorkers:workerCap,maxDepth:relay?2:1,maxChildren:relay?Math.max(1,workerCap-1):1,maxActiveRuns:1}};
-  }
-  if (!Number.isInteger(workerCap) || workerCap < 1 || workerCap > 100) throw new RangeError('Worker count must be 1 to 100.');
-  const version = goal?.workerTopologyVersion === 2 ? 2 : 1;
-  const initialWorkers = version === 2 ? workerCap : 1;
-  const maxWorkers = version === 2 ? Math.min(200, workerCap * 2) : workerCap;
-  return { initialWorkers, limits: { maxWorkers,
-    maxDepth: relay ? version === 2 ? 3 : 2 : 1,
-    maxChildren: relay ? Math.max(1, workerCap - 1) : 1, maxActiveRuns: 2 } };
-}
-const legacyWorkerCap = (config) => Number.isInteger(config?.maxWorkers)
-  ? Math.min(Math.max(config.maxWorkers, 1), 6) : 3;
-export function fleetExecutionLimits({ goal, config, diagnostic = false, native = false } = {}) {
+/** FLUJO's team flow has one gate of at most nine local agents, so a saved goal with ten cannot be staffed as it asked. */
+export const FACTORY_TEAM_LIMIT = 9;
+export function fleetExecutionLimits({ goal } = {}) {
   const capacity = goalCapacity(goal);
-  return {
-    workerCap: native && diagnostic ? 1 : diagnostic && goal?.maxWorkers === undefined
-      ? legacyWorkerCap(config) : capacity.maxWorkers,
-    teamLimits: { agentTurns: 6, leadTurns: 12, concurrency: capacity.agentsPerWorker },
-  };
+  return { workerCap: capacity.maxWorkers,
+    teamLimits: { agentTurns: 6, leadTurns: 12, concurrency: capacity.agentsPerWorker } };
 }
 const STAFF_BRANCHES = Object.freeze([
   { name: 'context-evidence', angle: 'Map the context and gather primary evidence.' },
@@ -202,95 +121,75 @@ const STAFF_BRANCHES = Object.freeze([
   { name: 'adversarial-review', angle: 'Challenge the conclusion with counterexamples and unresolved risks.' },
   { name: 'handoff-synthesis', angle: 'Reconcile the evidence and prepare a bounded handoff.' },
 ]);
+const TOOL_SCOPE_BRIEF = 'For an authorized file or shell task, filesystem allowed directories describe path scope, not read-only permission. ' +
+  'Use a declared Bash or filesystem write tool before reporting a permission block; honor an actual tool denial. ';
+const OUTPUT_BRIEF = 'Save final deliverable files under /data/results on your own Machine, and report paths relative to that folder. Each Worker must produce its own files. ';
 
-/** Admit real controller Worker runs, with one coordinating parent and bounded descendants. */
-export function staffOwnedTeam(controller, root, { task, workerCap, localChildTarget = 4,
-  onReserved = () => undefined, onStaffed = () => undefined } = {}) {
-  if (!Number.isInteger(workerCap) || workerCap < 1 || workerCap > 100) throw new RangeError('Worker count must be 1 to 100.');
-  if (!Number.isInteger(localChildTarget) || localChildTarget < 0 || localChildTarget > 10) {
-    throw new RangeError('Local child conversation count must be 0 to 10.');
+/** One Worker's first message. Its angle, local staffing and duties come from the goal's team, never from a model's plan. */
+export function workerBrief({ task, index, workerCap, localChildTarget = 0, profile, staffingBrief = specialistStaffingBrief, memberOf } = {}) {
+  if (!Number.isInteger(workerCap) || workerCap < 1) throw new RangeError('Worker count must be positive.');
+  if (!Number.isInteger(localChildTarget) || localChildTarget < 0 || localChildTarget > FACTORY_TEAM_LIMIT) {
+    throw new RangeError(`Local child conversation count must be 0 to ${FACTORY_TEAM_LIMIT}.`);
   }
-  const localStaffing = localChildTarget
+  const branch = STAFF_BRANCHES[(index - 1) % STAFF_BRANCHES.length];
+  const staffing = localChildTarget
     ? `At the start of this run, call the installed start_subflow_ tool exactly ${localChildTarget} times with distinct concrete tasks. ` +
       'Record the returned child conversation IDs; then steer and wait for those same children. ' +
-      'Do not start replacement local subflows or report a capacity gate as actual staffing. ' + specialistStaffingBrief(localChildTarget)
-    : 'This Worker has only its lead conversation; do not start a local subflow. ';
-  const toolScopeBrief = 'For an authorized file or shell task, filesystem allowed directories describe path scope, not read-only permission. ' +
-    'Use a declared Bash or filesystem write tool before reporting a permission block; honor an actual tool denial. ' +
-    'The native Codex sandbox does not determine MCP tool permissions. ';
-  const leadTask = `${task}\n\n` +
-    `You coordinate ${workerCap} owned Worker Machine${workerCap === 1 ? '' : 's'}, including yourself. ` +
-    localStaffing + toolScopeBrief +
-    'Read fleet_info for the already staffed child run IDs, steer them with fleet_message, wait for their original results, ' +
-    'and compare findings on the shared board. Do not redelegate a branch that is already staffed. ' +
-    'Report which Worker runs and local agent conversations actually completed.';
-  const lead = controller.delegate(root, { name: 'coordinating-worker', task: leadTask, deferRun: true });
-  onReserved(lead);
-  const leadWorker = controller.registry.worker(lead.workerId);
-  const prepared = [{ actor: root, worker: leadWorker, task: leadTask }];
-  for (const branch of Array.from({ length: workerCap - 1 }, (_, index) => {
-    const angle = STAFF_BRANCHES[index % STAFF_BRANCHES.length];
-    return { name: `${angle.name}-${index + 1}`, angle: `${angle.angle} Own partition ${index + 1} of ${workerCap - 1}; coordinate concrete non-overlapping work with the team lead.` };
-  })) {
-    const childTask = `${task}\n\n` +
-      `YOUR DISTINCT ANGLE: ${branch.angle} ${localStaffing}${toolScopeBrief}` +
-      'post findings with evidence to the shared board, and report actual conversation IDs and remaining uncertainty. ' +
-      'Your coordinating Worker can send you messages through the owned relay.';
-    const child = controller.delegate(leadWorker, { name: branch.name, task: childTask, deferRun: true });
-    onReserved(child);
-    prepared.push({ actor: leadWorker, worker: controller.registry.worker(child.workerId), task: childTask });
+      'Do not start replacement local subflows or report a capacity gate as actual staffing. ' + staffingBrief(localChildTarget, profile)
+    : memberOf ? '' : 'This Worker has only its lead conversation; do not start a local subflow. ';
+  if (memberOf) {
+    return `${task}\n\nYou are a team member under ${memberOf} on this Machine. YOUR DISTINCT ANGLE: ${branch.angle} ` +
+      `${TOOL_SCOPE_BRIEF}${OUTPUT_BRIEF}Post findings with evidence through the FACTORY board tools and report what you actually ran.`;
   }
-  const runs = new Array(prepared.length);
-  // Child run IDs exist before the coordinating lead can inspect fleet_info.
-  for (const index of [...prepared.keys()].slice(1).concat(0)) {
-    const entry = prepared[index];
-    const run = controller.startDelegatedRun(entry.actor, entry.worker, entry.task);
-    const accepted = { workerId: entry.worker.id, runId: run.id, state: 'provisioning' };
-    runs[index] = accepted; onStaffed(accepted, runs.filter(Boolean));
+  if (index === 0) {
+    return `${task}\n\nYou coordinate ${workerCap} Worker Machine${workerCap === 1 ? '' : 's'}, including yourself. ` +
+      `${staffing}${TOOL_SCOPE_BRIEF}${OUTPUT_BRIEF}` +
+      (workerCap > 1 ? 'The other Workers have their own angles and report through the FACTORY board tools, which also let you message them. You get their final reports when they finish. ' : '') +
+      'Report which conversations actually completed and what remains uncertain.';
   }
-  return { lead: runs[0], runs };
+  return `${task}\n\nYOUR DISTINCT ANGLE: ${branch.angle} Own partition ${index} of ${workerCap - 1}; coordinate concrete non-overlapping work with the team lead m0-a0. ` +
+    `${staffing}${TOOL_SCOPE_BRIEF}${OUTPUT_BRIEF}Post findings with evidence through the FACTORY board tools, and report actual conversation IDs and remaining uncertainty.`;
 }
-export function verifiedLocalConversations(read, parentConversationId, target, {requireCompleted=false}={}) {
-  const page = read?.body;
-  if (read?.status !== 200 || !Array.isArray(page?.items) || !Number.isInteger(page.total)
-    || page.hasMore !== false || page.total !== page.items.length) {
-    throw unknown('FLUJO did not confirm the original Worker conversation tree.');
+/** Exactly the requested local conversations, from the Machine's own trace rather than a lead's claim. */
+export function verifiedLocalConversations(traces, agentId, target, { requireCompleted = false } = {}) {
+  const children = new Map();
+  for (const event of traces) {
+    const item = event.body?.item;
+    if (event.source !== agentId || event.kind !== 'item/completed' || item?.type !== 'subflow') continue;
+    if (typeof item.conversationId !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(item.conversationId)) {
+      throw unknown('The Worker trace has an invalid conversation record.');
+    }
+    children.set(item.conversationId, item.phase === 'done' ? (item.status ?? 'unknown') : children.get(item.conversationId) ?? 'running');
   }
-  const descendants = page.items;
-  const ids = new Set();
-  for (const item of descendants) {
-    if (!item || typeof item.id !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(item.id)
-      || typeof item.parentConversationId !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(item.parentConversationId)
-      || ids.has(item.id)) throw unknown('FLUJO returned an invalid Worker conversation tree.');
-    ids.add(item.id);
+  const observed = [...children].map(([id, status]) => ({ id, status }));
+  if (observed.length !== target) {
+    throw Object.assign(new Error(`Worker started ${observed.length} local conversations; exactly ${target} were requested.`),
+      { outcome: 'failed', localConversations: observed });
   }
-  if (descendants.length !== target || descendants.some((item) => item.parentConversationId !== parentConversationId)) {
-    throw Object.assign(new Error(`Worker started ${descendants.length} local conversations; exactly ${target} were requested.`),
-      { outcome: 'failed', localConversations: descendants.map((item) => ({
-        id: item.id, parentConversationId: item.parentConversationId, status: safeFailureField(item.status) ?? 'unknown',
-      })) });
+  if (requireCompleted && observed.some((child) => child.status !== 'completed')) {
+    throw Object.assign(new Error('A local agent has not completed successfully; agreement from its team lead cannot verify it.'), { outcome: 'failed' });
   }
-  if (requireCompleted && descendants.some(item=>item.status!=='completed')) throw unknown('A local agent has not completed successfully; agreement from its team lead cannot verify it.');
-  return descendants.map(({ id, status }) => ({ id, status: safeFailureField(status) ?? 'unknown' }));
+  return observed;
 }
 /** Count retained original identities rather than a lead's staffing claim. */
 export function verifiedTeamStaffing(entries, workerCount, childCount) {
-  if(!Array.isArray(entries)||entries.length!==workerCount)throw unknown('The original Worker staffing receipt is incomplete.');
-  const workers=new Set(),conversations=new Set();
-  for(const entry of entries){
-    if(typeof entry.workerId!=='string'||workers.has(entry.workerId)||typeof entry.leadConversationId!=='string'||!entry.leadConversationId||!Array.isArray(entry.children)||entry.children.length!==childCount)throw unknown('The original Worker staffing receipt is invalid.');
+  if (!Array.isArray(entries) || entries.length !== workerCount) throw unknown('The original Worker staffing receipt is incomplete.');
+  const workers = new Set(), conversations = new Set();
+  for (const entry of entries) {
+    if (typeof entry.workerId !== 'string' || workers.has(entry.workerId) || typeof entry.leadConversationId !== 'string'
+      || !entry.leadConversationId || !Array.isArray(entry.children) || entry.children.length !== childCount) {
+      throw unknown('The original Worker staffing receipt is invalid.');
+    }
     workers.add(entry.workerId);
-    for(const id of [entry.leadConversationId,...entry.children.map(child=>child.id)]){
-      if(typeof id!=='string'||!id||conversations.has(id))throw unknown('A staffing receipt repeats a conversation identity.');
+    for (const id of [entry.leadConversationId, ...entry.children.map((child) => child.id)]) {
+      if (typeof id !== 'string' || !id || conversations.has(id)) throw unknown('A staffing receipt repeats a conversation identity.');
       conversations.add(id);
     }
-    if(entry.children.some(child=>child.status!=='completed'))throw unknown('A staffing receipt contains an unfinished local agent.');
+    if (entry.children.some((child) => child.status !== 'completed')) throw unknown('A staffing receipt contains an unfinished local agent.');
   }
-  return {workerCount:workers.size,localConversationCount:workerCount*childCount,conversationCountVerified:conversations.size,childCompletionVerified:true};
+  return { workerCount: workers.size, localConversationCount: workerCount * childCount,
+    conversationCountVerified: conversations.size, childCompletionVerified: true };
 }
-const sourceFingerprint = (origin) => createHash('sha256').update(new URL(origin).origin.toLowerCase()).digest('hex').slice(0, 24);
-const holdPath = (dataDir, origin) => path.join(dataDir, 'fleet', `source-admission-${sourceFingerprint(origin)}.json`);
-const sourceHold = (dataDir, origin) => dataDir && existsSync(holdPath(dataDir, origin));
 const modelFingerprint = (model) => createHash('sha256').update(`${model.baseUrl}\0${model.name}\0${model.apiKey}`).digest('hex').slice(0, 24);
 const modelHoldPath = (dataDir, model) => path.join(dataDir, 'fleet', `model-admission-${modelFingerprint(model)}.json`);
 const modelHold = (dataDir, model) => dataDir && existsSync(modelHoldPath(dataDir, model));
@@ -313,40 +212,32 @@ function knownQuotaHold(dataDir, model) {
   } catch { return false; }
 }
 const safeFailureField = (value) => typeof value === 'string' && /^[A-Za-z0-9_.-]{1,80}$/.test(value) ? value : undefined;
-export function conversationFailure(read) {
-  const error = read?.body?.lastError;
-  return { readStatus: read?.status,
-    conversationStatus: safeFailureField(read?.body?.status),
-    ...(Number.isInteger(error?.httpStatus) && error.httpStatus >= 400 && error.httpStatus <= 599
-      ? { providerHttpStatus: error.httpStatus } : {}),
+/** What a failed turn left in the trace: bounded fields only, never a provider's message body. */
+export function turnFailure(traces, agentId) {
+  const own = traces.filter((event) => event.source === agentId);
+  const completed = own.filter((event) => event.kind === 'native.turn.completed').at(-1)?.body?.turn;
+  const error = own.filter((event) => event.kind === 'flujo/error').at(-1)?.body;
+  const httpStatus = completed?.error?.code;
+  return { status: safeFailureField(completed?.status),
+    ...(Number.isInteger(httpStatus) && httpStatus >= 400 && httpStatus <= 599 ? { providerHttpStatus: httpStatus } : {}),
     ...(safeFailureField(error?.code) ? { code: safeFailureField(error.code) } : {}),
-    ...(safeFailureField(error?.errorClass) ? { errorClass: safeFailureField(error.errorClass) } : {}),
-    ...(safeFailureField(error?.providerType) ? { providerType: safeFailureField(error.providerType) } : {}) };
-}
-function recordSourceHold(dataDir, origin, workspace, reason) {
-  const target = holdPath(dataDir, origin);
-  mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
-  if (existsSync(target)) return;
-  writeFileSync(target, JSON.stringify({ version: 1, sourceFingerprint: sourceFingerprint(origin), workspace,
-    reason, observedAt: new Date().toISOString(), state: 'held' }), { flag: 'wx', mode: 0o600 });
+    ...(typeof error?.message === 'string' ? { message: error.message.slice(0, 200) } : {}) };
 }
 
-/** Only a completed read of the original failed conversation may hold an account. */
-export function recordConfirmedQuotaHold({ dataDir, model, providerId, goalId, runId, read } = {}) {
-  const error = read?.body?.lastError;
-  const status = read?.body?.status;
-  const quotaCode = error?.httpStatus === 429 && error?.code === 'insufficient_quota';
-  const exactNoCredits = [402, 429].includes(error?.httpStatus)
-    && typeof error?.message === 'string' && /^no credits remaining[.!]?$/i.test(error.message.trim());
-  if (read?.status !== 200 || !['error', 'failed'].includes(status) || !(quotaCode || exactNoCredits)
+/** Only a failed original turn may hold an account, and only for an explicit no-credits denial. */
+export function recordConfirmedQuotaHold({ dataDir, model, providerId, goalId, workerId, failure } = {}) {
+  const quotaCode = failure?.providerHttpStatus === 429 && failure?.code === 'insufficient_quota';
+  const exactNoCredits = [402, 429].includes(failure?.providerHttpStatus)
+    && typeof failure?.message === 'string' && /no credits remaining[.!]?$/i.test(failure.message.trim());
+  if (failure?.status !== 'failed' || !(quotaCode || exactNoCredits)
     || !dataDir || !model?.apiKey || !exactProductBinding(providerId, model)) return false;
   const target = accountHoldPath(dataDir, model);
   mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
   if (!existsSync(target)) {
     try {
       writeFileSync(target, JSON.stringify({ version: 1, state: 'held', accountFingerprint: accountFingerprint(model),
-        providerId, classification: 'confirmed_no_credits', source: 'original_fly_conversation',
-        goalId, runId, observedAt: new Date().toISOString() }), { flag: 'wx', mode: 0o600 });
+        providerId, classification: 'confirmed_no_credits', source: 'original_fly_turn',
+        goalId, workerId, observedAt: new Date().toISOString() }), { flag: 'wx', mode: 0o600 });
     } catch (error) { if (error?.code !== 'EEXIST') throw error; }
   }
   return true;
@@ -407,7 +298,7 @@ const PRODUCT_BINDINGS = Object.freeze({
 const exactProductBinding = (providerId, model, route) => {
   if (providerId === 'codex') return nativeCodex(model)
     && typeof model.reasoningEffort === 'string'
-    && route?.authTransfer === 'encrypted-workspace-snapshot';
+    && route?.authTransfer === 'host-refreshed-token';
   if (providerId === 'private-h100') {
     try {
       const url = new URL(model?.baseUrl);
@@ -428,98 +319,40 @@ const exactProductBinding = (providerId, model, route) => {
 };
 
 /** Read-only discovery. Product calls require the selected provider's private route. */
-async function inspectFleet({ dataDir, providerId, fleetRoute, goalId, diagnostic = false,
-  flyAccount, sourceBinding, signal, deadlineAt } = {}) {
+async function inspectFleet({ dataDir, providerId, fleetRoute, goalId, flyAccount, sourceBinding, signal, deadlineAt, probeModel = modelProbe } = {}) {
   assertAdmission(signal, deadlineAt);
-  if (!diagnostic && (fleetRoute?.available !== true || fleetRoute.providerId !== providerId
-    || typeof providerId !== 'string' || !providerId)) {
+  if (fleetRoute?.available !== true || fleetRoute.providerId !== providerId
+    || typeof providerId !== 'string' || !providerId) {
     return { available: false, detail: 'The selected provider has no Fly route. Local provider work remains available.' };
   }
-  if (!diagnostic && providerId === 'private-h100' && fleetRoute.leaseGoalId !== goalId) {
+  if (providerId === 'private-h100' && fleetRoute.leaseGoalId !== goalId) {
     return { available: false, detail: 'The private Worker route is not leased to this goal.' };
   }
-  if (!diagnostic && (!exactProductBinding(providerId, fleetRoute.model, fleetRoute)
-    || typeof fleetRoute.model.name !== 'string' || !fleetRoute.model.name
-    || typeof fleetRoute.model.apiKey !== 'string' || !fleetRoute.model.apiKey && !nativeCodex(fleetRoute.model))) {
+  const model = fleetRoute.model;
+  if (!exactProductBinding(providerId, model, fleetRoute)
+    || typeof model.name !== 'string' || !model.name
+    || typeof model.apiKey !== 'string' || !model.apiKey && !nativeCodex(model)) {
     return { available: false, detail: 'The selected provider has no usable Fly model binding.' };
   }
-  if (!diagnostic && (modelHold(dataDir, fleetRoute.model) || knownQuotaHold(dataDir, fleetRoute.model))) {
+  if (modelHold(dataDir, model) || knownQuotaHold(dataDir, model)) {
     return { available: false, detail: 'The selected provider account has a saved no-credits hold. Local provider work remains available.' };
   }
-  let binding;
-  if (!diagnostic) {
-    const source = await boundFleetSource({ dataDir, sourceBinding, flyAccount, signal, deadlineAt });
-    if (!source.available) return source;
-    binding = source.binding;
-  }
-  let config;
-  if (diagnostic) {
-    const location = profilePath();
-    if (!existsSync(location)) return { available: false, detail: 'No local FLUJO fleet profile was found.' };
-    try { config = JSON.parse(readFileSync(location, 'utf8')); }
-    catch { return { available: false, detail: 'The local FLUJO fleet profile could not be read.' }; }
-    if (typeof config.model === 'string' && typeof config.baseUrl === 'string' && typeof config.token === 'string') {
-      try {
-        const tooling = JSON.parse(readFileSync(legacyProfilePath(), 'utf8'));
-        config = { ...tooling, model: { name: config.model, baseUrl: config.baseUrl,
-          apiKey: config.token, contextWindow: config.contextLimit ?? config.maxModelLen } };
-      } catch { return { available: false, detail: 'The local Fly tooling profile could not be read.' }; }
-    }
-  } else {
-    config = bindVerifiedFlyOrganization({ model: fleetRoute.model,
-      sourceInstanceDir: binding.sourceInstanceDir,
-      supervisor: { origin: binding.sourceOrigin },
-      provisioner: { kind: 'fly', flujoCloudPath: binding.cloudSdkRoot, source: binding.sourceOrigin } }, flyAccount);
-  }
-  if (config?.provisioner?.kind !== 'fly' || !config.provisioner.flujoCloudPath
-    || !existsSync(config.provisioner.flujoCloudPath) || !config.model?.name
-    || (!nativeCodex(config.model) && (!config.model?.baseUrl || !config.model?.apiKey))
-    || !config.supervisor?.origin) {
-    return { available: false, detail: 'The local FLUJO fleet profile lacks a compatible Fly provisioner and model.' };
-  }
-  try {
-    const origin = new URL(config.supervisor.origin);
-    if (!['127.0.0.1', 'localhost', '[::1]'].includes(origin.hostname)) {
-      return { available: false, detail: 'The FLUJO source must be a local instance.' };
-    }
-    if (sourceHold(dataDir, config.supervisor.origin)) {
-      return { available: false, detail: 'Local FLUJO workspace creation is held after a confirmed failure. Native provider work remains available.' };
-    }
-    const client = new FlujoClient({ origin: origin.href, workspace: null, signal, deadlineAt });
-    await client.api('GET', '/api/workspaces', undefined, { workspace: null, timeoutMs: 3000 }).then((response) => {
-      if (response.status !== 200) throw new Error('source unavailable');
-    });
-  } catch {
-    assertAdmission(signal, deadlineAt);
-    return { available: false, detail: 'The local FLUJO source is unavailable.' };
-  }
-  if (nativeCodex(config.model)) {
+  const source = await boundFleetSource({ sourceBinding, flyAccount, signal, deadlineAt });
+  if (!source.available) return source;
+  const config = { model, cloudSdkRoot: source.binding.cloudSdkRoot };
+  if (nativeCodex(model)) {
     return { available: true, provider: 'codex-subscription-candidate',
-      detail: 'Codex login transfer is authorized. FLUJO encrypts it into each isolated Worker snapshot; inference executes on Fly and is verified from original Worker receipts.',
-      ...(!diagnostic ? { providerId } : {}), config };
+      detail: 'Codex runs on each Worker with short-lived tokens from this computer; inference executes on Fly and is verified from original Worker receipts.',
+      providerId, config };
   }
-  const original = await modelProbe(config.model, { signal, deadlineAt });
+  const original = await probeModel(model, { signal, deadlineAt });
   if (original.available) {
-    return { available: true, provider: 'configured-model',
-      modelIdentityVerified: true,
-      detail: 'Local FLUJO and the selected provider model catalog are configured; live Fly execution has not been verified.',
-      ...(!diagnostic ? { providerId } : {}), config };
+    return { available: true, provider: 'configured-model', modelIdentityVerified: true,
+      detail: 'The selected provider model catalog is configured; live Fly execution has not been verified.',
+      providerId, config };
   }
-  if (!diagnostic) return { available: false,
+  return { available: false,
     detail: `The selected provider model endpoint is unavailable (${original.detail}); local provider work remains available.` };
-  const fallbackKey = process.env.OPENAI_API_KEY;
-  if (fallbackKey) {
-    const fallback = { name: 'gpt-4.1-mini', baseUrl: 'https://api.openai.com/v1', apiKey: fallbackKey,
-      contextWindow: 8192, provider: 'openai', adapter: 'openai' };
-    if (modelHold(dataDir, fallback)) {
-      return { available: false, detail: 'The OpenAI API model rejected a real execution because this account has no credits. Native provider work remains available.' };
-    }
-    if ((await modelProbe(fallback)).available) {
-      return { available: true, provider: 'openai-api',
-        detail: 'The saved model is unavailable; an existing OpenAI API key can run a bounded owned Fly Worker tree. Cloud and model billing remain pending.', config: { ...config, model: fallback } };
-    }
-  }
-  return { available: false, detail: `The configured FLUJO model endpoint is unavailable (${original.detail}); no working API fallback was found.` };
 }
 
 export async function fleetStatus({ dataDir, providerId, fleetRoute, goalId, flyAccount, sourceBinding,
@@ -529,51 +362,76 @@ export async function fleetStatus({ dataDir, providerId, fleetRoute, goalId, fly
   return publicState;
 }
 
-/** Explicit legacy-profile diagnostic; never used by a product goal. */
-export async function fleetDiagnosticStatus({ dataDir } = {}) {
-  const { config, ...publicState } = await inspectFleet({ dataDir, diagnostic: true });
-  return publicState;
+/** How one provider route maps to a FACTORY plan. FLUJO runs every keyed model; Codex has its own native program. */
+export function workerProgramForRoute(route, { localChildTarget, teamLimits, profile } = {}) {
+  const { model } = route;
+  if (nativeCodex(model)) {
+    return { plan: { workerProgram: 'codex', model: model.name, subagentModel: model.name, reasoningEffort: model.reasoningEffort,
+      agentsPerMachine: localChildTarget + 1 }, members: localChildTarget, localChildTarget: 0 };
+  }
+  const apis = model.adapter === 'anthropic' ? ['anthropic'] : model.adapter === 'openai-responses' ? ['responses'] : ['chat'];
+  return { key: model.apiKey, members: 0, localChildTarget,
+    plan: { workerProgram: 'flujo', agentsPerMachine: 1,
+      modelProvider: { id: route.providerId, name: route.providerId, envKey: 'SEAGULLED_MODEL_KEY', model: model.name, baseUrls: [model.baseUrl], apis,
+        ...(Number.isSafeInteger(model.contextWindow) ? { contextWindow: model.contextWindow } : {}) },
+      flujo: { agentTurns: teamLimits.agentTurns, leadTurns: teamLimits.leadTurns,
+        ...(localChildTarget ? { teamConcurrency: localChildTarget } : {}), ...(profile ? { specialists: profile } : {}) } } };
 }
+const installedSdk = () => import('flujo-factory');
+const textTraces = (file) => {
+  try {
+    return readFileSync(file, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
+  } catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+};
+/** An agent's last written words, optionally from one turn only so that an older progress note cannot pass as its report. */
+const lastAnswer = (traces, agentId, turnId) => traces.filter((event) => event.source === agentId && event.kind === 'item/completed'
+  && event.body?.item?.type === 'agentMessage' && !event.body.item.depth && (!turnId || event.body.turnId === turnId)).at(-1)?.body.item.text ?? '';
+/** A model route may not report token counts at all. That is unknown, not zero. */
+const tokenTotals = (traces) => {
+  const reports = traces.filter((event) => event.kind === 'thread/tokenUsage/updated');
+  if (!reports.length) return { inputTokens: null, outputTokens: null };
+  return reports.reduce((sum, event) => ({
+    inputTokens: sum.inputTokens + (event.body?.tokenUsage?.last?.inputTokens ?? 0),
+    outputTokens: sum.outputTokens + (event.body?.tokenUsage?.last?.outputTokens ?? 0) }), { inputTokens: 0, outputTokens: 0 });
+};
 
-/** One owned Fly leaf, with no existing fleet writer or Machine adoption. */
-export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetRoute,
-  diagnostic = false, reservationId, reserveCloud, flyAccount, sourceBinding,
-  assertFlyAccountCurrent,
-  onStatus = () => undefined, onCompany = () => undefined, onWorker = () => undefined }) {
+/**
+ * One goal's company on its own FACTORY fleet: one Machine per Worker. FACTORY owns provisioning,
+ * the board, operator commands, stop receipts and traces. This file maps a goal to a plan, keeps
+ * the product's guarantees (budget hold, no replay, verified staffing, output before retirement),
+ * and owns nothing that talks to a Worker directly.
+ */
+export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetRoute, reservationId, reserveCloud,
+  flyAccount, sourceBinding, assertFlyAccountCurrent,
+  onStatus = () => undefined, onCompany = () => undefined, onWorker = () => undefined,
+  loadSdk = installedSdk, fleetFactory, probeModel, image = PRODUCT_WORKER_IMAGE, pollMs = 5000, enrolTimeoutMs = 25 * 60_000, runTimeoutMs = 60 * 60_000, retryWindowMs = 180_000 } = {}) {
   if (!goal || typeof goal.id !== 'string' || !/^[\w-]{1,100}$/.test(goal.id)) throw new Error('A safe goal id is required for isolated fleet work.');
   goalCapacity(goal);
-  // Company monitoring owns the requested execution cutoff. These outer
-  // transport bounds leave time for provisioning and a 50-minute cloud run.
-  // Diagnostic probes retain their shorter limits.
-  const runTimeoutMs = (diagnostic ? 20 : 60) * 60_000;
-  const fleetDeadlineAt = Date.now() + (diagnostic ? 30 : 90) * 60_000;
+  const fleetDeadlineAt = Date.now() + 90 * 60_000;
   assertAdmission(signal, fleetDeadlineAt);
-  if (!diagnostic && !validFlyAccount(flyAccount)) return { available: false, detail: flyUnavailable };
+  if (!validFlyAccount(flyAccount)) return { available: false, detail: flyUnavailable };
   const discovered = await inspectFleet({ dataDir, providerId: goal.providerId, fleetRoute, goalId: goal.id,
-    diagnostic, flyAccount, sourceBinding, signal, deadlineAt: fleetDeadlineAt });
+    flyAccount, sourceBinding, signal, deadlineAt: fleetDeadlineAt, ...(probeModel ? { probeModel } : {}) });
   assertAdmission(signal, fleetDeadlineAt);
   if (!discovered.available) return { available: false, detail: discovered.detail };
-  const config = discovered.config;
-  const bootWorkspace = `seagulled-${goal.id.slice(-12)}-boot`;
-  const boot = new FlujoClient({ origin: config.supervisor.origin, workspace: bootWorkspace,
-    signal, deadlineAt: fleetDeadlineAt });
-  const bootCleanup = new FlujoClient({ origin: config.supervisor.origin, workspace: bootWorkspace });
-  const registryPath = path.join(dataDir, 'fleet', goal.id, 'registry.json');
-  const intentPath = path.join(path.dirname(registryPath), 'intent.json');
-  const relayPath = path.join(path.dirname(registryPath), 'relay.json');
-  const cloudDirectory = path.join(path.dirname(registryPath), 'cloud');
-  if (existsSync(registryPath) || existsSync(intentPath) || existsSync(relayPath) || existsSync(cloudDirectory)) {
-    throw unknown('A prior Fly fleet intent exists for this goal. Reconcile its original worker before more provisioning.');
+  const { workerCap, teamLimits } = fleetExecutionLimits({ goal });
+  if (teamLimits.concurrency > FACTORY_TEAM_LIMIT) {
+    throw Object.assign(new Error('This saved goal asks for more local agents per Worker than a Worker can run.'), { outcome: 'not_applied' });
   }
+  const goalDirectory = path.join(dataDir, 'fleet', goal.id);
+  const intentPath = path.join(goalDirectory, 'intent.json');
+  const directory = path.join(goalDirectory, 'factory');
+  if (existsSync(intentPath) || existsSync(directory)) {
+    throw unknown('A prior Fly fleet intent exists for this goal. Reconcile its original Workers before more provisioning.');
+  }
+  const sdk = await loadSdk();
   assertAdmission(signal, fleetDeadlineAt);
-  if ((await boot.workspaces()).includes(bootWorkspace)) throw unknown('The isolated FLUJO boot workspace already exists. Reconcile it before cloning.');
-  assertAdmission(signal, fleetDeadlineAt);
-  mkdirSync(path.dirname(intentPath), { recursive: true, mode: 0o700 });
-  let intent = { version: 1, goalId: goal.id, bootWorkspace,
-    network: `seagulled-g-${randomBytes(16).toString('hex')}`,
-    org: diagnostic ? config.provisioner.org : flyAccount.orgSlug,
-    accountRef: diagnostic ? null : flyAccount.accountRef,
-    apps: {}, state: 'preparing', createdAt: new Date().toISOString() };
+  const profile = teamProfile(goal, sdk.CASE_SPECIALISTS_V1);
+  const program = workerProgramForRoute(fleetRoute, { localChildTarget: teamLimits.concurrency, teamLimits, profile });
+  const suffix = randomBytes(8).toString('hex');
+  mkdirSync(goalDirectory, { recursive: true, mode: 0o700 });
+  let intent = { version: 2, goalId: goal.id, app: `seagulled-${suffix}`, network: `seagulled-g-${randomBytes(16).toString('hex')}`,
+    org: flyAccount.orgSlug, accountRef: flyAccount.accountRef, state: 'preparing', createdAt: new Date().toISOString() };
   writeFileSync(intentPath, JSON.stringify(intent), { flag: 'wx', mode: 0o600 });
   const record = (patch) => {
     intent = { ...intent, ...patch, updatedAt: new Date().toISOString() };
@@ -581,143 +439,96 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
     writeFileSync(temporary, JSON.stringify(intent), { mode: 0o600 });
     renameSync(temporary, intentPath);
   };
-  const planApp = ({ app, org, network, accountRef, kind }) => {
-    assertAdmission(signal, fleetDeadlineAt);
-    if (!/^[a-z][a-z0-9-]{2,62}$/.test(app ?? '')
-      || !['relay', 'worker'].includes(kind) || org !== intent.org || network !== intent.network
-      || accountRef !== intent.accountRef
-      || intent.apps[app]) throw unknown('The goal Fly app plan changed before creation.');
-    record({ apps: { ...intent.apps, [app]: { kind, state: 'planned' } } });
-  };
-  const confirmApp = ({ app, appId, ownerMarker, kind }) => {
-    const prior = intent.apps[app];
-    if (!prior || prior.kind !== kind || prior.state !== 'planned'
-      || typeof appId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(appId)
-      || typeof ownerMarker !== 'string'
-      || !/^(SEAGULLED_RELAY_OWNER|FLUJO_CLOUD_OWNER)_[A-F0-9]{16,64}$/.test(ownerMarker)) {
-      throw unknown('The goal Fly app confirmation does not match its private plan.');
+  const assertAccountCurrent = ({ operation = 'dispatch' } = {}) => assertFleetAccountCurrent({ lease: flyAccount, intent,
+    assertCurrent: assertFlyAccountCurrent, signal, deadlineAt: fleetDeadlineAt, operation });
+  const flyEnv = isolatedFlyEnvironment(flyAccount);
+  const fleetOptions = { directory, flujoCloudPath: discovered.config.cloudSdkRoot, flyCommand: flyAccount.flyctlPath, flyEnv, proxyEnv: flyEnv,
+    ...(nativeCodex(fleetRoute.model) ? { auth: new sdk.CodexSubscriptionBroker({ authFile: fleetRoute.codexAuthFile, codexCommand: fleetRoute.codexCommand }) } : {}) };
+  const fleet = fleetFactory ? fleetFactory(fleetOptions, sdk) : new sdk.FactoryCloudLiteFleet(fleetOptions);
+  const leads = Array.from({ length: workerCap }, (_, index) => `m${index}-a0`);
+  const workers = leads.map((agent, index) => ({ workerId: `m${index}`, agent, index }));
+  const members = workers.flatMap((worker) => Array.from({ length: program.members }, (_, member) => ({ agent: `m${worker.index}-a${member + 1}`, worker, member: member + 1 })));
+  const announce = (worker, status) => { try { onWorker({ workerId: worker.workerId, parentId: null, depth: 1, status }); } catch { /* A status listener cannot change an outcome. */ } };
+  const tracesFile = path.join(directory, 'traces.jsonl');
+  let accepted = false, cloudReserved = false, reservedUsd = Number.isFinite(maxUsd) ? maxUsd : undefined;
+  let cleanupConfirmed = false, deliveredWork = false, delivered;
+  const artifacts = [];
+  const usage = (traces = []) => ({ ...tokenTotals(traces), costUsd: null, costKind: 'unknown', reservedUsd, billingPending: true,
+    ...(cloudReserved ? { reservationId } : {}) });
+  const deadlineLeft = () => { if (Date.now() >= fleetDeadlineAt) throw unknown('The Fly fleet reached its transport deadline. Preserve its original Workers for reconciliation.'); };
+  const stopped = () => { if (signal?.aborted) throw cancelled(); };
+  /** A Fly proxy can drop for a moment; reads and stable-id commands are safe to send again. Cleanup keeps trying after a stop. */
+  const steady = async (operation, { cleanup = false } = {}) => {
+    const giveUp = Date.now() + retryWindowMs;
+    for (;;) {
+      if (!cleanup) stopped();
+      try { return await operation(); }
+      catch (error) { if (error?.name === 'AbortError' || Date.now() >= giveUp) throw error; await sleep(Math.min(pollMs, 5000)); }
     }
-    record({ apps: { ...intent.apps, [app]: { kind, state: 'confirmed', appId, ownerMarker } } });
   };
-  const retireApp = (app) => {
-    const prior = intent.apps[app];
-    if (!prior || !['planned', 'confirmed'].includes(prior.state)) {
-      throw unknown('The goal Fly app retirement does not match its private plan.');
+  const observe = () => steady(async () => {
+    for (let page = 0; ; page++) {
+      const status = await fleet.observe({ maxPages: 25 });
+      if (status.traceCollection?.complete !== false || page >= 20) return status;
     }
-    record({ apps: { ...intent.apps, [app]: { ...prior, state: 'retired' } } });
+  });
+  const waitForTurns = async (jobs, ms) => {
+    const giveUp = Date.now() + ms;
+    for (;;) {
+      stopped(); deadlineLeft();
+      if (Date.now() >= giveUp) throw unknown('The Fly run reached its time limit. Its original Workers are retired, and its work is unconfirmed.');
+      const status = await observe();
+      const natives = new Map(status.agents.map((agent) => [agent.id, agent.nativeRuntime]));
+      const finished = jobs.map((job) => {
+        const native = natives.get(job.agent);
+        const done = native?.turnId && native.turnId !== job.before && ['completed', 'failed', 'interrupted'].includes(native.turnStatus);
+        return done ? { ...job, status: native.turnStatus, turnId: native.turnId, threadId: native.threadId } : null;
+      });
+      if (finished.every(Boolean)) return finished;
+      await sleep(pollMs);
+    }
   };
-  const assertAccountCurrent = async ({ operation = 'dispatch' } = {}) => {
-    if (diagnostic) return;
-    return assertFleetAccountCurrent({ lease: flyAccount, intent,
-      assertCurrent: assertFlyAccountCurrent, signal, deadlineAt: fleetDeadlineAt, operation });
+  const sendJob = async (id, agent, message, before = null) => {
+    await steady(() => fleet.command(agent, { id, action: 'message', message }));
+    return { id, agent, before };
   };
-  let controller;
-  let cloudManaged;
-  let relay;
-  let child;
-  let staffed = [];
-  let bootCreated = false;
-  let bootRunUnknown = false;
-  let bootCleanupConfirmed = false;
-  let remoteAccepted = false;
-  let cloudReserved = false;
-  let reservedUsd = Number.isFinite(maxUsd) ? maxUsd : undefined;
-  let cleanupConfirmed = false;
-  let relayCleanupConfirmed = true;
-  let result;
-  let artifacts = [];
-  const localConversations = [];
-  const localConversationErrors = [];
-  const artifactErrors = [];
-  let delivered;
-  let workspaceAbsent = false;
+  const retire = async ({ capture }) => {
+    for (const worker of workers) announce(worker, 'retiring');
+    onStatus('Fly Workers finished; retiring the owned fleet.');
+    await steady(() => fleet.quiesce({ attempt: 'final', timeoutMs: 120_000 }), { cleanup: true }).catch(() => { record({ quiesceUnconfirmed: true }); });
+    let captureFailure = false;
+    if (capture) {
+      for (const worker of workers) {
+        const machine = fleet.snapshot().machines[worker.index];
+        try {
+          onStatus(`Collecting owned output from Worker ${worker.workerId}.`);
+          artifacts.push(...await steady(() => collectFlyArtifacts({ target: { kind: 'fly', app: intent.app, machineId: machine?.id, outputRoot: '/data/results' },
+            goalId: goal.id, workerId: worker.workerId, dataDir, run: (args, options) => fleet.fly(args, options) }), { cleanup: true }));
+          record({ artifactCount: artifacts.length });
+        } catch (error) {
+          captureFailure = true;
+          record({ artifactCaptureIncomplete: [...(intent.artifactCaptureIncomplete ?? []), { workerId: worker.workerId, detail: String(error.message).slice(0, 200) }] });
+        }
+      }
+    }
+    await assertAccountCurrent({ operation: 'cleanup' });
+    if (captureFailure && deliveredWork) {
+      // The volumes hold the only copy. The Machines stop, so nothing else is billed for compute.
+      await fleet.stop().catch(() => undefined);
+      throw unknown('Completed Worker output is not safely captured. Preserve its exact sandbox.');
+    }
+    await fleet.stop();
+    await fleet.retire();
+    const apps = JSON.parse(await fleet.fly(['apps', 'list', '--org', intent.org, '--json']));
+    if (!Array.isArray(apps) || apps.some((app) => (app.name ?? app.Name) === intent.app)) throw unknown('The retired Fly app is still listed. Its cleanup is unconfirmed.');
+    cleanupConfirmed = true;
+    for (const worker of workers) announce(worker, 'retired');
+    record({ flyCleanupConfirmed: true });
+    if (captureFailure) throw Object.assign(new Error('Owned Fly output capture was incomplete. The fleet was retired; inspect the private capture receipts.'), { outcome: 'failed' });
+  };
+  let traces = [];
   try {
-    onStatus('Preparing an isolated FLUJO boot workspace.');
-    bootCreated = true; // A partial install is still our workspace and needs cleanup.
-    await installTemplate(boot, { model: config.model, bootOnly: true, browser: false });
-    record({ state: 'boot-ready' });
-    assertAdmission(signal, fleetDeadlineAt);
-    if (diagnostic && nativeCodex(config.model)) {
-      onStatus('Checking the keyless Codex model in the isolated local boot flow.');
-      const admission = await boot.runFlow({ flowName: 'swarm_boot', prompt: 'Reply with the single word READY.', timeoutMs: 90_000 });
-      record({ state: admission.status === 'completed' && admission.output.trim() === 'READY' ? 'model-ready' : 'model-refused',
-        bootConversationId: admission.conversationId,
-        modelCallStatus: admission.status });
-      if (admission.status !== 'completed' || admission.output.trim() !== 'READY') {
-        bootRunUnknown = admission.status === 'unknown';
-        throw Object.assign(new Error('The local Codex subscription boot flow did not return READY. No Fly worker was created.'),
-          { outcome: admission.status === 'unknown' ? 'unknown' : 'failed',
-            usage: { inputTokens: 0, outputTokens: 0, costUsd: null, costKind: 'subscription', billingPending: false } });
-      }
-    }
-    assertAdmission(signal, fleetDeadlineAt);
-    if (!validFlyAccount(flyAccount)) {
-      throw Object.assign(new Error(flyUnavailable), { outcome: 'not_applied' });
-    }
-    const flyEnv = isolatedFlyEnvironment(flyAccount, process.env,
-      diagnostic ? undefined : config.sourceInstanceDir);
-    mkdirSync(cloudDirectory, { recursive: true, mode: 0o700 });
-    const { ManagedCloud } = await import(pathToFileURL(path.join(config.provisioner.flujoCloudPath, 'lib', 'managed.mjs')).href);
-    if (ManagedCloud.privateNetworkContractVersion !== 1
-      || typeof ManagedCloud.prototype.openOwnedProxy !== 'function'
-      || typeof ManagedCloud.prototype.credential !== 'function'
-      || typeof ManagedCloud.prototype.preflight !== 'function') {
-      throw Object.assign(new Error('The pinned cloud SDK has no verified private network and owned proxy contract.'),
-        { outcome: 'not_applied' });
-    }
-    await assertAccountCurrent();
-    cloudManaged = new ManagedCloud({ env: flyEnv, directory: cloudDirectory,
-      ...(!diagnostic ? {resolveImage:productImageResolver(config.provisioner.flujoCloudPath)} : {}) });
-    const workerSource = config.provisioner.source ?? config.supervisor.origin;
-    const workerOrg = intent.org;
-    const workerRegion = config.provisioner.region ?? 'iad';
-    if (workerSource !== config.supervisor.origin) {
-      throw Object.assign(new Error('The Worker source does not match the isolated boot workspace.'),
-        { outcome: 'not_applied' });
-    }
-    const workerPreflight = await cloudManaged.preflight({ profile: 'private-workspace',
-      source: workerSource, workspace: bootWorkspace, org: workerOrg,
-      region: workerRegion, flowIds: [BOOT_FLOW] });
-    if (workerPreflight?.readyToDeploy !== true
-      || workerPreflight.profile !== 'private-workspace' || workerPreflight.captureScope !== 'workspace'
-      || workerPreflight.source !== workerSource || workerPreflight.workspace !== bootWorkspace
-      || workerPreflight.org !== workerOrg || workerPreflight.region !== workerRegion
-      || workerPreflight.image?.mode !== 'official' || workerPreflight.image.compatibility !== 'verified'
-      || workerPreflight.flows?.length !== 1 || workerPreflight.flows[0].name !== BOOT_FLOW) {
-      throw Object.assign(new Error('The pinned cloud SDK did not confirm a private-workspace Worker source and image.'),
-        { outcome: 'not_applied' });
-    }
-    assertAdmission(signal, fleetDeadlineAt);
-    const { createFlyRunner } = await import(pathToFileURL(path.join(config.provisioner.flujoCloudPath, 'lib', 'process.mjs')).href);
-    const selectedFly = createFlyRunner({ env: flyEnv, binary: flyAccount.flyctlPath });
-    const flyToken = (await selectedFly.run(['auth', 'token'])).trim();
-    const org = await cloudManaged.organization(diagnostic ? config.provisioner.org : flyAccount.orgSlug);
-    if (!flyToken || org !== intent.org || flyAccount.accountRef !== intent.accountRef) {
-      throw unknown('The selected Fly account or goal organization changed.');
-    }
-    assertNetworkVacant(await readFlyOrgApps({ org, token: flyToken, signal,
-      deadlineAt: fleetDeadlineAt }), intent.network);
-    const verifyFreshApp = async ({ app, kind, org: plannedOrg, network, accountRef }) => {
-      await verifyFreshAppPlan({ app, kind, org: plannedOrg, network, accountRef,
-        expectedOrg: org, expectedNetwork: intent.network, expectedAccountRef: intent.accountRef,
-        getPlans: () => intent.apps, token: flyToken, assertCurrent: assertAccountCurrent,
-        signal, deadlineAt: fleetDeadlineAt });
-    };
-    const verifyNetwork = async ({ allowPending = true, operation = 'dispatch' } = {}) => {
-      try {
-        await assertAccountCurrent({ operation });
-        return assertPlannedNetworkMembers(await readFlyOrgApps({ org, token: flyToken,
-          ...(operation === 'dispatch' ? { signal, deadlineAt: fleetDeadlineAt } : {}) }),
-          intent.network, intent.apps, { allowPending });
-      } catch (error) {
-        if (error.name === 'AbortError') throw error;
-        throw Object.assign(error, { code: error.code === 'NETWORK_PENDING'
-          ? 'NETWORK_PENDING' : 'NETWORK_MEMBERSHIP' });
-      }
-    };
-    const multiWorker = !diagnostic || !nativeCodex(config.model);
-    const { workerCap, teamLimits } = fleetExecutionLimits({ goal, config, diagnostic, native: !multiWorker });
-    if (!diagnostic && goal.providerId === 'private-h100') {
+    if (goal.providerId === 'private-h100') {
       if (typeof reservationId !== 'string' || !/^[\w-]{1,100}$/.test(reservationId)
         || typeof reserveCloud !== 'function' || !(maxUsd === Infinity && goal.unlimited === true || Number.isFinite(maxUsd)) || maxUsd <= 0) {
         throw Object.assign(new Error('Private Fly work needs a durable allowance reservation.'), { outcome: 'not_applied' });
@@ -729,278 +540,130 @@ export async function runFleetLeaf({ goal, task, dataDir, signal, maxUsd, fleetR
       cloudReserved = true;
       record({ state: 'budget-reserved', reservationId, reservedUsd: cloudAllowance });
     }
-    if (multiWorker) {
-      assertAdmission(signal, fleetDeadlineAt);
-      if (workerCap > 1) {
-        onStatus('Creating an owned relay for the bounded Fly Worker tree.');
-        relayCleanupConfirmed = false;
-        try {
-          relay = await createOwnedRelay({ journalPath: relayPath, flujoCloudPath: config.provisioner.flujoCloudPath,
-            org, network: intent.network, accountRef: intent.accountRef,
-            region: config.provisioner.region ?? 'iad',
-            flyEnv, flyctlPath: flyAccount.flyctlPath, verifyFreshApp, onPlannedApp: planApp,
-            verifyNetwork });
-        } catch (error) {
-          // The relay factory journals before the first Fly mutation. A failed
-          // creation is safe to dismiss only when its journal confirms no app
-          // remains; an ambiguous app must retain its exact intent.
-          let relayState;
-          try { relayState = JSON.parse(readFileSync(relayPath, 'utf8')); } catch { /* Keep the hold. */ }
-          relayCleanupConfirmed = relayFailureCleanupConfirmed(error, relayState,
-            existsSync(relayPath), relayPath);
-          if (relayState?.state === 'retired' && intent.apps[relayState.app]?.state === 'planned') {
-            retireApp(relayState.app);
-          }
-          if (!relayCleanupConfirmed) error.outcome = 'unknown';
-          throw error;
-        }
-        const relayState = JSON.parse(readFileSync(relayPath, 'utf8'));
-        if (relayState.app !== relay.app || relayState.appId !== relay.appId
-          || relayState.network !== intent.network || relayState.ownershipConfirmed !== true) {
-          throw unknown('The owned relay app receipt does not match the goal network intent.');
-        }
-        confirmApp({ app: relay.app, appId: relay.appId,
-          ownerMarker: `SEAGULLED_RELAY_OWNER_${relayState.owner.toUpperCase()}`, kind: 'relay' });
-        await verifyNetwork();
-        record({ state: 'relay-ready', relayApp: relay.app, relayMachineId: relay.machineId });
-      }
-    }
-    assertAdmission(signal, fleetDeadlineAt);
-    const topology = fleetTopology(goal, { workerCap, relay: Boolean(relay) });
-    const provisioner = await flyProvisioner({ ...config.provisioner, templateWorkspace: bootWorkspace,
-      ...(!diagnostic ? {resolveImage:productImageResolver(config.provisioner.flujoCloudPath)} : {}),
-      memoryMb: goal.memoryMb ?? 4096,
-      source: workerSource,
-      fleetReachable: Boolean(relay), concurrency: 1,
-      initialWorkers: topology.initialWorkers,
-      teamLimits, specialists:teamProfile(goal), flyEnv, cloudDirectory, network: intent.network,
-      accountRef: intent.accountRef,
-      verifyFreshApp, onPlannedApp: planApp, onConfirmedApp: confirmApp, onRetiredApp: retireApp,
-      verifyNetwork });
-    const observeWorkerConversations = async (worker, { operation = 'dispatch' } = {}) => {
-      if (localConversations.some((entry) => entry.workerId === worker.id)) return;
-      const runs = Object.values(controller.registry.state.runs).filter((run) => run.workerId === worker.id);
-      if (runs.length !== 1 || runs[0].state !== 'completed') {
-        throw unknown(`Worker ${worker.id} has no single completed original conversation to verify.`);
-      }
-      let connection;
-      try {
-        connection = await controller.connect(worker.target, { operation });
-        const observed = verifiedLocalConversations(await connection.client.descendants(runs[0].conversationId),
-          runs[0].conversationId, teamLimits.concurrency, { requireCompleted: goal.workerTopologyVersion === 3 });
-        localConversations.push({ workerId: worker.id, leadConversationId: runs[0].conversationId,
-          children: observed });
-        record({ localConversations });
-      } catch (error) {
-        if (error.localConversations) record({ localConversationMismatch: {
-          workerId: worker.id, children: error.localConversations,
-        } });
-        throw error;
-      } finally { await connection?.close().catch(() => undefined); }
-    };
-    controller = new Controller({ registryPath, operatorToken: randomBytes(32).toString('base64url'),
-      publicUrl: 'http://127.0.0.1:1', remoteUrl: relay?.remoteUrl,
-      provisioner, onActivity: onWorker, log: () => undefined, runTimeoutMs, deadlineAt: fleetDeadlineAt,
-      maxRunsPerWorker: [2, 3].includes(goal.workerTopologyVersion) ? 1 : undefined,
-      specialists: teamProfile(goal),
-      beforeRetire: async ({ worker, target }) => {
-        if (target.kind !== 'fly') return;
-        await verifyNetwork({ operation: 'cleanup' });
-        if ([2, 3].includes(goal.workerTopologyVersion) && Object.values(controller.registry.state.runs)
-          .some((run) => run.workerId === worker.id && run.state === 'completed')) {
-          try { await observeWorkerConversations(worker, { operation: 'cleanup' }); }
-          catch (error) {
-            localConversationErrors.push({ workerId: worker.id, detail: String(error.message).slice(0, 200) });
-            record({ localConversationErrors });
-          }
-        }
-        try {
-          onStatus(`Collecting owned output from Worker ${worker.name}.`);
-          const collected = await collectFlyArtifacts({ target, goalId: goal.id, workerId: worker.id,
-            dataDir, flujoCloudPath: config.provisioner.flujoCloudPath, managed: cloudManaged });
-          artifacts.push(...collected);
-          record({ artifactCount: artifacts.length });
-        } catch (error) {
-          artifactErrors.push({ workerId: worker.id, detail: String(error.message).slice(0, 200) });
-          record({ artifactCaptureIncomplete: artifactErrors });
-          const deliveredRun = Object.values(controller.registry.state.runs).some((run) => run.workerId === worker.id
-            && run.state === 'completed');
-          if (deliveredRun) throw new Error('Completed Worker output is not safely captured. Preserve its exact sandbox.');
-        }
-      } });
-    const address = await controller.listen(0, '127.0.0.1');
-    controller.publicUrl = `http://127.0.0.1:${address.port}`;
-    assertAdmission(signal, fleetDeadlineAt);
-    await relay?.start(controller.publicUrl);
-    assertAdmission(signal, fleetDeadlineAt);
-    const fleetGoal = controller.registry.createGoal({ id: goal.id, text: goal.text, limits: topology.limits,
-      ...(goal.workerTopologyVersion === 3 ? { maxTotalWorkers: workerCap } : {}) });
-    fleetGoal.teamLimits = teamLimits; controller.registry.save();
-    const root = controller.registry.reserve({ goalId: fleetGoal.id, role: 'supervisor', name: 'Todd' }).worker;
-    controller.registry.enroll(root.id, { kind: 'external', origin: config.supervisor.origin, workspace: bootWorkspace });
-    onStatus(`Staffing ${topology.initialWorkers} isolated Fly Worker Machine${topology.initialWorkers === 1 ? '' : 's'}; billing remains pending.`);
+    await assertAccountCurrent();
+    const bundlePath = path.join(goalDirectory, 'factory-sdk.tgz');
+    sdk.packFactorySdk(bundlePath);
+    onStatus(`Staffing ${workerCap} isolated Fly Worker Machine${workerCap === 1 ? '' : 's'}; billing remains pending.`);
+    for (const worker of workers) announce(worker, 'provisioning');
+    accepted = true;
     record({ state: 'provisioning' });
-    staffOwnedTeam(controller, root, { task: `${task}\n\nSave final deliverable files under `
-      + `/data/flujo/workspaces/${bootWorkspace}/seagulled-output in your own Worker workspace. `
-      + 'Report paths relative to seagulled-output. Each child Worker must produce its own files.',
-    workerCap: topology.initialWorkers, localChildTarget: teamLimits.concurrency, onReserved: (worker) => {
-      child ??= worker;
-      remoteAccepted = true;
-      record({ state: 'provisioning', workerId: child.workerId });
-    }, onStaffed: (run, runs) => {
-      if (child?.workerId === run.workerId) child = run;
-      staffed = [...runs]; remoteAccepted = true;
-      record({ state: 'accepted', workerId: child.workerId, runId: child.runId,
-        staffedRuns: staffed.map((item) => ({ workerId: item.workerId, runId: item.runId })) });
-    } });
-    const settled = [];
-    for (const staffedRun of staffed) {
-      while (true) {
-        if (signal?.aborted) throw unknown('Fly work was interrupted. The original runs and Workers need reconciliation.');
-        if (Date.now() >= fleetDeadlineAt) throw unknown('The Fly fleet reached its transport deadline. Preserve its original runs for reconciliation.');
-        const current = await controller.waitRun('operator', { runId: staffedRun.runId, timeoutMs: 10_000 });
-        if (current.state !== 'running') { settled.push(current); break; }
-        await sleep(0);
-      }
+    await fleet.deploy({ runId: intent.app, app: intent.app, org: intent.org, network: intent.network, goal: 'Wait for operator messages; each one is your assignment.',
+      machines: workerCap, cpuKind: 'shared', cpus: 2, memoryMb: goal.memoryMb ?? 4096, diskGb: 10, region: 'iad', supervision: 'operator', monitorIntervalMs: 4000, ...program.plan },
+    { image, bundlePath, ...(program.key ? { providerKey: program.key } : {}) });
+    record({ state: 'waiting-for-workers', machines: fleet.snapshot().machines.length });
+    const sessions = workerCap * program.plan.agentsPerMachine;
+    const enrolled = Date.now() + enrolTimeoutMs;
+    for (;;) {
+      stopped(); deadlineLeft();
+      let status = null;
+      try { status = await fleet.request('/operator/status'); }
+      catch { /* The first Machine is still installing its programs. */ }
+      if (status?.agents?.length === sessions && status.agents.every((agent) => agent.nativeRuntime?.threadId)) break;
+      if (Date.now() >= enrolled) throw unknown('The Fly Workers did not become ready in time.');
+      await sleep(pollMs);
     }
-    result = settled[0];
-    const failed = settled.find((entry) => entry.state !== 'completed');
-    if (failed) {
-      let failureDiagnostic = { readStatus: null, conversationStatus: failed.state };
-      let failureRead;
-      let connection;
-      try {
-        const worker = controller.registry.worker(failed.workerId);
-        connection = await controller.connect(worker.target);
-        const run = controller.registry.run(failed.runId);
-        failureRead = await connection.client.conversation(run.conversationId);
-        failureDiagnostic = conversationFailure(failureRead);
-      } catch { /* Preserve a bounded unavailable diagnostic; never replay the run. */ }
-      finally { await connection?.close().catch(() => undefined); }
-      record({ failureDiagnostic, failedRunId: failed.runId });
-      if (!diagnostic && failureRead) recordConfirmedQuotaHold({ dataDir, model: config.model,
-        providerId: goal.providerId, goalId: goal.id, runId: failed.runId, read: failureRead });
-      throw unknown(`Fly run ${failed.runId} ended as ${failed.state}. Its original record is retained.`);
+    for (const worker of workers) announce(worker, 'ready');
+    onStatus('The company is ready; sending each Worker its assignment.');
+    record({ state: 'accepted' });
+    await assertAccountCurrent();
+    // Everyone starts together; the lead gets the others' reports when they have finished.
+    const firstRound = [];
+    for (const worker of [...workers].reverse()) {
+      firstRound.push(await sendJob(`company-${worker.agent}-1`, worker.agent, workerBrief({ task, index: worker.index, workerCap, localChildTarget: program.localChildTarget, profile })));
+      announce(worker, 'dispatching');
     }
-    const unfinished = Object.values(controller.registry.state.runs).filter((run) => run.goalId === goal.id
-      && run.id !== child.runId && ['running', 'unknown'].includes(run.state));
-    if (unfinished.length) throw unknown('A descendant Fly run has not reached a confirmed terminal state. Preserve the original tree for reconciliation.');
-    for (const staffedRun of staffed) {
-      await observeWorkerConversations(controller.registry.worker(staffedRun.workerId));
+    for (const member of members) {
+      firstRound.push(await sendJob(`company-${member.agent}-1`, member.agent, workerBrief({ task, index: member.member, workerCap, memberOf: member.worker.agent })));
     }
-    const staffingProof = goal.workerTopologyVersion === 3
-      ? verifiedTeamStaffing(localConversations, workerCap, teamLimits.concurrency) : null;
-    record({ state: 'run-completed' });
+    const settled = await waitForTurns(firstRound, runTimeoutMs);
+    traces = textTraces(tracesFile);
+    const failedJobs = settled.filter((job) => job.status !== 'completed');
+    for (const job of settled) {
+      const worker = workers.find((entry) => entry.agent === job.agent);
+      if (worker) announce(worker, job.status === 'completed' ? 'completed' : 'failed');
+    }
+    if (failedJobs.length) {
+      const failure = turnFailure(traces, failedJobs[0].agent);
+      record({ state: 'run-failed', failureDiagnostic: { agent: failedJobs[0].agent, status: failure.status, providerHttpStatus: failure.providerHttpStatus, code: failure.code } });
+      recordConfirmedQuotaHold({ dataDir, model: discovered.config.model, providerId: goal.providerId, goalId: goal.id, workerId: failedJobs[0].agent, failure });
+      throw Object.assign(new Error('The isolated Fly team failed. Its Workers were retired; inspect the saved run for the provider error.'), { outcome: 'failed' });
+    }
+    deliveredWork = true;
+    const verifiedSessions = new Map(settled.map((job) => [job.agent, job]));
+    let leadTurn = verifiedSessions.get('m0-a0');
+    if (workerCap > 1 || members.length) {
+      const reports = settled.filter((job) => job.agent !== 'm0-a0').map((job) => `--- ${job.agent} ---\n${String(lastAnswer(traces, job.agent)).slice(0, 12_000)}`).join('\n\n');
+      onStatus('Workers reported; the team lead is reconciling their results.');
+      announce(workers[0], 'dispatching');
+      const [closing] = await waitForTurns([await sendJob('company-m0-a0-2', 'm0-a0',
+        `All your other Workers have finished. Their final reports follow. Compare them with your own findings, resolve conflicts, and write the company's final report: what was actually run and checked, which conversations completed, the paths of the files saved under /data/results, and what remains uncertain.\n\n${reports}`, leadTurn.turnId)], 30 * 60_000);
+      traces = textTraces(tracesFile);
+      announce(workers[0], closing.status === 'completed' ? 'completed' : 'failed');
+      if (closing.status !== 'completed') throw Object.assign(new Error('The team lead could not reconcile the Worker reports. Its Workers were retired; inspect the saved run.'), { outcome: 'failed' });
+      leadTurn = closing;
+    }
+    // A Worker's staffing is read from its own trace, or from the sessions FACTORY started for it.
+    const localConversations = workers.map((worker) => ({ workerId: worker.workerId, leadConversationId: verifiedSessions.get(worker.agent).threadId,
+      children: program.members
+        ? members.filter((member) => member.worker === worker).map((member) => ({ id: verifiedSessions.get(member.agent).threadId, status: verifiedSessions.get(member.agent).status }))
+        : verifiedLocalConversations(traces, worker.agent, program.localChildTarget, { requireCompleted: goal.workerTopologyVersion === 3 }) }));
+    const childCount = teamLimits.concurrency;
+    const staffingProof = goal.workerTopologyVersion === 3 ? verifiedTeamStaffing(localConversations, workerCap, childCount) : null;
+    record({ state: 'run-completed', localConversations });
+    // A lead can end a turn without writing anything. The Workers' own reports are then the result, never an old progress note.
+    let text = lastAnswer(traces, 'm0-a0', leadTurn.turnId);
+    if (!text) {
+      text = settled.map((job) => [job.agent, lastAnswer(traces, job.agent)]).filter(([, answer]) => answer).map(([agent, answer]) => `--- ${agent} ---\n${answer}`).join('\n\n');
+      onStatus('The team lead wrote no closing report, so the result holds the reports the Workers wrote.');
+    }
+    await retire({ capture: true });
     const artifactDir = path.join(dataDir, 'artifacts', goal.id);
     const resultPath = path.join(artifactDir, 'fly-result.txt');
-    const bytes = Buffer.from(result.result ?? '', 'utf8');
+    const bytes = Buffer.from(text, 'utf8');
     try {
       mkdirSync(artifactDir, { recursive: true, mode: 0o700 });
       writeFileSync(resultPath, bytes, { flag: 'wx', mode: 0o600 });
       artifacts.push({ path: resultPath, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), kind: 'run-result' });
     } catch { onStatus('The Fly result was received, but its local transcript could not be saved.'); }
-    onStatus('Fly Worker finished; retiring the owned sandbox.');
-    const retirement = await controller.retire('operator', { workerId: child.workerId });
-    if (retirement.cleanupUnconfirmed?.length) throw unknown('Fly Worker cleanup is unconfirmed. Its original record blocks further provisioning.');
-    cleanupConfirmed = true;
-    if ([2, 3].includes(goal.workerTopologyVersion) && (localConversationErrors.length || Object.values(controller.registry.state.workers)
-      .filter((worker) => worker.depth > 0).some((worker) =>
-        !localConversations.some((entry) => entry.workerId === worker.id)))) {
-      throw unknown('A spawned Worker lacks its verified conversation receipt. Preserve the private tree for reconciliation.');
-    }
-    if (artifactErrors.length) throw Object.assign(new Error('Owned Fly output capture was incomplete. The worker tree was retired; inspect the private capture receipts.'),
-      { outcome: 'failed' });
-    controller.registry.finishGoal(goal.id, result.result);
-    record({ state: 'fly-retired', flyCleanupConfirmed: true });
-    delivered = { available: true, text: result.result, artifacts, usage: { inputTokens: 0, outputTokens: 0, costUsd: null, costKind: 'unknown',
-      reservedUsd, billingPending: true, ...(cloudReserved ? { reservationId } : {}) },
-      sandbox: { kind: 'fly', workerId: child.workerId, runId: child.runId, retired: true, cleanupConfirmed: true,
-        verification: staffingProof ? 'original-worker-hierarchy-v2' : 'original-worker-hierarchy-v1', relayUsed: Boolean(relay),
-        ...(staffingProof ?? {}),
-        workerCount: localConversations.length, initialWorkerCount: staffed.length,
-        teamLeadRuns: staffed.map((item) => item.runId),
+    record({ state: 'completed' });
+    delivered = { available: true, text, artifacts, usage: usage(traces),
+      sandbox: { kind: 'fly', workerId: workers[0].workerId, runId: leadTurn.turnId, retired: true, cleanupConfirmed: true,
+        verification: 'factory-fleet-v1', ...(staffingProof ?? {}),
+        workerCount: localConversations.length, initialWorkerCount: workers.length,
+        teamLeadRuns: workers.map((worker) => verifiedSessions.get(worker.agent).turnId),
         localConversationCount: localConversations.reduce((sum, item) => sum + item.children.length, 0),
         conversationCountVerified: localConversations.length + localConversations.reduce((sum, item) => sum + item.children.length, 0) } };
-    if (!diagnostic && [2, 3].includes(goal.workerTopologyVersion)) {
-      try { onCompany({ verifiedWorkers: localConversations.length,
-        verifiedChildConversations: delivered.sandbox.localConversationCount }); }
-      catch { /* A status listener cannot invalidate a verified Worker result. */ }
-    }
+    try { onCompany({ verifiedWorkers: localConversations.length, verifiedChildConversations: delivered.sandbox.localConversationCount }); }
+    catch { /* A status listener cannot invalidate a verified Worker result. */ }
     return delivered;
   } catch (error) {
-    if (typeof error?.message === 'string' && config.model.apiKey) {
-      error.message = error.message.replaceAll(config.model.apiKey, '[redacted]');
-    }
-    const usage = remoteAccepted || !relayCleanupConfirmed || cloudReserved ? { inputTokens: 0, outputTokens: 0, costUsd: null, costKind: 'unknown',
-      reservedUsd, billingPending: true, ...(cloudReserved ? { reservationId } : {}) } : undefined;
-    if (remoteAccepted && child && controller && !cleanupConfirmed) {
+    const key = program.key;
+    if (typeof error?.message === 'string' && key) error.message = error.message.replaceAll(key, '[redacted]');
+    if (accepted && !cleanupConfirmed) {
       try {
-        const retirement = await controller.retire('operator', { workerId: child.workerId });
-        cleanupConfirmed = !retirement.cleanupUnconfirmed?.length;
-      } catch { /* Preserve the original registry and uncertain cleanup. */ }
-    }
-    if (!remoteAccepted && /^POST \/api\/workspaces failed \(HTTP 500\)/.test(String(error.message))) {
-      try {
-        workspaceAbsent = !(await bootCleanup.workspaces()).includes(bootWorkspace);
-      } catch { workspaceAbsent = false; }
-      if (workspaceAbsent) {
-        bootCreated = false;
-        bootCleanupConfirmed = true; // GET confirmed no workspace remains; setup may have rolled back a partial directory.
-        recordSourceHold(dataDir, config.supervisor.origin, bootWorkspace, 'Workspace creation returned HTTP 500; exact-name readback found no workspace.');
+        // The original outcome stands; retirement only ends the spending.
+        traces = textTraces(tracesFile);
+        await retire({ capture: deliveredWork });
+      } catch (cleanupError) {
+        record({ flyCleanupConfirmed: false, cleanupError: String(cleanupError.message).slice(0, 200) });
+        for (const worker of workers) announce(worker, 'cleanup-unconfirmed');
       }
     }
-    record({ state: workspaceAbsent ? 'preflight-not-applied'
-      : remoteAccepted ? error.outcome === 'failed' && cleanupConfirmed ? 'completed-but-unverified'
-        : result?.state === 'failed' && cleanupConfirmed ? 'run-failed' : 'unknown'
-        : !relayCleanupConfirmed ? 'relay-cleanup-unknown' : bootRunUnknown ? 'boot-run-unknown' : 'failed-before-dispatch',
-      flyCleanupConfirmed: cleanupConfirmed,
-      error: String(error.message).slice(0, 500) });
-    if (workspaceAbsent) return { available: false, detail: 'Local FLUJO could not create an isolated workspace. Native provider work remains available.' };
-    if (remoteAccepted && !cleanupConfirmed) throw Object.assign(unknown(`${error.message} Fly cleanup is unconfirmed; do not submit replacement work.`), { usage });
-    if (remoteAccepted && result?.state === 'failed') {
-      throw Object.assign(new Error('The isolated Fly team failed. Its worker was retired; inspect the saved run for the provider error.'), { outcome: 'failed', usage });
-    }
-    if (remoteAccepted && error.outcome === 'failed' && cleanupConfirmed) throw Object.assign(error, { usage });
-    if (remoteAccepted) throw Object.assign(unknown(`${error.message} The original Fly run outcome must be reconciled before replay.`), { usage });
-    if (cloudReserved) error = unknown(`${error.message} The private Fly allowance remains pending until cloud billing is reconciled.`);
+    record({ state: error?.name === 'AbortError' ? 'stopped' : error.outcome === 'failed' && cleanupConfirmed ? 'run-failed' : accepted ? 'unknown' : 'failed-before-dispatch',
+      flyCleanupConfirmed: cleanupConfirmed, error: String(error.message).slice(0, 500) });
+    const held = accepted || cloudReserved ? usage(traces) : undefined;
+    if (accepted && !cleanupConfirmed) throw Object.assign(unknown(`${error.message} Fly cleanup is unconfirmed; do not submit replacement work.`), { usage: held });
+    if (error?.name === 'AbortError' || error.outcome === 'failed') { if (held) error.usage = held; throw error; }
+    if (accepted) throw Object.assign(unknown(`${error.message} The original Fly run outcome must be reconciled before replay.`), { usage: held });
+    if (cloudReserved) { const pending = unknown(`${error.message} The private Fly allowance remains pending until cloud billing is reconciled.`); pending.usage = held; throw pending; }
     if (!error.outcome) error.outcome = 'not_applied';
-    if (usage) error.usage = usage;
     throw error;
   } finally {
-    await controller?.close().catch(() => undefined);
-    if (relay) {
-      if (remoteAccepted && !cleanupConfirmed) {
-        await relay.close().catch(() => undefined);
-        relayCleanupConfirmed = false; // Keep the exact relay app journal for held Worker reconciliation.
-      } else {
-        try {
-          relayCleanupConfirmed = await relay.retire();
-          if (relayCleanupConfirmed) { retireApp(relay.app); await verifyNetwork({ operation: 'cleanup' }); }
-        }
-        catch { relayCleanupConfirmed = false; }
-      }
-    }
-    // The boot workspace is ours, but retain it if remote cleanup is uncertain.
-    if (bootCreated && !bootRunUnknown && (!remoteAccepted || cleanupConfirmed)) {
-      for (let attempt = 0; attempt < 3 && !bootCleanupConfirmed; attempt++) {
-        try { await bootCleanup.deleteWorkspace(bootWorkspace); bootCleanupConfirmed = true; }
-        catch { if (attempt < 2) await sleep(1000); }
-      }
-    }
-    record({ bootCleanupConfirmed, relayCleanupConfirmed,
-      ...(delivered ? { state: bootCleanupConfirmed && relayCleanupConfirmed ? 'completed' : 'cleanup-unknown' } : {}) });
-    if (!relayCleanupConfirmed && !remoteAccepted) {
-      throw Object.assign(unknown('Owned relay cleanup is unconfirmed; inspect its exact private intent before another cloud attempt.'),
-        { outcome: 'unknown', usage: { inputTokens: 0, outputTokens: 0, costUsd: null, costKind: 'unknown',
-          reservedUsd, billingPending: true } });
-    }
-    if (delivered) {
-      delivered.sandbox.bootCleanupConfirmed = bootCleanupConfirmed;
-      delivered.sandbox.relayCleanupConfirmed = relayCleanupConfirmed;
-      if (!bootCleanupConfirmed || !relayCleanupConfirmed) {
-        throw Object.assign(unknown('Owned boot or relay cleanup is unconfirmed; inspect the private intent before any new cloud work.'),
-          { usage: delivered.usage });
-      }
-    }
+    await fleet.disconnect?.().catch(() => undefined);
   }
+}
+
+/** The private Codex login files this computer owns; only short-lived access tokens leave it. */
+export function codexAuthFile(env = process.env) {
+  return path.join(env.CODEX_HOME || path.join(homedir(), '.codex'), 'auth.json');
 }

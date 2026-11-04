@@ -1,5 +1,11 @@
 # Release candidate contracts
 
+## Company Workers on FACTORY (0.4.0)
+
+FACTORY owns the fleet. `src/swarm/fleet.mjs` maps a goal to a `FactoryCloudLiteFleet` plan: one Machine per Worker, one lead on each, local agents as native FLUJO subflows, and the provider route as `plan.modelProvider` with its key from the route. A Codex subscription route runs native Codex sessions on the Machines instead, with its login kept on this computer. The contracts in the older sections below that describe the recovered `upstream/swarm-teams` controller, the relay, the local Source and the native Source are history; that code has been removed.
+
+The product guarantees stay where they were. Provider: `fleetRoute` is backend-only. Runtime: `createRuntime` no longer starts a local FLUJO. Swarm: `runFleetLeaf` returns the same result shape with `sandbox.verification: 'factory-fleet-v1'`, and spend remains estimated and pending. Saved goals keep the receipts they were written with. `SwarmCoordinator`'s two admission stages stay: `source` now checks the Fly account and the installed cloud helpers, and `ready` the provider route.
+
 Shared checkout: the current repository.
 
 Publication scope (2026-10-06): The accepted visual is the existing 12-second forward/reverse Todd clip, played continuously as the fullscreen background. Listening, narration, goals and Advanced do not restart it. Separate scene generation and golf transitions are superseded by this choice. Ship the current desktop with this loop; add no further features or fixes. Parent owns attribution, versioning, clean packaging and GitHub publication; Desktop owns the continuous playback integration and its focused verification.

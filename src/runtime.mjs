@@ -1,11 +1,10 @@
-import { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync, unlinkSync, realpathSync, lstatSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync, unlinkSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { ProviderManager } from './providers/index.mjs';
 import { productHelperRoot, productProviderCommands } from './product-helpers.mjs';
-import { createProductSource } from './product-source.mjs';
 import { validateInferenceOptions } from './inference-options.mjs';
 import { DEFAULT_PRIVATE_MODEL, PRIVATE_MODELS } from './providers/private-h100.mjs';
 import { SwarmCoordinator } from './swarm/index.mjs';
@@ -44,7 +43,6 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
   fleetRunner = runFactoryFleet, executionMode = 'company' } = {}) {
   mode(executionMode);
   if (sourceProvider !== undefined && typeof sourceProvider !== 'function') throw new Error('The owned source getter is invalid.');
-  if (sourceProvider?.closeGoal !== undefined && typeof sourceProvider.closeGoal !== 'function') throw new Error('The owned Source cleanup is invalid.');
   if (typeof fleetRunner !== 'function') throw new Error('The owned fleet runner is invalid.');
   for (const inspector of [sourceInspector, readyInspector]) {
     if (inspector !== undefined && typeof inspector !== 'function') throw new Error('The owned company inspector is invalid.');
@@ -253,40 +251,9 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
     }
     events.emit('event', copy(publicEvent)); publish();
   }
-  const productSource = !swarm && !fleetSource && !sourceProvider ? createProductSource({dataDir}) : null;
-  const ownedSourceProvider = sourceProvider && (async options => {
-    const job = jobs.get(options.goalId), goal = find(options.goalId);
-    if (!job || job.controller.signal !== options.signal || !company(goal)) {
-      throw Object.assign(new Error('The owning company preparation is unavailable.'), {code:'NATIVE_GOAL_SCOPE'});
-    }
-    // Source construction precedes final admission. Its private transport may
-    // be assembled now, but effects only reach this actual job's admitted scope.
-    const admitted = () => {
-      if (jobs.get(goal.id) !== job || job.controller.signal !== options.signal || !job.nativeScope?.scope) {
-        throw Object.assign(new Error('The owning company execution is not admitted.'), {code:'NATIVE_GOAL_SCOPE'});
-      }
-      return job.nativeScope.scope;
-    };
-    const nativeScope = Object.freeze({signal:options.signal,
-      async assertCurrent(actor){return admitted().assertCurrent(actor);},
-      async commit(task,actor){return admitted().commit(task,actor);},
-      async retainUncertainty(context,evidence){return admitted().retainUncertainty(context,evidence);}});
-    job.sourcePrepared = true;
-    return sourceProvider({...options,goal:copy(goal),nativeScope});
-  });
   const coordinator = swarm || new SwarmCoordinator({ providers: manager, onEvent, dataDir: path.join(dataDir, 'swarm'),
     sourceInspector, readyInspector,
-    sourceBinding: fleetSource, sourceProvider: ownedSourceProvider ?? (productSource ? options=>productSource.source(options) : undefined),
-    fleetRunner: input => {
-      const job = jobs.get(input.goal?.id);
-      if (!job?.nativeScope?.scope || job.controller.signal !== input.signal) {
-        throw Object.assign(new Error('The owning runtime execution is unavailable.'), { code: 'NATIVE_GOAL_SCOPE' });
-      }
-      // Resolve from the owning job, rather than trusting a coordinator/caller
-      // scope. The current generic runner may ignore this private capability;
-      // the native Source composition consumes it without another scheduler.
-      return fleetRunner({ ...input, nativeScope: job.nativeScope.scope });
-    }, fleet: process.env.SEAGULLED_DISABLE_FLEET === '1' ? undefined : 'auto' });
+    sourceBinding: fleetSource, sourceProvider, fleetRunner, fleet: process.env.SEAGULLED_DISABLE_FLEET === '1' ? undefined : 'auto' });
   // Test/integration injection supports the same event sink without a mock-only runtime branch.
   if (swarm?.setEventHandler) swarm.setEventHandler(onEvent);
   const privateLifecycle = () => typeof manager.privateComputeEnable === 'function'
@@ -362,79 +329,6 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
     }
     state.providers = manager.publicState(); publish();
   }
-  // Runtime controls only. Controller authentication, immutable Source plans,
-  // native profile and image qualification remain separate mandatory gates.
-  function nativeGoalScope(goal, job) {
-    const intent = () => JSON.stringify({ id: goal.id, text: goal.text, providerId: goal.providerId,
-      model: goal.model, reasoningEffort: goal.reasoningEffort, budgetUsd: goal.budgetUsd,
-      unlimited: goal.unlimited, maxWorkers: goal.maxWorkers, conversationsPerWorker: goal.conversationsPerWorker,
-      memoryMb: goal.memoryMb, privateH100: goal.privateH100 });
-    const acceptedIntent = intent();
-    const acceptedAdmission = job.admission;
-    const acceptedRoute = JSON.stringify(acceptedAdmission?.fleetRoute);
-    let ending = false, uncertaintyPersisted = false, tail = Promise.resolve();
-    const refuse = () => { throw Object.assign(new Error('The native goal scope is no longer current.'), { code: 'NATIVE_GOAL_SCOPE' }); };
-    function local(actor) {
-      let lease;
-      try {
-        const stat = lstatSync(lockPath);
-        if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > 1024) refuse();
-        lease = JSON.parse(readFileSync(lockPath, 'utf8'));
-      } catch { refuse(); }
-      if (closed || ending || jobs.get(goal.id) !== job || job.admission !== acceptedAdmission
-        || lease?.pid !== process.pid || lease?.owner !== owner || actor?.goalId !== goal.id
-        || !company(goal) || job.phase !== 'executing' || goal.status !== 'running'
-        || goal.deletedAt || goal.recoveryHold || job.pauseRequested || state.swarm.admissionPaused
-        || intent() !== acceptedIntent || goal.spentUsd + (goal.pendingUsd || 0) >= budgetCeiling(goal)) refuse();
-      job.controller.signal.throwIfAborted();
-    }
-    async function assertCurrent(actor) {
-      local(actor);
-      if (typeof manager.fleetRoute !== 'function' || !acceptedAdmission?.fleetRoute?.available
-        || acceptedAdmission.fleetRoute.providerId !== goal.providerId) refuse();
-      const route = await manager.fleetRoute(goal.providerId, goal.id,
-        { model: goal.model, reasoningEffort: goal.reasoningEffort });
-      local(actor);
-      if (!route?.available || JSON.stringify(route) !== acceptedRoute) refuse();
-    }
-    const scope = Object.freeze({
-      signal: job.controller.signal, assertCurrent,
-      commit(task, actor) {
-        if (typeof task !== 'function') return Promise.reject(new Error('A native mutation callback is required.'));
-        const operation = tail.then(async () => {
-          await assertCurrent(actor);
-          try {
-            const result = await task();
-            await assertCurrent(actor);
-            return result;
-          } catch {
-            if (!uncertaintyPersisted) {
-              try { await scope.retainUncertainty(undefined, { ticket: randomUUID() }); }
-              catch { await new Promise(() => {}); } // Failed durable retention keeps this fence held.
-            }
-            throw Object.assign(new Error('A native Source mutation outcome is unconfirmed.'), { code: 'UNKNOWN', unknown: true });
-          }
-        });
-        tail = operation.catch(() => {});
-        return operation;
-      },
-      async retainUncertainty(_context, evidence) {
-        if (jobs.get(goal.id) !== job || !evidence || typeof evidence.ticket !== 'string'
-          || !/^[a-f0-9-]{36}$/.test(evidence.ticket)) refuse();
-        goal.nativeUncertainty ||= [];
-        if (!goal.nativeUncertainty.some(item => item.ticket === evidence.ticket)) {
-          if (goal.nativeUncertainty.length >= 100) refuse();
-          goal.nativeUncertainty.push({ ticket: evidence.ticket, executionId: job.observationId, at: now() });
-        }
-        goal.recoveryHold = true; goal.status = 'interrupted';
-        goal.error = 'A native Source mutation needs reconciliation before more work can run.';
-        publish(); // Persistence must succeed before the owning mutation fence releases.
-        uncertaintyPersisted = true;
-        job.controller.abort(new Error('Native Source outcome needs reconciliation.'));
-      },
-    });
-    return { scope, async close() { ending = true; await tail; } };
-  }
   function start(goal) {
     if (closed || goal.deletedAt || jobs.has(goal.id) || goal.recoveryHold || goal.status !== 'queued') return;
     if (state.swarm.admissionPaused) { goal.error = 'The team is paused. Resume the team to start new work.'; publish(); return; }
@@ -472,10 +366,9 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
           goal.status = 'running'; goal.execution.readiness = 'working';
           job.phase = 'executing'; publish();
         }
-        if (company(goal)) job.nativeScope = nativeGoalScope(goal, job);
         const result = await coordinator.execute({ goal: copy(goal), signal: controller.signal,
-          observationId: job.observationId, ...(company(goal) ? { admission: job.admission, nativeScope: job.nativeScope.scope } : {}) });
-        if (goal.recoveryHold) throw Object.assign(new Error('The native Source outcome needs reconciliation.'), { code: 'UNKNOWN', unknown: true });
+          observationId: job.observationId, ...(company(goal) ? { admission: job.admission } : {}) });
+        if (goal.recoveryHold) throw Object.assign(new Error('The company outcome needs reconciliation.'), { code: 'UNKNOWN', unknown: true });
         // The coordinator emits each terminal receipt once. Aggregates may include
         // prior checkpoints and are never charged again after a resume.
         if (controller.signal.aborted) {
@@ -507,14 +400,6 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
           if (!closed) message('todd', `The team hit a blocker: ${goal.error}`, goal.id);
         }
       } finally {
-        await job.nativeScope?.close();
-        if (job.sourcePrepared && sourceProvider?.closeGoal) {
-          try { await sourceProvider.closeGoal(goal.id); }
-          catch {
-            goal.status = 'interrupted'; goal.recoveryHold = true;
-            goal.error = 'The owned Source cleanup needs reconciliation before more work can run.';
-          }
-        }
         await retirePrivate(goal, job);
         if (company(goal) && !['queued', 'running'].includes(goal.status)) {
           goal.execution.readiness = 'blocked';
@@ -762,7 +647,6 @@ export function createRuntime({ dataDir = defaultDataDir(), providers, swarm, vo
       for (const [goalId, job] of jobs) { find(goalId).status = 'pausing'; job.controller.abort(); }
       await Promise.all([...jobs.values()].map(j => j.promise));
       await coordinator.close?.(); await manager.close?.(); persist();
-      await productSource?.close();
       try { if (JSON.parse(readFileSync(lockPath, 'utf8')).owner === owner) unlinkSync(lockPath); } catch {}
       events.removeAllListeners();
     },

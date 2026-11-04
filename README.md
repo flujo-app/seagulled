@@ -4,11 +4,11 @@
 Talk to Todd. He delegates your goal to a team, checks what they bring back, and occasionally comes in and shits on everything.
 Download the Windows portable app from [Releases](https://github.com/flujo-app/seagulled/releases). Open it and tell Todd what you want done. 
 
-Version 0.3.0 includes the public [FACTORY 0.5.0 SDK](https://github.com/flujo-app/FACTORY/releases/tag/v0.5.0), FLUJO 3.48.1 and its cloud SDK. The Windows download bundles the product runtime and account helpers. FACTORY records durable dispatch; the recovered swarm engine owns Worker scheduling and retirement.
+Version 0.4.0 includes the public [FACTORY 0.7.1 SDK](https://github.com/flujo-app/FACTORY/releases/tag/v0.7.1) and its cloud helpers. Company Workers run on a FACTORY fleet: one Fly Machine per Worker, with FLUJO installed on each by FACTORY. The Windows download includes its account helpers, so there is nothing else to install.
 
 Goals default to ten requested Workers and ten total conversations per Worker. Requested counts, observed activity and verified execution remain separate. Budgets, model choices and pause/stop controls persist privately. Provider billing can remain unknown after work ends.
 
-The matching FLUJO Worker image is verified against an immutable release digest. Release checks use local tests, packaged application checks and read-only source/image verification. No fresh live cloud run was performed for 0.3.0; earlier dated acceptance does not establish current provider availability or billed spending.
+Worker Machines start from a Node image pinned by digest, and FACTORY checks each program it installs on them by checksum. Release checks use local tests and packaged application checks.
 
 See [build instructions](BUILD.md) for the exact public dependencies and source package.
 
